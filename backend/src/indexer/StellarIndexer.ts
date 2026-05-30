@@ -12,6 +12,7 @@
 import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
+import { cacheDeletePattern } from '../services/cache.service';
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -455,12 +456,28 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   try {
     await client.query('BEGIN');
 
-    // Update market status and outcome
+    // Update market status, winning_outcome, and resolved_at
     await client.query(
       `UPDATE markets
           SET status = 'resolved', outcome = $1, resolved_at = $2, oracle_used = $3, updated_at = NOW()
         WHERE market_id = $4`,
       [p.outcome, event.ledger_close_time, p.oracle_address ?? null, p.market_id],
+    );
+
+    // Insert OracleReport record
+    await client.query(
+      `INSERT INTO oracle_reports
+         (match_id, oracle_address, outcome, reported_at, signature, accepted, tx_hash)
+       VALUES ($1, $2, $3, $4, $5, TRUE, $6)
+       ON CONFLICT DO NOTHING`,
+      [
+        p.match_id ?? '',
+        p.oracle_address ?? '',
+        p.outcome ?? '',
+        event.ledger_close_time,
+        p.signature ?? '',
+        event.tx_hash,
+      ],
     );
 
     // Get all unique bettors for this market
@@ -485,6 +502,10 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   } finally {
     client.release();
   }
+
+  // Invalidate all Redis cache keys for this market
+  await cacheDeletePattern(`market:${p.market_id}*`);
+  await cacheDeletePattern(`markets:*`);
 }
 
 export async function handleMarketCancelled(event: RawStellarEvent): Promise<void> {

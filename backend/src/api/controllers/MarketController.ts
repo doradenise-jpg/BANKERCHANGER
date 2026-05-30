@@ -70,12 +70,12 @@ export async function getMarket(
 ): Promise<void> {
   try {
     const { market_id } = req.params;
+    if (!/^\d+$/.test(market_id)) {
+      throw AppError.badRequest('marketId must be a valid numeric string');
+    }
     const market = await MarketService.getMarketById(market_id);
     res.status(200).json(market);
   } catch (err) {
-    if (err instanceof AppError && err.statusCode === 404) {
-      return next(err);
-    }
     next(err);
   }
 }

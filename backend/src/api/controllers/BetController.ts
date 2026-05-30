@@ -7,6 +7,8 @@ import type { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { StrKey } from '@stellar/stellar-sdk';
 import * as BetService from '../../services/BetService';
+import * as MarketService from '../../services/MarketService';
+import { AppError } from '../../utils/AppError';
 
 const claimBodySchema = z.object({
   market_id: z.string().min(1, 'market_id is required'),
@@ -49,6 +51,56 @@ export async function claimWinnings(
     const { market_id, bettor_address, token_address } = parsed.data;
     const tx_hash = await BetService.claimWinnings(market_id, bettor_address, token_address);
     res.status(200).json({ tx_hash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/bets/:bettor_address/stats
+ *
+ * Returns aggregate stats for a Stellar address:
+ * total_wagered_xlm, total_winnings_xlm, total_bets, win_rate, favorite_fighter.
+ * Cached 60s. Returns zeroed stats (not 404) for addresses with no bets.
+ */
+export async function getBettorStats(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { bettor_address } = req.params;
+
+    if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
+      throw AppError.badRequest('Invalid Stellar address format');
+    }
+
+    const stats = await MarketService.getBettorStats(bettor_address);
+    res.status(200).json(stats);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/bets/:bettor_address
+ *
+ * Returns all bets placed by a given Stellar address.
+ */
+export async function getBetsByAddress(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { bettor_address } = req.params;
+
+    if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
+      throw AppError.badRequest('Invalid Stellar address format');
+    }
+
+    const bets = await BetService.fetchBetsByAddress(bettor_address);
+    res.status(200).json(bets);
   } catch (err) {
     next(err);
   }
