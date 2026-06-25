@@ -7,7 +7,9 @@
       "Bash(git checkout *)",
       "Bash(git commit -m 'fix\\(#133\\): Add Redis error event handler and graceful degradation *)",
       "Bash(git commit -m 'feat\\(#134\\): Configure Playwright baseURL and E2E tests in CI *)",
-      "Bash(git commit -m 'feat\\(#135\\): Add auth guard to /create page with informative message *)"
+      "Bash(git commit -m 'feat\\(#135\\): Add auth guard to /create page with informative message *)",
+      "Bash(cargo test *)",
+      "Bash(git commit -m 'feat\\(#132\\): Implement contract upgrade mechanism with bulk upgrade support *)"
     ]
   }
 }

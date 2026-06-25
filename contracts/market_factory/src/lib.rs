@@ -32,6 +32,7 @@ pub trait MarketInterface {
     ) -> Result<(), ContractError>;
     fn get_bets_by_address(env: Env, bettor: Address) -> Vec<BetRecord>;
     fn get_state(env: Env) -> Result<MarketState, ContractError>;
+    fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>;
 }
 
 #[contract]
@@ -479,6 +480,41 @@ impl MarketFactory {
             }
         }
         Ok(positions)
+    }
+
+    /// Upgrades all existing market contracts to a new WASM implementation.
+    /// This function iterates through all open markets and calls their upgrade function.
+    ///
+    /// # Errors
+    /// - `NotAdmin`: Caller is not the admin
+    /// - `MarketNotFound`: A market ID in OPEN_MARKETS doesn't exist in MARKET_MAP
+    ///
+    /// # Security
+    /// - Only the factory admin can call this function
+    /// - State is preserved in each market contract across the upgrade
+    pub fn upgrade_all_markets(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let market_ids: Vec<u64> = env.storage().persistent()
+            .get(&OPEN_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
+        let market_map: Map<u64, Address> = env.storage().persistent()
+            .get(&MARKET_MAP)
+            .unwrap_or_else(|| Map::new(&env));
+
+        for market_id in market_ids.iter() {
+            let market_address = market_map.get(market_id)
+                .ok_or(ContractError::MarketNotFound)?;
+            let market_client = MarketClient::new(&env, &market_address);
+            market_client.upgrade(&admin, &new_wasm_hash)?;
+        }
+
+        Ok(())
     }
 }
 
