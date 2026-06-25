@@ -101,8 +101,32 @@ describe('GET /api/markets', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 for limit > 100', async () => {
+  it('accepts limit = 200 (at maximum)', async () => {
+    (MarketService.getMarkets as jest.Mock).mockResolvedValue({ markets: [], total: 0 });
     const res = await request(app).get('/api/markets?limit=200');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ limit: 200 });
+  });
+
+  it('returns 400 for limit > 200', async () => {
+    const res = await request(app).get('/api/markets?limit=201');
+    expect(res.status).toBe(400);
+  });
+
+  it('validates dateFrom as valid date', async () => {
+    (MarketService.getMarkets as jest.Mock).mockResolvedValue({ markets: [], total: 0 });
+    const validDate = '2026-06-25T12:00:00Z';
+    const res = await request(app).get(`/api/markets?dateFrom=${encodeURIComponent(validDate)}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 400 for invalid dateFrom format', async () => {
+    const res = await request(app).get('/api/markets?dateFrom=not-a-date');
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for invalid dateTo format', async () => {
+    const res = await request(app).get('/api/markets?dateTo=invalid-date');
     expect(res.status).toBe(400);
   });
 });

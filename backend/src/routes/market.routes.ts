@@ -40,6 +40,7 @@ const router = Router();
  *         schema:
  *           type: integer
  *           default: 20
+ *           maximum: 200
  *       - in: query
  *         name: status
  *         schema:
@@ -48,6 +49,8 @@ const router = Router();
  *     responses:
  *       200:
  *         description: Paginated list of markets
+ *       400:
+ *         description: Invalid parameters (limit exceeds maximum of 200)
  */
 router.get('/', listMarketsValidation, listMarkets);
 
