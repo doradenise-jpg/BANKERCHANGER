@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useMarket } from '../../../hooks/useMarket';
 import { MarketStatusBadge } from '../../../components/market/MarketStatusBadge';
 import { CountdownTimer } from '../../../components/ui/CountdownTimer';
@@ -10,14 +11,14 @@ import { PoolBar } from '../../../components/market/PoolBar';
 import { BetForm } from '../../../components/bet/BetForm';
 import { BetList } from '../../../components/bet/BetList';
 import { stellarExplorerUrl } from '../../../services/wallet';
-import { fetchBetsByMarket, NotFoundError } from '../../../services/api';
+import { fetchBetsByMarket } from '../../../services/api';
 import { ClaimWinningsPanel } from '../../../components/market/ClaimWinningsPanel';
 import { useToast } from '../../../components/ui/ToastProvider';
 import { useAppStore } from '../../../store';
 import type { Bet } from '../../../types';
 
 export default function MarketDetailContent({ market_id }: { market_id: string }): JSX.Element {
-  const { market, isLoading, error } = useMarket(market_id);
+  const { market, isLoading, error, isNotFound } = useMarket(market_id);
   const [recentBets, setRecentBets] = useState<Bet[]>([]);
   const [betsLoading, setBetsLoading] = useState(false);
   const walletAddress = useAppStore((s) => s.walletAddress);
@@ -42,11 +43,14 @@ export default function MarketDetailContent({ market_id }: { market_id: string }
     return <main className="max-w-6xl mx-auto px-4 py-8 text-gray-400">Loading…</main>;
   }
 
-  if (error instanceof NotFoundError || !market) {
+  if (isNotFound) {
     return (
       <main className="max-w-6xl mx-auto px-4 py-8 text-center">
         <p className="text-2xl font-bold text-white mb-2">404</p>
-        <p className="text-gray-400">Market not found.</p>
+        <p className="text-gray-400 mb-4">Market not found.</p>
+        <Link href="/markets" className="text-amber-400 hover:underline text-sm">
+          ← Back to Markets
+        </Link>
       </main>
     );
   }

@@ -4,12 +4,13 @@
 
 import { useState, useEffect } from 'react';
 import type { Market } from '../types';
-import { fetchMarketById } from '../services/api';
+import { fetchMarketById, NotFoundError } from '../services/api';
 
 export interface UseMarketResult {
   market: Market | null;
   isLoading: boolean;
   error: Error | null;
+  isNotFound: boolean;
 }
 
 /**
@@ -22,6 +23,7 @@ export function useMarket(market_id: string): UseMarketResult {
   const [market, setMarket] = useState<Market | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const [isNotFound, setIsNotFound] = useState(false);
 
   useEffect(() => {
     let intervalId: ReturnType<typeof setInterval> | null = null;
@@ -54,7 +56,10 @@ export function useMarket(market_id: string): UseMarketResult {
           }, 10_000);
         }
       } catch (e) {
-        if (!cancelled) setError(e as Error);
+        if (!cancelled) {
+          setError(e as Error);
+          if (e instanceof NotFoundError) setIsNotFound(true);
+        }
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -89,5 +94,5 @@ export function useMarket(market_id: string): UseMarketResult {
     return () => window.removeEventListener('boxmeout:claim_success', handler);
   }, [market_id]);
 
-  return { market, isLoading, error };
+  return { market, isLoading, error, isNotFound };
 }

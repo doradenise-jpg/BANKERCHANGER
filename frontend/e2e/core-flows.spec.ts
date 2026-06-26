@@ -139,4 +139,16 @@ test.describe('Core user flows', () => {
     await expect(page.getByText('Canelo Alvarez')).toBeVisible();
     await expect(page.getByText('Anthony Joshua')).not.toBeVisible();
   });
+
+  test('5. Navigating to an invalid market URL shows 404 message with back link', async ({ page }) => {
+    await page.route('**/api/markets/nonexistent-id', (route) =>
+      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'Not found' }) }),
+    );
+
+    await page.goto('/markets/nonexistent-id');
+
+    await expect(page.getByText('404')).toBeVisible();
+    await expect(page.getByText(/market not found/i)).toBeVisible();
+    await expect(page.getByRole('link', { name: /back to markets/i })).toBeVisible();
+  });
 });
