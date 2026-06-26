@@ -2,7 +2,7 @@
 import { Response } from 'express';
 import { UserService } from '../services/user.service.js';
 import { AuthenticatedRequest } from '../types/auth.types.js';
-import { UserTier } from '@prisma/client';
+import { UserTier } from '../types/auth.types.js';
 import { logger } from '../utils/logger.js';
 
 const userService = new UserService();
