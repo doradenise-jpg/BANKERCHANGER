@@ -39,6 +39,16 @@ jobs:
         working-directory: backend
         run: npm ci
 
+      - name: Validate OpenAPI spec
+        working-directory: backend
+        run: |
+          node -e "
+            const S = require('@apidevtools/swagger-parser');
+            S.validate('openapi.yaml')
+              .then(a => console.log('OpenAPI spec valid:', a.info.title, a.info.version))
+              .catch(e => { console.error(e.message); process.exit(1); });
+          "
+
       - name: Lint
         working-directory: backend
         run: npm run lint
