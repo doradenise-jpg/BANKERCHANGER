@@ -53,3 +53,56 @@ jobs:
         env:
           DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
           REDIS_URL: redis://localhost:6379
+
+  load-test:
+    name: k6 WebSocket Load Test
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: boxmeout
+          POSTGRES_PASSWORD: boxmeout
+          POSTGRES_DB: boxmeout
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Start backend server
+        working-directory: backend
+        run: |
+          npx ts-node-dev --respawn src/index.ts &
+          sleep 5
+        env:
+          DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+          REDIS_URL: redis://localhost:6379
+          PORT: 3001
+
+      - name: Install k6
+        run: |
+          sudo gpg -k 0x7F343FA7 2>/dev/null || true
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Run k6 load test
+        working-directory: backend
+        run: k6 run tests/load/activity-feed.loadtest.js -e WS_URL=ws://localhost:3001

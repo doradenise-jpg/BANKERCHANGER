@@ -6,6 +6,7 @@
  * Start with: docker compose --profile test up -d postgres-test
  */
 
+import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -46,7 +47,7 @@ async function q<T = Record<string, unknown>>(sql: string, params: unknown[] = [
   return rows as T[];
 }
 
-const MARKET_ID = 'mkt-test-1';
+const MARKET_ID = `mkt-${randomUUID()}`;
 const BETTOR = 'GBETTOR1';
 
 const marketEvent = () =>
@@ -73,6 +74,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  await pool.query('TRUNCATE markets, bets CASCADE');
   await pool.end();
 });
 

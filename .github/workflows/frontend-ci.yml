@@ -34,6 +34,12 @@ jobs:
         working-directory: frontend
         run: npm run type-check
 
+      - name: Check generated API types are up to date
+        working-directory: frontend
+        run: |
+          npm run generate:types
+          git diff --exit-code src/types/api.ts
+
       - name: Test
         working-directory: frontend
         run: npm test
