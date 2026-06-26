@@ -62,7 +62,9 @@ jest.mock('../ui/ConnectPrompt', () => ({
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const openMarket: Market = {
+  id: 1,
   market_id: 'mkt-1',
+  contract_address: 'CA-mkt-1',
   match_id: 'match-1',
   fighter_a: 'Canelo Alvarez',
   fighter_b: 'Gennady Golovkin',
@@ -76,10 +78,15 @@ const openMarket: Market = {
   pool_b: '300000000',
   pool_draw: '200000000',
   total_pool: '1000000000',
+  fee_bps: 200,
+  resolved_at: null,
+  oracle_used: null,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+  ledger_sequence: 1000,
   odds_a: 5000,
   odds_b: 3000,
   odds_draw: 2000,
-  fee_bps: 200,
 };
 
 const lockedMarket: Market = { ...openMarket, status: 'locked' };
