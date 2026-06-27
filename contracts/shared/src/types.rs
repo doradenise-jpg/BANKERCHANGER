@@ -70,7 +70,7 @@ pub struct FightDetails {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketConfig {
     /// Minimum bet in stroops (1 XLM = 10_000_000 stroops)
-    pub min_bet: i128,
+    pub min_bet_amount: i128,
     /// Maximum single bet in stroops
     pub max_bet: i128,
     /// Platform fee in basis points (200 = 2%)

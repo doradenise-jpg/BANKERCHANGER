@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, FormEvent } from 'react';
+import { useState, FormEvent, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getConnectedAddress } from '@/services/wallet';
 import { TxStatusToast } from '@/components/ui/TxStatusToast';
@@ -19,11 +19,36 @@ export default function CreateMarketPage() {
     status: 'idle',
     error: null,
   });
+  const [isAuthorized, setIsAuthorized] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
   const { createMarket } = useCreateMarket();
 
   const connectedAddress = getConnectedAddress();
   const isAdmin = connectedAddress && ADMIN_ADDRESSES.includes(connectedAddress);
+
+  // Auth guard: redirect if wallet not connected or not an admin
+  useEffect(() => {
+    if (!connectedAddress) {
+      // Not connected - show message and redirect to home
+      const timer = setTimeout(() => {
+        router.push('/');
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+
+    if (!isAdmin) {
+      // Connected but not admin - redirect to home
+      const timer = setTimeout(() => {
+        router.push('/');
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+
+    // User is authorized
+    setIsAuthorized(true);
+    setIsLoading(false);
+  }, [connectedAddress, isAdmin, router]);
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -96,15 +121,31 @@ export default function CreateMarketPage() {
     }
   };
 
-  if (!connectedAddress) {
-    // Non-admin wallets redirect to home.
-    router.push('/');
-    return null;
-  }
-
-  if (!isAdmin) {
-    router.push('/');
-    return null;
+  // Show loading or auth error message while redirecting
+  if (isLoading || !isAuthorized) {
+    return (
+      <div className="max-w-2xl mx-auto p-8">
+        <div className="mt-12 text-center space-y-4">
+          {!connectedAddress ? (
+            <>
+              <h1 className="text-3xl font-bold text-white mb-4">Wallet Connection Required</h1>
+              <p className="text-gray-300 mb-6">
+                You need to connect your wallet to create a boxing market. Please connect a wallet and try again.
+              </p>
+              <p className="text-sm text-gray-400">Redirecting to home page...</p>
+            </>
+          ) : !isAdmin ? (
+            <>
+              <h1 className="text-3xl font-bold text-white mb-4">Admin Access Required</h1>
+              <p className="text-gray-300 mb-6">
+                Only authorized administrators can create boxing markets. Please contact the team if you believe this is an error.
+              </p>
+              <p className="text-sm text-gray-400">Redirecting to home page...</p>
+            </>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
   return (

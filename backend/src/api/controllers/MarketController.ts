@@ -7,6 +7,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { StrKey } from '@stellar/stellar-sdk';
 import { AppError } from '../../utils/AppError';
+import { ERROR_CODES } from '../../constants/errorCodes';
 import { validateQuery } from '../middleware/validate';
 import * as MarketService from '../../services/MarketService';
 import * as OracleService from '../../oracle/OracleService';
@@ -16,6 +17,7 @@ import * as OracleService from '../../oracle/OracleService';
 // ---------------------------------------------------------------------------
 
 const VALID_STATUSES = ['open', 'locked', 'resolved', 'cancelled', 'disputed'] as const;
+const MAX_LIMIT = 200;
 
 const listMarketsQuerySchema = z.object({
   status: z
@@ -23,14 +25,14 @@ const listMarketsQuerySchema = z.object({
     .optional(),
   weight_class: z.string().min(1).optional(),
   fighter: z.string().min(1).optional(),
-  dateFrom: z.string().datetime().optional().transform(v => v ? new Date(v) : undefined),
-  dateTo: z.string().datetime().optional().transform(v => v ? new Date(v) : undefined),
+  dateFrom: z.coerce.date().optional(),
+  dateTo: z.coerce.date().optional(),
   page: z.coerce.number().int().min(1, { message: 'page must be an integer ≥ 1' }).default(1),
   limit: z.coerce
     .number()
     .int()
-    .min(1, { message: 'limit must be between 1 and 100' })
-    .max(100, { message: 'limit must be between 1 and 100' })
+    .min(1, { message: `limit must be between 1 and ${MAX_LIMIT}` })
+    .max(MAX_LIMIT, { message: `limit must be between 1 and ${MAX_LIMIT}` })
     .default(20),
 });
 
@@ -72,7 +74,10 @@ export async function getMarket(
   try {
     const { market_id } = req.params;
     if (!/^\d+$/.test(market_id)) {
-      throw AppError.badRequest('marketId must be a valid numeric string');
+      throw AppError.badRequest(
+        'marketId must be a valid numeric string',
+        ERROR_CODES.INVALID_MARKET_ID
+      );
     }
     const market = await MarketService.getMarketById(market_id);
     res.status(200).json(market);
@@ -319,7 +324,10 @@ export async function resolveMarket(req: Request, res: Response, next: NextFunct
     const { winning_outcome } = parsed.data;
 
     const market = await MarketService.db().findMarketById(market_id);
-    if (!market) throw AppError.notFound(`Market not found: ${market_id}`);
+    if (!market) throw AppError.notFound(
+      `Market not found: ${market_id}`,
+      ERROR_CODES.MARKET_NOT_FOUND
+    );
 
     if (market.status === 'resolved') {
       res.status(409).json({ error: 'Market is already resolved' });

@@ -8,6 +8,8 @@ import { rateLimit } from "./middleware/rate-limit.middleware";
 import { requestLogging } from "./middleware/request-logging.middleware";
 import { AppError } from "./utils/AppError";
 import { logger } from "./utils/logger";
+import { pool } from "./config/db";
+import { redis } from "./config/redis";
 import authRouter from "./routes/auth.routes";
 import marketRouter from "./routes/market.routes";
 import adminRouter from "./routes/admin.routes";
@@ -36,8 +38,14 @@ if (env.NODE_ENV === 'development' || env.ENABLE_SWAGGER) {
 }
 
 // Routes
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+app.get("/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    await redis.ping();
+    res.json({ status: "ok", db: "connected", redis: "connected" });
+  } catch {
+    res.status(503).json({ status: "error" });
+  }
 });
 
 // Rate-limited route groups
@@ -105,6 +113,26 @@ const server = app.listen(PORT, () => {
   startAutoLockCron();
   startCleanupCron();
 });
+
+// Startup health check — catch misconfigured env vars or failed connections early
+(async function startupHealthCheck() {
+  const results: string[] = [];
+  try {
+    await pool.query("SELECT 1");
+    results.push("db: ok");
+  } catch (err) {
+    logger.error({ err }, "Startup health check FAILED — database unreachable");
+    results.push("db: FAILED");
+  }
+  try {
+    await redis.ping();
+    results.push("redis: ok");
+  } catch (err) {
+    logger.error({ err }, "Startup health check FAILED — redis unreachable");
+    results.push("redis: FAILED");
+  }
+  logger.info(`Startup health check — ${results.join(", ")}`);
+})();
 
 initActivityFeed(server);
 

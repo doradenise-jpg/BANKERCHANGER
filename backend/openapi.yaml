@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: BoxMeOut API
-  version: 0.1.0
+  version: 0.2.0
   description: REST API for the BoxMeOut decentralized boxing prediction market.
 
 servers:
@@ -20,19 +20,34 @@ components:
       name: X-Oracle-Key
 
   schemas:
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string }
+
+    UserDTO:
+      type: object
+      properties:
+        id:               { type: string }
+        email:            { type: string, format: email }
+        emailVerified:    { type: boolean }
+        twoFactorEnabled: { type: boolean }
+        createdAt:        { type: string, format: date-time }
+
     Market:
       type: object
       properties:
-        id:            { type: integer }
-        market_id:     { type: string }
+        id:               { type: integer }
+        market_id:        { type: string }
         contract_address: { type: string }
-        match_id:      { type: string }
-        fighter_a:     { type: string }
-        fighter_b:     { type: string }
-        weight_class:  { type: string }
-        title_fight:   { type: boolean }
-        venue:         { type: string }
-        scheduled_at:  { type: string, format: date-time }
+        match_id:         { type: string }
+        fighter_a:        { type: string }
+        fighter_b:        { type: string }
+        weight_class:     { type: string }
+        title_fight:      { type: boolean }
+        venue:            { type: string }
+        scheduled_at:     { type: string, format: date-time }
         status:
           type: string
           enum: [open, locked, resolved, cancelled, disputed]
@@ -40,29 +55,48 @@ components:
           type: string
           nullable: true
           enum: [fighter_a, fighter_b, draw, no_contest]
-        pool_a:        { type: string }
-        pool_b:        { type: string }
-        pool_draw:     { type: string }
-        total_pool:    { type: string }
-        fee_bps:       { type: integer }
-        resolved_at:   { type: string, format: date-time, nullable: true }
-        oracle_used:
-          type: string
-          nullable: true
-          enum: [primary, fallback, admin]
-        created_at:    { type: string, format: date-time }
-        updated_at:    { type: string, format: date-time }
-        ledger_sequence: { type: integer }
+        pool_a:           { type: string }
+        pool_b:           { type: string }
+        pool_draw:        { type: string }
+        total_pool:       { type: string }
+        fee_bps:          { type: integer }
+        resolved_at:      { type: string, format: date-time, nullable: true }
+        oracle_used:      { type: string, nullable: true, enum: [primary, fallback, admin] }
+        created_at:       { type: string, format: date-time }
+        updated_at:       { type: string, format: date-time }
+        ledger_sequence:  { type: integer }
+
+    MarketOdds:
+      type: object
+      properties:
+        market_id:   { type: string }
+        odds_a:      { type: number }
+        odds_b:      { type: number }
+        odds_draw:   { type: number }
+        pool_a:      { type: string }
+        pool_b:      { type: string }
+        pool_draw:   { type: string }
+        total_pool:  { type: string }
 
     MarketStats:
       type: object
       properties:
-        market_id:         { type: string }
-        total_bets:        { type: integer }
-        unique_bettors:    { type: integer }
-        largest_bet_xlm:   { type: number }
-        average_bet_xlm:   { type: number }
-        total_pooled_xlm:  { type: number }
+        market_id:        { type: string }
+        total_bets:       { type: integer }
+        unique_bettors:   { type: integer }
+        largest_bet_xlm:  { type: number }
+        average_bet_xlm:  { type: number }
+        total_pooled_xlm: { type: number }
+
+    SimulatePayout:
+      type: object
+      properties:
+        market_id:       { type: string }
+        amount:          { type: number }
+        outcome:         { type: integer, enum: [0, 1] }
+        estimated_payout: { type: number }
+        fee_xlm:         { type: number }
+        odds:            { type: number }
 
     PlatformStats:
       type: object
@@ -89,6 +123,16 @@ components:
         payout:          { type: string, nullable: true }
         tx_hash:         { type: string }
         ledger_sequence: { type: integer }
+
+    BettorStats:
+      type: object
+      properties:
+        address:          { type: string }
+        total_bets:       { type: integer }
+        total_staked_xlm: { type: number }
+        total_won_xlm:    { type: number }
+        total_lost_xlm:   { type: number }
+        win_rate:         { type: number }
 
     Portfolio:
       type: object
@@ -120,19 +164,476 @@ components:
         tx_hash:        { type: string, nullable: true }
         created_at:     { type: string, format: date-time }
 
-    Error:
+    Dispute:
       type: object
       properties:
-        status:  { type: string, example: error }
-        message: { type: string }
+        id:           { type: string, format: uuid }
+        market_id:    { type: string }
+        reason:       { type: string }
+        status:
+          type: string
+          enum: [open, reviewing, resolved, dismissed]
+        admin_notes:  { type: string, nullable: true }
+        final_outcome: { type: string, nullable: true }
+        raised_at:    { type: string, format: date-time }
+        reviewed_at:  { type: string, format: date-time, nullable: true }
+        resolved_at:  { type: string, format: date-time, nullable: true }
+
+    Pagination:
+      type: object
+      properties:
+        page:       { type: integer }
+        limit:      { type: integer }
+        total:      { type: integer }
+        totalPages: { type: integer }
+        hasNext:    { type: boolean }
+        hasPrev:    { type: boolean }
 
 paths:
+  # ---------------------------------------------------------------------------
+  # Auth
+  # ---------------------------------------------------------------------------
+  /auth/register:
+    post:
+      summary: Register a new user
+      operationId: register
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        '201':
+          description: Registration successful; verification email sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId:   { type: string }
+                  message:  { type: string }
+        '409':
+          description: Email already registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/login:
+    post:
+      summary: Login with email and password
+      operationId: login
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Tokens issued, or tempToken when 2FA is enabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:  { type: string }
+                  refreshToken: { type: string }
+                  tempToken:    { type: string, description: Present only when 2FA is required }
+                  requires2FA:  { type: boolean }
+        '400':
+          description: Missing credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/forgot-password:
+    post:
+      summary: Request a password-reset email
+      operationId: forgotPassword
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Reset link sent (always returned to prevent email enumeration)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+
+  /auth/reset-password:
+    post:
+      summary: Reset password using a reset token
+      operationId: resetPassword
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token:       { type: string }
+                newPassword: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: Password updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+        '400':
+          description: Invalid or expired token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/2fa/setup:
+    post:
+      summary: Generate TOTP secret and QR code
+      operationId: setup2FA
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: TOTP secret and QR code
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret:   { type: string }
+                  qrCode:   { type: string, description: Base64 PNG data URI }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/2fa/enable:
+    post:
+      summary: Enable 2FA after verifying TOTP code
+      operationId: enable2FA
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp]
+              properties:
+                otp: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        '200':
+          description: 2FA enabled
+        '401':
+          description: Unauthorized or invalid OTP
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/2fa/disable:
+    post:
+      summary: Disable 2FA
+      operationId: disable2FA
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp]
+              properties:
+                otp: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        '200':
+          description: 2FA disabled
+        '401':
+          description: Unauthorized or invalid OTP
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/2fa/verify:
+    post:
+      summary: Complete login by verifying 2FA OTP
+      operationId: verify2FA
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tempToken, otp]
+              properties:
+                tempToken: { type: string }
+                otp:       { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        '200':
+          description: Access and refresh tokens issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:  { type: string }
+                  refreshToken: { type: string }
+        '401':
+          description: Invalid temp token or OTP
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------------------------------------
+  # Users
+  # ---------------------------------------------------------------------------
+  /api/users/me:
+    get:
+      summary: Get authenticated user's profile
+      operationId: getMyProfile
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/UserDTO' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      summary: Update authenticated user's profile
+      operationId: updateMyProfile
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                  maxLength: 30
+                  pattern: '^[a-zA-Z0-9_]+$'
+                avatarUrl: { type: string, format: uri }
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/UserDTO' }
+        '409':
+          description: Username already taken
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/users/{id}:
+    get:
+      summary: Get public user profile
+      operationId: getProfile
+      tags: [Users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Public user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/UserDTO' }
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/users:
+    get:
+      summary: List all users (admin only)
+      operationId: listUsers
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [BEGINNER, ADVANCED, EXPERT, LEGENDARY]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, suspended]
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated user list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      users:
+                        type: array
+                        items: { $ref: '#/components/schemas/UserDTO' }
+                      total: { type: integer }
+                      page:  { type: integer }
+                      limit: { type: integer }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/users/{id}/suspend:
+    patch:
+      summary: Suspend a user account (admin only)
+      operationId: suspendUser
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: User suspended
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/users/{id}/role:
+    patch:
+      summary: Update user role (admin only)
+      operationId: updateUserRole
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [BEGINNER, ADVANCED, EXPERT, LEGENDARY]
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id:   { type: string }
+                      tier: { type: string }
+        '400':
+          description: Invalid role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------------------------------------
+  # Platform
+  # ---------------------------------------------------------------------------
   /api/stats:
     get:
       summary: Get platform statistics
       operationId: getPlatformStats
       tags: [Platform]
-      description: Returns aggregate platform statistics for the home page banner. Cached for 60 seconds.
       responses:
         '200':
           description: Platform statistics
@@ -140,6 +641,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PlatformStats' }
 
+  # ---------------------------------------------------------------------------
+  # Markets
+  # ---------------------------------------------------------------------------
   /api/markets:
     get:
       summary: List markets
@@ -192,7 +696,7 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: Market detail with current odds
+          description: Market detail
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Market' }
@@ -214,16 +718,49 @@ paths:
           schema: { type: string }
         - name: address
           in: query
-          description: Filter to a single bettor's Stellar address
           schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
       responses:
         '200':
-          description: List of bets
+          description: Paginated list of bets
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/Bet' }
+                type: object
+                properties:
+                  bets:
+                    type: array
+                    items: { $ref: '#/components/schemas/Bet' }
+                  total: { type: integer }
+                  page:  { type: integer }
+                  limit: { type: integer }
+        '404':
+          description: Market not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/markets/{market_id}/odds:
+    get:
+      summary: Get current odds for a market
+      operationId: getMarketOdds
+      tags: [Markets]
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Current odds
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketOdds' }
         '404':
           description: Market not found
           content:
@@ -252,6 +789,80 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/markets/{market_id}/simulate:
+    get:
+      summary: Simulate payout for a given bet amount and outcome
+      operationId: simulatePayout
+      tags: [Markets]
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: amount
+          in: query
+          required: true
+          schema: { type: number }
+        - name: outcome
+          in: query
+          required: true
+          schema: { type: integer, enum: [0, 1] }
+      responses:
+        '200':
+          description: Simulated payout
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimulatePayout' }
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/markets/{market_id}/resolve:
+    post:
+      summary: Resolve a market (admin only)
+      operationId: resolveMarket
+      tags: [Markets]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [winningOutcome]
+              properties:
+                winningOutcome: { type: integer, enum: [0, 1] }
+      responses:
+        '200':
+          description: Market resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx_hash: { type: string }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Market not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------------------------------------
+  # Bets
+  # ---------------------------------------------------------------------------
   /api/bets/{bettor_address}:
     get:
       summary: Get all bets by a Stellar address
@@ -261,16 +872,49 @@ paths:
         - name: bettor_address
           in: path
           required: true
-          description: Stellar public key (G...)
           schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
       responses:
         '200':
-          description: List of bets across all markets
+          description: Paginated list of bets
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/Bet' }
+                type: object
+                properties:
+                  bets:
+                    type: array
+                    items: { $ref: '#/components/schemas/Bet' }
+                  total: { type: integer }
+                  page:  { type: integer }
+                  limit: { type: integer }
+        '400':
+          description: Invalid Stellar address
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/bets/{bettor_address}/stats:
+    get:
+      summary: Get betting statistics for an address
+      operationId: getBettorStats
+      tags: [Bets]
+      parameters:
+        - name: bettor_address
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Bettor statistics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BettorStats' }
         '400':
           description: Invalid Stellar address
           content:
@@ -286,11 +930,10 @@ paths:
         - name: address
           in: path
           required: true
-          description: Stellar public key (G...)
           schema: { type: string }
       responses:
         '200':
-          description: Portfolio summary (empty portfolio returned if address has no bets)
+          description: Portfolio summary
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Portfolio' }
@@ -300,6 +943,69 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/claims:
+    post:
+      summary: Claim winnings for a resolved market
+      operationId: claimWinnings
+      tags: [Bets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [marketId, bettorAddress]
+              properties:
+                marketId:      { type: string }
+                bettorAddress: { type: string }
+      responses:
+        '200':
+          description: Winnings claimed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx_hash: { type: string }
+        '400':
+          description: No winnings to claim
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/claims/refund:
+    post:
+      summary: Claim a refund for a cancelled market
+      operationId: claimRefund
+      tags: [Bets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [marketId, bettorAddress]
+              properties:
+                marketId:      { type: string }
+                bettorAddress: { type: string }
+      responses:
+        '200':
+          description: Refund processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx_hash: { type: string }
+        '400':
+          description: Market not cancelled or no bet found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------------------------------------
+  # Oracle
+  # ---------------------------------------------------------------------------
   /api/oracle/submit:
     post:
       summary: Submit a signed oracle fight result
@@ -313,16 +1019,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [match_id, outcome, reported_at, signature, oracle_address]
+              required: [matchId, winningOutcome]
               properties:
-                match_id:       { type: string }
-                outcome:        { type: string, enum: [fighter_a, fighter_b, draw, no_contest] }
-                reported_at:    { type: string, format: date-time }
-                signature:      { type: string, description: Hex-encoded Ed25519 signature }
-                oracle_address: { type: string, description: Stellar public key of the oracle }
+                matchId:        { type: string }
+                winningOutcome: { type: integer, enum: [0, 1] }
+                reportedAt:     { type: string, format: date-time }
       responses:
         '200':
-          description: Report accepted and submitted on-chain
+          description: Oracle result submitted
           content:
             application/json:
               schema:
@@ -336,7 +1040,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '401':
-          description: Missing or invalid oracle API key / signature verification failed
+          description: Missing or invalid oracle API key
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -353,12 +1057,246 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: All oracle reports (accepted and rejected) for the fight
+          description: Oracle reports for the fight
           content:
             application/json:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/OracleReport' }
+        '404':
+          description: No reports found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------------------------------------
+  # Disputes
+  # ---------------------------------------------------------------------------
+  /api/disputes:
+    post:
+      summary: Submit a new dispute
+      operationId: submitDispute
+      tags: [Disputes]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [marketId, reason]
+              properties:
+                marketId:    { type: string }
+                reason:      { type: string, minLength: 10, maxLength: 1000 }
+                evidenceUrl: { type: string, format: uri }
+      responses:
+        '201':
+          description: Dispute submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/Dispute' }
+        '400':
+          description: Invalid market status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Dispute already exists for this market
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      summary: List all disputes (admin only)
+      operationId: listDisputesApi
+      tags: [Disputes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, reviewing, resolved, dismissed]
+        - name: marketId
+          in: query
+          schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Paginated list of disputes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disputes:
+                    type: array
+                    items: { $ref: '#/components/schemas/Dispute' }
+                  pagination: { $ref: '#/components/schemas/Pagination' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/disputes/{disputeId}:
+    get:
+      summary: Get dispute details
+      operationId: getDispute
+      tags: [Disputes]
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Dispute details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/Dispute' }
+        '404':
+          description: Dispute not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/disputes/{disputeId}/review:
+    patch:
+      summary: Mark dispute as under review (admin only)
+      operationId: reviewDispute
+      tags: [Disputes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adminNotes]
+              properties:
+                adminNotes: { type: string, minLength: 5, maxLength: 5000 }
+      responses:
+        '200':
+          description: Dispute updated to reviewing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/Dispute' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Dispute not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/disputes/{disputeId}/resolve:
+    patch:
+      summary: Resolve a dispute (admin only)
+      operationId: resolveDisputeApi
+      tags: [Disputes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, resolution]
+              properties:
+                action:
+                  type: string
+                  enum: [DISMISS, RESOLVE_NEW_OUTCOME]
+                resolution:     { type: string, minLength: 10, maxLength: 5000 }
+                adminNotes:     { type: string, minLength: 5, maxLength: 5000 }
+                newWinningOutcome: { type: integer, enum: [0, 1] }
+      responses:
+        '200':
+          description: Dispute resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:    { $ref: '#/components/schemas/Dispute' }
+        '400':
+          description: Invalid action or missing fields
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Dispute not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---------------------------------------------------------------------------
+  # Admin
+  # ---------------------------------------------------------------------------
+  /api/admin/disputes:
+    get:
+      summary: List all disputes (admin only)
+      operationId: adminListDisputes
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of disputes
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Dispute' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/admin/dispute/{market_id}:
     post:
@@ -401,10 +1339,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/admin/dispute/{market_id}/investigate:
+    post:
+      summary: Mark a dispute as under investigation
+      operationId: investigateDispute
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Dispute under investigation
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Market not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/admin/resolve-dispute/{market_id}:
     post:
       summary: Resolve a disputed market with admin-verified outcome
-      operationId: resolveDispute
+      operationId: adminResolveDispute
       tags: [Admin]
       security:
         - bearerAuth: []
@@ -419,13 +1383,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [outcome, totp_code]
+              required: [action]
               properties:
-                outcome:   { type: string, enum: [fighter_a, fighter_b, draw, no_contest] }
-                totp_code: { type: string, description: 6-digit TOTP code for 2FA verification }
+                action:
+                  type: string
+                  enum: [DISMISS, RESOLVE_NEW_OUTCOME]
+                newWinningOutcome: { type: integer, enum: [0, 1] }
       responses:
         '200':
-          description: Dispute resolved on-chain
+          description: Dispute resolved
           content:
             application/json:
               schema:
@@ -433,7 +1399,7 @@ paths:
                 properties:
                   tx_hash: { type: string }
         '401':
-          description: Unauthorized or invalid TOTP code
+          description: Unauthorized
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -445,7 +1411,7 @@ paths:
 
   /api/admin/cancel/{market_id}:
     post:
-      summary: Cancel a market (fight postponed or called off)
+      summary: Cancel a market
       operationId: cancelMarket
       tags: [Admin]
       security:
@@ -466,7 +1432,7 @@ paths:
                 reason: { type: string }
       responses:
         '200':
-          description: Market cancelled on-chain
+          description: Market cancelled
           content:
             application/json:
               schema:
@@ -480,6 +1446,201 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '404':
           description: Market not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/cancel/{market_id}/refunds:
+    post:
+      summary: Process refunds for a cancelled market
+      operationId: processRefunds
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Refunds processed
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Market not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/markets/bulk-pause:
+    post:
+      summary: Pause multiple markets
+      operationId: bulkPauseMarkets
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [marketIds]
+              properties:
+                marketIds:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Markets paused
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  paused: { type: integer }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/markets/bulk-cancel:
+    post:
+      summary: Cancel multiple markets
+      operationId: bulkCancelMarkets
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [marketIds]
+              properties:
+                marketIds:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Markets cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancelled: { type: integer }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/export/users:
+    get:
+      summary: Stream users CSV export
+      operationId: exportUsers
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: CSV file stream
+          content:
+            text/csv:
+              schema: { type: string }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/export/trades:
+    get:
+      summary: Stream trades CSV export
+      operationId: exportTrades
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: CSV file stream
+          content:
+            text/csv:
+              schema: { type: string }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/export/treasury:
+    get:
+      summary: Stream treasury CSV export
+      operationId: exportTreasury
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: CSV file stream
+          content:
+            text/csv:
+              schema: { type: string }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/export/request:
+    post:
+      summary: Queue an async export and email it when ready
+      operationId: requestExport
+      tags: [Admin]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, email]
+              properties:
+                type:  { type: string, enum: [trades] }
+                email: { type: string, format: email }
+                from:  { type: string, format: date }
+                to:    { type: string, format: date }
+      responses:
+        '202':
+          description: Export queued; email will be sent when ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Unauthorized
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

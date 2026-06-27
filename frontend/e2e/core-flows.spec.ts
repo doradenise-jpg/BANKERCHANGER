@@ -140,15 +140,18 @@ test.describe('Core user flows', () => {
     await expect(page.getByText('Anthony Joshua')).not.toBeVisible();
   });
 
-  test('5. Navigating to an invalid market URL shows 404 message with back link', async ({ page }) => {
-    await page.route('**/api/markets/nonexistent-id', (route) =>
-      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'Not found' }) }),
-    );
+  test('5. Unauthenticated users are redirected from /create page', async ({ page }) => {
+    // Navigate to /create without a connected wallet
+    // Note: Freighter is NOT mocked, so wallet is not connected
+    await page.goto('/create');
 
-    await page.goto('/markets/nonexistent-id');
+    // Should see the wallet connection required message
+    await expect(page.getByText('Wallet Connection Required')).toBeVisible();
+    await expect(page.getByText(/connect your wallet/i)).toBeVisible();
+    await expect(page.getByText('Redirecting to home page...')).toBeVisible();
 
-    await expect(page.getByText('404')).toBeVisible();
-    await expect(page.getByText(/market not found/i)).toBeVisible();
-    await expect(page.getByRole('link', { name: /back to markets/i })).toBeVisible();
+    // Should redirect to home page
+    await page.waitForURL('/', { timeout: 5000 });
+    await expect(page).toHaveURL('/');
   });
 });

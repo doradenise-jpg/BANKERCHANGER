@@ -9,10 +9,26 @@
 #   export ADMIN_SECRET_KEY=S...
 #   ./scripts/deploy.sh [testnet|mainnet]
 #
+# Network Defaults:
+#   testnet:  RPC https://soroban-testnet.stellar.org
+#             Horizon https://horizon-testnet.stellar.org
+#   mainnet:  RPC https://soroban-mainnet.stellar.org
+#             Horizon https://horizon.stellar.org
+#
+# Required env vars:
+#   ADMIN_SECRET_KEY   Stellar secret key for contract deployment
+#
 # Optional env vars:
+#   STELLAR_RPC_URL    Custom Soroban RPC endpoint
+#   HORIZON_URL        Custom Horizon API endpoint
 #   ORACLE_ADDRESSES   Comma-separated oracle Stellar addresses
 #   DEFAULT_FEE_BPS    Platform fee in bps (default: 200)
 #   WITHDRAWAL_LIMIT   Treasury daily limit in stroops (default: 1000000000)
+#
+# Examples:
+#   ./scripts/deploy.sh testnet
+#   STELLAR_RPC_URL=http://localhost:8000 ./scripts/deploy.sh testnet
+#   STELLAR_RPC_URL=http://private-rpc:8000 HORIZON_URL=http://private-horizon:8001 ./scripts/deploy.sh mainnet
 #
 # Output:
 #   contracts/deployments.json  — deployed addresses + metadata
@@ -30,14 +46,48 @@ ORACLE_ADDRESSES="${ORACLE_ADDRESSES:-}"
 DEFAULT_FEE_BPS="${DEFAULT_FEE_BPS:-200}"
 WITHDRAWAL_LIMIT="${WITHDRAWAL_LIMIT:-1000000000}"
 
-if [[ -z "$ADMIN_SECRET_KEY" ]]; then
-    echo "ERROR: ADMIN_SECRET_KEY is not set" >&2
+# Set RPC and Horizon URLs based on network, allow overrides via env vars
+if [[ "$NETWORK" == "testnet" ]]; then
+    STELLAR_RPC_URL="${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}"
+    HORIZON_URL="${HORIZON_URL:-https://horizon-testnet.stellar.org}"
+elif [[ "$NETWORK" == "mainnet" ]]; then
+    STELLAR_RPC_URL="${STELLAR_RPC_URL:-https://soroban-mainnet.stellar.org}"
+    HORIZON_URL="${HORIZON_URL:-https://horizon.stellar.org}"
+else
+    echo "ERROR: Invalid network '$NETWORK'. Must be 'testnet' or 'mainnet'" >&2
     exit 1
 fi
+
+# Validate required environment variables
+if [[ -z "$ADMIN_SECRET_KEY" ]]; then
+    echo "ERROR: ADMIN_SECRET_KEY is not set" >&2
+    echo "Please set the ADMIN_SECRET_KEY environment variable with your Stellar secret key" >&2
+    exit 1
+fi
+
+if [[ -z "$STELLAR_RPC_URL" ]]; then
+    echo "ERROR: STELLAR_RPC_URL is not set" >&2
+    echo "Please set STELLAR_RPC_URL or use a valid network (testnet/mainnet)" >&2
+    exit 1
+fi
+
+if [[ -z "$HORIZON_URL" ]]; then
+    echo "ERROR: HORIZON_URL is not set" >&2
+    echo "Please set HORIZON_URL or use a valid network (testnet/mainnet)" >&2
+    exit 1
+fi
+
+echo "Configuration:"
+echo "  Network:          $NETWORK"
+echo "  RPC URL:          $STELLAR_RPC_URL"
+echo "  Horizon URL:      $HORIZON_URL"
+echo "  Admin address:    (derived from secret key)"
+echo ""
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 stellar_deploy() {
+    SOROBAN_RPC_URL="$STELLAR_RPC_URL" \
     stellar contract deploy \
         --wasm "$1" \
         --source "$ADMIN_SECRET_KEY" \
@@ -46,6 +96,7 @@ stellar_deploy() {
 
 stellar_invoke() {
     local contract_id="$1"; shift
+    SOROBAN_RPC_URL="$STELLAR_RPC_URL" \
     stellar contract invoke \
         --id "$contract_id" \
         --source "$ADMIN_SECRET_KEY" \
@@ -65,8 +116,8 @@ TREASURY_ADDRESS=$(stellar_deploy "${BUILD_DIR}/boxmeout_treasury.wasm" \
 [[ -z "$TREASURY_ADDRESS" ]] && { echo "ERROR: Treasury deploy failed" >&2; exit 1; }
 echo "  Treasury: $TREASURY_ADDRESS"
 
-ADMIN_ADDRESS=$(stellar keys address "$ADMIN_SECRET_KEY" --network "$NETWORK" 2>/dev/null \
-    || stellar account info --source "$ADMIN_SECRET_KEY" --network "$NETWORK" \
+ADMIN_ADDRESS=$(SOROBAN_RPC_URL="$STELLAR_RPC_URL" stellar keys address "$ADMIN_SECRET_KEY" --network "$NETWORK" 2>/dev/null \
+    || SOROBAN_RPC_URL="$STELLAR_RPC_URL" stellar account info --source "$ADMIN_SECRET_KEY" --network "$NETWORK" \
        | grep -oE '[A-Z0-9]{56}' | head -1)
 
 stellar_invoke "$TREASURY_ADDRESS" initialize \
@@ -94,7 +145,7 @@ echo "  MarketFactory initialized"
 
 # ── 4. Upload Market template wasm (factory deploys instances) ────────────────
 echo "[4/5] Uploading Market wasm..."
-MARKET_WASM_HASH=$(stellar contract install \
+MARKET_WASM_HASH=$(SOROBAN_RPC_URL="$STELLAR_RPC_URL" stellar contract install \
     --wasm "${BUILD_DIR}/boxmeout_market.wasm" \
     --source "$ADMIN_SECRET_KEY" \
     --network "$NETWORK" 2>&1 | grep -oE '[a-f0-9]{64}' | head -1)

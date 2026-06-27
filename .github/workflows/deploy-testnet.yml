@@ -1,0 +1,69 @@
+name: Deploy to Stellar Testnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      admin_secret_key:
+        description: 'Admin secret key for deployment (S...). Must already be set as a GitHub secret if left empty.'
+        required: false
+        type: string
+      oracle_addresses:
+        description: 'Comma-separated oracle Stellar addresses'
+        required: false
+        type: string
+      default_fee_bps:
+        description: 'Platform fee in bps (default: 200)'
+        required: false
+        type: number
+        default: 200
+
+jobs:
+  deploy:
+    name: Build & Deploy Contracts
+    runs-on: ubuntu-latest
+    environment: testnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-deploy-${{ hashFiles('contracts/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: |
+          curl -fsSL https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-ubuntu-x86_64.tar.gz \
+            | sudo tar xzf - -C /usr/local/bin stellar
+          stellar version
+
+      - name: Build WASM contracts
+        working-directory: contracts
+        env:
+          ADMIN_SECRET_KEY: ${{ secrets.ADMIN_SECRET_KEY || inputs.admin_secret_key }}
+        run: |
+          stellar contract build
+
+      - name: Deploy to Testnet
+        working-directory: contracts
+        env:
+          ADMIN_SECRET_KEY: ${{ secrets.ADMIN_SECRET_KEY || inputs.admin_secret_key }}
+          ORACLE_ADDRESSES: ${{ inputs.oracle_addresses || '' }}
+          DEFAULT_FEE_BPS: ${{ inputs.default_fee_bps || 200 }}
+        run: |
+          ./scripts/deploy.sh testnet
+
+      - name: Upload deployments.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployments-testnet
+          path: contracts/deployments.json
+          retention-days: 90

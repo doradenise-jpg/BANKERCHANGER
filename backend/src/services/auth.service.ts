@@ -1,10 +1,14 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { randomUUID, createHash } from 'crypto';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from './crypto.service';
 import { generateSecret, generateQRCode, verifyToken } from './totp.service';
 import { sendPasswordResetEmail } from './email.service';
 import { redis } from './cache.service';
+import { pool } from '../config/db';
+import { password_reset_tokens } from '../db/schema';
 import { AppError } from '../utils/AppError';
 import { logger } from '../utils/logger';
 
@@ -45,14 +49,11 @@ interface UserRecord {
    * Incrementing it instantly invalidates all previously issued tokens.
    */
   sessionVersion: number;
-  /**
-   * SHA-256 hash of the most recently issued password-reset JWT.
-   * Cleared on use so the token can only be consumed once.
-   */
-  resetTokenHash?: string;
 }
 
 export const users = new Map<string, UserRecord>();
+
+const db = drizzle(pool);
 
 // ---------------------------------------------------------------------------
 // JWT helpers
@@ -223,9 +224,15 @@ export async function forgotPassword(email: string): Promise<void> {
   const resetToken = signReset(user.id);
   const tokenHash = await sha256(resetToken);
 
-  // Store hash so we can verify single-use on consumption
-  user.resetTokenHash = tokenHash;
-  users.set(user.id, user);
+  // Replace any existing tokens for this user, then insert the new one
+  await db.delete(password_reset_tokens)
+    .where(eq(password_reset_tokens.user_id, user.id));
+
+  await db.insert(password_reset_tokens).values({
+    user_id: user.id,
+    token_hash: tokenHash,
+    expires_at: new Date(Date.now() + 15 * 60 * 1000),
+  });
 
   // Fire-and-forget — failures are swallowed inside sendPasswordResetEmail
   await sendPasswordResetEmail(user.email, resetToken);
@@ -250,30 +257,44 @@ export async function resetPassword(token: string, newPassword: string): Promise
   const user = users.get(userId);
   if (!user) throw new AppError(400, 'Invalid or expired reset token');
 
-  // 2. Verify single-use: token hash must match what we stored
-  if (!user.resetTokenHash) {
-    throw new AppError(400, 'Reset token has already been used');
-  }
-
   const incomingHash = await sha256(token);
-  if (incomingHash !== user.resetTokenHash) {
+
+  // 2. Look up the token in the database
+  const [tokenRecord] = await db
+    .select()
+    .from(password_reset_tokens)
+    .where(
+      and(
+        eq(password_reset_tokens.user_id, userId),
+        eq(password_reset_tokens.token_hash, incomingHash),
+      ),
+    )
+    .limit(1);
+
+  if (!tokenRecord) {
     throw new AppError(400, 'Invalid or expired reset token');
   }
 
-  // 3. Consume the token immediately (single-use enforcement)
-  user.resetTokenHash = undefined;
+  // 3. Check DB-level expiry (belt-and-suspenders with JWT expiry)
+  if (new Date() > new Date(tokenRecord.expires_at)) {
+    await db.delete(password_reset_tokens).where(eq(password_reset_tokens.id, tokenRecord.id));
+    throw new AppError(400, 'Reset token has expired');
+  }
 
-  // 4. Hash the new password
+  // 4. Consume the token immediately (single-use enforcement)
+  await db.delete(password_reset_tokens).where(eq(password_reset_tokens.id, tokenRecord.id));
+
+  // 5. Hash the new password
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
   user.passwordHash = passwordHash;
 
-  // 5. Invalidate all existing sessions by bumping the session version
+  // 6. Invalidate all existing sessions by bumping the session version
   const oldVersion = user.sessionVersion;
   user.sessionVersion = oldVersion + 1;
 
   users.set(user.id, user);
 
-  // 6. Write tombstones to Redis so in-flight tokens are rejected immediately
+  // 7. Write tombstones to Redis so in-flight tokens are rejected immediately
   await blockOldSessions(userId, oldVersion);
 }
 
@@ -347,7 +368,4 @@ export async function verify2FA(
   };
 }
 
-export function isEmailVerified(userId: string): boolean {
-  const user = users.get(userId);
-  return user?.emailVerified ?? false;
-}
+

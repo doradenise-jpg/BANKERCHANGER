@@ -76,9 +76,10 @@ Deployed addresses are saved to `contracts/deployments.json`:
 
 Deployment order: `shared` (build only) → `treasury` → `market_factory` → `market` (wasm upload).
 
-## Contributing
+## Documentation
 
-See [docs/contributing.md](docs/contributing.md).
+- [Contributing Guidelines](docs/contributing.md)
+- [Operational Runbook](docs/runbook.md) — Incident response procedures for production
 
 ## License
 

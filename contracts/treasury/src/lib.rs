@@ -18,6 +18,7 @@ const APPROVED_MARKETS: &str        = "APPROVED_MARKETS";
 const WITHDRAWAL_LIMIT: &str        = "WITHDRAWAL_LIMIT";
 const DAILY_WITHDRAWN: &str         = "DAILY_WITHDRAWN";
 const WITHDRAWALS_PAUSED: &str      = "WITHDRAWALS_PAUSED";
+const MIN_WITHDRAWAL: i128          = 10_000_000; // 1 XLM in stroops
 
 #[contract]
 pub struct Treasury;
@@ -200,6 +201,7 @@ impl Treasury {
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the admin
+    /// - `BelowMinimum`: Withdrawal amount is below minimum (1 XLM)
     /// - `DailyWithdrawalLimitExceeded`: Withdrawal exceeds daily limit
     /// - `InsufficientBalance`: Not enough fees accumulated
     ///
@@ -217,6 +219,11 @@ impl Treasury {
         // CHECKS
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+
+        // Check minimum withdrawal amount
+        if amount < MIN_WITHDRAWAL {
+            return Err(ContractError::BelowMinimum);
+        }
 
         // Check paused flag
         let paused: bool = env.storage().persistent().get(&WITHDRAWALS_PAUSED).unwrap_or(false);
@@ -774,5 +781,41 @@ mod treasury_lifecycle_tests {
         let dest = Address::generate(&env);
         let result = client.try_withdraw_fees(&non_admin, &token, &1i128, &dest);
         assert!(result.is_err());
+    }
+
+    // ── Minimum withdrawal validation ────────────────────────────────────────
+
+    #[test]
+    fn test_withdrawal_below_minimum_rejected() {
+        let env = Env::default();
+        let limit = 1_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &limit);
+
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &limit);
+
+        let dest = Address::generate(&env);
+        // Try to withdraw less than minimum (1 XLM / 10_000_000 stroops)
+        let result = client.try_withdraw_fees(&admin, &token, &9_999_999i128, &dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_withdrawal_at_minimum_accepted() {
+        let env = Env::default();
+        let limit = 1_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &limit);
+
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &limit);
+
+        let dest = Address::generate(&env);
+        // Withdraw exactly minimum (1 XLM)
+        client.withdraw_fees(&admin, &token, &10_000_000i128, &dest);
+
+        assert_eq!(client.get_accumulated_fees(&token), limit - 10_000_000i128);
+        assert_eq!(soroban_sdk::token::Client::new(&env, &token).balance(&dest), 10_000_000i128);
     }
 }

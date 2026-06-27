@@ -297,6 +297,75 @@ describe('useMarkets', () => {
     });
   });
 
+  describe('Stable query key — no duplicate requests on re-render without filter change', () => {
+    it('should not issue additional requests when re-rendered with same filter values', async () => {
+      let callCount = 0;
+
+      server.use(
+        http.get('http://localhost:3001/api/markets', () => {
+          callCount++;
+          return HttpResponse.json({
+            markets: mockMarkets,
+            total: mockMarkets.length,
+            page: 1,
+            limit: 20,
+          });
+        }),
+      );
+
+      // Render with an inline object — simulates the page.tsx pattern
+      const { result, rerender } = renderHook(
+        ({ weightClass }: { weightClass: string }) =>
+          useMarkets(
+            { weight_class: weightClass === 'All' ? undefined : weightClass },
+            { page: 1, limit: 12 },
+          ),
+        { initialProps: { weightClass: 'All' } },
+      );
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      const afterFirstFetch = callCount;
+
+      // Re-render with identical values — should NOT fire another request
+      rerender({ weightClass: 'All' });
+      rerender({ weightClass: 'All' });
+
+      // Allow a tick for any spurious effects to fire
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(callCount).toBe(afterFirstFetch);
+    });
+
+    it('should issue a new request when filters actually change', async () => {
+      let callCount = 0;
+
+      server.use(
+        http.get('http://localhost:3001/api/markets', () => {
+          callCount++;
+          return HttpResponse.json({
+            markets: mockMarkets,
+            total: mockMarkets.length,
+            page: 1,
+            limit: 20,
+          });
+        }),
+      );
+
+      const { result, rerender } = renderHook(
+        ({ status }: { status?: string }) => useMarkets({ status }),
+        { initialProps: { status: undefined } },
+      );
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      const afterFirstFetch = callCount;
+
+      // Change the filter value — should trigger a new fetch
+      rerender({ status: 'open' });
+
+      await waitFor(() => expect(callCount).toBeGreaterThan(afterFirstFetch));
+    });
+  });
+
   describe('Edge cases', () => {
     it('should handle empty markets list', async () => {
       server.use(

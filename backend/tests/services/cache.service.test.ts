@@ -280,4 +280,31 @@ describe('Cache Service', () => {
       expect(redis.scan).toHaveBeenCalled();
     });
   });
+
+  describe('Redis connection failure handling', () => {
+    it('should gracefully degrade when Redis is unavailable', async () => {
+      const testError = new Error('ECONNREFUSED: Connection refused');
+      (redis.get as jest.Mock).mockRejectedValue(testError);
+      (redis.set as jest.Mock).mockRejectedValue(testError);
+      (redis.del as jest.Mock).mockRejectedValue(testError);
+
+      // Should not throw - all operations should handle gracefully
+      const getResult = await cache.get('test:key');
+      expect(getResult).toBeNull();
+
+      await expect(cache.set('test:key', { data: 'test' }, 60)).resolves.not.toThrow();
+      await expect(cache.del('test:key')).resolves.not.toThrow();
+    });
+
+    it('should allow compute function to proceed when Redis is unavailable', async () => {
+      const mockData = { id: '123', computed: true };
+      (redis.get as jest.Mock).mockRejectedValue(new Error('ECONNREFUSED'));
+
+      const compute = jest.fn().mockResolvedValue(mockData);
+      const result = await cache.getOrSet('test:key', 60, compute);
+
+      expect(compute).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(mockData);
+    });
+  });
 });

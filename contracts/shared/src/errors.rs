@@ -50,6 +50,8 @@ pub enum ContractError {
     InvalidOutcome = 24,
     /// Bettor placed no bets in this market
     NoBetsFound = 25,
+    /// Amount is below minimum allowed
+    BelowMinimum = 26,
 
     // ── Oracle / Resolution ────────────────────────────────
     /// Oracle signature verification failed

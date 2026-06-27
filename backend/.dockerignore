@@ -1,0 +1,13 @@
+node_modules
+dist
+src
+tests
+*.ts
+!tsconfig.json
+.env
+.env.*
+.eslintrc.json
+.prettierrc.json
+jest.config.json
+README.md
+coverage

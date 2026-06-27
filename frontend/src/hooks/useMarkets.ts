@@ -35,9 +35,16 @@ export function useMarkets(filters?: MarketFilters, pagination?: PaginationParam
   const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
+  // Serialize to stable strings so object identity changes don't retrigger effects
+  const filtersKey = JSON.stringify(filters ?? null);
+  const paginationKey = JSON.stringify(pagination ?? null);
+
   const fetchAndUpdate = useCallback(async () => {
     try {
-      const response = await fetchMarkets(filters, pagination);
+      const response = await fetchMarkets(
+        filtersKey !== 'null' ? (JSON.parse(filtersKey) as MarketFilters) : undefined,
+        paginationKey !== 'null' ? (JSON.parse(paginationKey) as PaginationParams) : undefined,
+      );
       setMarkets(response.markets);
       setTotal(response.total);
       setError(null);
@@ -46,7 +53,8 @@ export function useMarkets(filters?: MarketFilters, pagination?: PaginationParam
     } finally {
       setIsLoading(false);
     }
-  }, [filters, pagination]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersKey, paginationKey]);
 
   // Reset interval and trigger immediate fetch
   const refetch = useCallback(() => {

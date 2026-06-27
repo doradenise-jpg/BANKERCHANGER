@@ -208,8 +208,8 @@ impl Market {
             return Err(ContractError::BettingClosed);
         }
 
-        if amount < state.config.min_bet {
-            return Err(ContractError::BetTooLow);
+        if amount < state.config.min_bet_amount {
+            return Err(ContractError::BelowMinimum);
         }
         if amount > state.config.max_bet {
             return Err(ContractError::BetTooLarge);

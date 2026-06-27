@@ -19,9 +19,10 @@ const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
 const HORIZON_URL =
   process.env.NEXT_PUBLIC_HORIZON_URL ?? 'https://horizon-testnet.stellar.org';
 const SOROBAN_RPC_URL =
-  NETWORK === 'mainnet'
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ??
+  (NETWORK === 'mainnet'
     ? 'https://soroban-rpc.stellar.org'
-    : 'https://soroban-testnet.stellar.org';
+    : 'https://soroban-testnet.stellar.org');
 const NETWORK_PASSPHRASE =
   NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 

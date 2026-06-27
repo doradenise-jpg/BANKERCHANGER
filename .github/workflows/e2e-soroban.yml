@@ -1,0 +1,163 @@
+name: E2E — Soroban Bet Flow
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  e2e:
+    name: Full Bet Flow (Soroban local node)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: boxmeout
+          POSTGRES_PASSWORD: boxmeout
+          POSTGRES_DB: boxmeout
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust + stellar-cli ────────────────────────────────────────────────
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/Cargo.lock') }}
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli --features opt
+
+      # ── Start local Soroban node ──────────────────────────────────────────
+      - name: Start local Soroban standalone node
+        run: stellar network start local --port 8000 &
+        # Give the node a few seconds to initialise
+      - name: Wait for Soroban node
+        run: |
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8000 && break || sleep 2
+          done
+
+      # ── Build and deploy contracts ────────────────────────────────────────
+      - name: Build contracts (WASM)
+        working-directory: contracts
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Generate test keypair
+        id: keypair
+        run: |
+          OUTPUT=$(stellar keys generate test-key --network local --fund 2>&1)
+          PUBLIC_KEY=$(stellar keys address test-key)
+          echo "public_key=$PUBLIC_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy market_factory contract
+        id: deploy_factory
+        working-directory: contracts
+        run: |
+          FACTORY_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/market_factory.wasm \
+            --source test-key \
+            --network local)
+          echo "factory_id=$FACTORY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy market contract
+        id: deploy_market
+        working-directory: contracts
+        run: |
+          MARKET_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/market.wasm \
+            --source test-key \
+            --network local)
+          echo "market_id=$MARKET_ID" >> "$GITHUB_OUTPUT"
+
+      # ── Node.js + backend ─────────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend deps
+        working-directory: backend
+        run: npm ci
+
+      - name: Start backend
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://boxmeout:boxmeout@localhost:5432/boxmeout
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: e2e-test-secret
+          PORT: 3001
+        run: node dist/index.js &
+
+      - name: Wait for backend
+        run: |
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:3001/health && break || sleep 2
+          done
+
+      # ── Frontend ──────────────────────────────────────────────────────────
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+          NEXT_PUBLIC_STELLAR_NETWORK: local
+
+      - name: Start frontend
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+          NEXT_PUBLIC_STELLAR_NETWORK: local
+        run: npm run start &
+
+      - name: Wait for frontend
+        run: |
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:3000 && break || sleep 2
+          done
+
+      # ── Run E2E tests ─────────────────────────────────────────────────────
+      - name: Run Soroban E2E tests
+        working-directory: frontend
+        env:
+          BASE_URL: http://localhost:3000
+          SOROBAN_TEST_PUBLIC_KEY: ${{ steps.keypair.outputs.public_key }}
+          SOROBAN_MARKET_CONTRACT_ID: ${{ steps.deploy_market.outputs.market_id }}
+        run: npx playwright test e2e/soroban-bet-flow.spec.ts
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-soroban
+          path: frontend/playwright-report/
+          retention-days: 7

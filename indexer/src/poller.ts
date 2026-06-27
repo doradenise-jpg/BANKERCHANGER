@@ -11,8 +11,8 @@ const server = new rpc.Server(RPC_URL);
 
 export async function pollEvents() {
   console.log('Started polling Horizon for contract events...');
-  
-  let cursor = getCursor() || '';
+
+  let cursor = (await getCursor()) || '';
 
   // Polling loop
   setInterval(async () => {
@@ -49,7 +49,7 @@ export async function pollEvents() {
           processEvent(event);
         }
         cursor = response.cursor;
-        saveCursor(cursor);
+        await saveCursor(cursor);
       }
     } catch (err) {
       console.error('Error fetching events:', err);

@@ -1,3 +1,33 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Light mode color palette - WCAG AA compliant (4.5:1+ contrast ratio) */
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  html:not(.dark) {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.6%;
+  }
+
+  html.dark {
+    --background: 0 0% 5.9%;
+    --foreground: 0 0% 100%;
+  }
+
+  /* Ensure good contrast in light mode */
+  html:not(.dark) a {
+    @apply text-blue-600 hover:text-blue-800 visited:text-purple-600;
+  }
+
+  /* Button and form elements contrast */
+  html:not(.dark) button,
+  html:not(.dark) input,
+  html:not(.dark) textarea,
+  html:not(.dark) select {
+    @apply text-gray-900;
+  }
+}

@@ -1,80 +1,35 @@
 // ============================================================
 // BOXMEOUT — Shared Frontend Types
 // ============================================================
+// NOTE: Market, Bet, Portfolio, MarketStats are generated from
+// the backend OpenAPI spec (backend/openapi.yaml).
+// Run `npm run generate:types` to regenerate.
+// ============================================================
 
-export interface Market {
-  market_id: string;
-  match_id: string;
-  fighter_a: string;
-  fighter_b: string;
-  weight_class: string;
-  title_fight: boolean;
-  venue: string;
-  /** ISO 8601 timestamp */
-  scheduled_at: string;
-  status: MarketStatus;
-  outcome: OutcomeString | null;
-  /** Stroops as string (i128 precision) */
-  pool_a: string;
-  pool_b: string;
-  pool_draw: string;
-  total_pool: string;
+import type { components } from './api';
+
+type $Required<T> = { [K in keyof T]-?: T[K] };
+type ApiMarket = $Required<components['schemas']['Market']>;
+type ApiBet = $Required<components['schemas']['Bet']>;
+
+export interface Market extends ApiMarket {
   /** Implied probability in basis points (0–10000) */
   odds_a: number;
   odds_b: number;
   odds_draw: number;
-  fee_bps: number;
   /** Oracle address that submitted result (if resolved) */
   oracle_address?: string;
   /** Transaction hash of resolution (if resolved) */
   resolution_tx_hash?: string;
 }
 
-export type MarketStatus =
-  | 'open'
-  | 'locked'
-  | 'resolved'
-  | 'cancelled'
-  | 'disputed';
+export type MarketStatus = ApiMarket['status'];
+export type OutcomeString = NonNullable<ApiMarket['outcome']>;
+export type BetSide = NonNullable<ApiBet['side']>;
 
-export type OutcomeString =
-  | 'fighter_a'
-  | 'fighter_b'
-  | 'draw'
-  | 'no_contest';
-
-export type BetSide = 'fighter_a' | 'fighter_b' | 'draw';
-
-export interface Bet {
-  market_id: string;
-  side: BetSide;
-  amount: string;
-  amount_xlm: number;
-  placed_at: string;
-  claimed: boolean;
-  claimed_at: string | null;
-  payout: string | null;
-  tx_hash: string;
-}
-
-export interface Portfolio {
-  address: string;
-  active_bets: Bet[];
-  past_bets: Bet[];
-  pending_claims: Bet[];
-  total_staked_xlm: number;
-  total_won_xlm: number;
-  total_lost_xlm: number;
-}
-
-export interface MarketStats {
-  market_id: string;
-  total_bets: number;
-  unique_bettors: number;
-  largest_bet_xlm: number;
-  average_bet_xlm: number;
-  total_pooled_xlm: number;
-}
+export type Bet = ApiBet;
+export type Portfolio = $Required<components['schemas']['Portfolio']>;
+export type MarketStats = $Required<components['schemas']['MarketStats']>;
 
 export interface TxStatus {
   hash: string | null;

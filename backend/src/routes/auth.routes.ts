@@ -336,13 +336,18 @@ router.post('/2fa/disable', requireAuth, validateBody(otpSchema), async (req: Re
  *       401:
  *         description: Invalid temp token or OTP
  */
-router.post('/2fa/verify', validateBody(verifySchema), async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const result = await authService.verify2FA(req.body.tempToken, req.body.otp);
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-});
+router.post(
+  '/2fa/verify',
+  rateLimit({ windowMs: 15 * 60_000, max: 5, keyBy: 'ip' }),
+  validateBody(verifySchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await authService.verify2FA(req.body.tempToken, req.body.otp);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 export default router;
