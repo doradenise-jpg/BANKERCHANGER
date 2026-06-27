@@ -7,6 +7,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { StrKey } from '@stellar/stellar-sdk';
 import { AppError } from '../../utils/AppError';
+import { ERROR_CODES } from '../../constants/errorCodes';
 import { validateQuery } from '../middleware/validate';
 import * as MarketService from '../../services/MarketService';
 import * as OracleService from '../../oracle/OracleService';
@@ -72,7 +73,10 @@ export async function getMarket(
   try {
     const { market_id } = req.params;
     if (!/^\d+$/.test(market_id)) {
-      throw AppError.badRequest('marketId must be a valid numeric string');
+      throw AppError.badRequest(
+        'marketId must be a valid numeric string',
+        ERROR_CODES.INVALID_MARKET_ID
+      );
     }
     const market = await MarketService.getMarketById(market_id);
     res.status(200).json(market);
@@ -319,7 +323,10 @@ export async function resolveMarket(req: Request, res: Response, next: NextFunct
     const { winning_outcome } = parsed.data;
 
     const market = await MarketService.db().findMarketById(market_id);
-    if (!market) throw AppError.notFound(`Market not found: ${market_id}`);
+    if (!market) throw AppError.notFound(
+      `Market not found: ${market_id}`,
+      ERROR_CODES.MARKET_NOT_FOUND
+    );
 
     if (market.status === 'resolved') {
       res.status(409).json({ error: 'Market is already resolved' });

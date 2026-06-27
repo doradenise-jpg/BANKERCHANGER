@@ -9,6 +9,7 @@ import { StrKey } from '@stellar/stellar-sdk';
 import * as BetService from '../../services/BetService';
 import * as MarketService from '../../services/MarketService';
 import { AppError } from '../../utils/AppError';
+import { ERROR_CODES } from '../../constants/errorCodes';
 
 const claimBodySchema = z.object({
   market_id: z.string().min(1, 'market_id is required'),
@@ -72,7 +73,10 @@ export async function getBettorStats(
     const { bettor_address } = req.params;
 
     if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
-      throw AppError.badRequest('Invalid Stellar address format');
+      throw AppError.badRequest(
+        'Invalid Stellar address format',
+        ERROR_CODES.INVALID_REQUEST
+      );
     }
 
     const stats = await MarketService.getBettorStats(bettor_address);
@@ -96,7 +100,10 @@ export async function getBetsByAddress(
     const { bettor_address } = req.params;
 
     if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
-      throw AppError.badRequest('Invalid Stellar address format');
+      throw AppError.badRequest(
+        'Invalid Stellar address format',
+        ERROR_CODES.INVALID_REQUEST
+      );
     }
 
     const bets = await BetService.fetchBetsByAddress(bettor_address);

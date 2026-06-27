@@ -35,7 +35,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }):
           }}
         />
       </head>
-      <body className="bg-gray-950 dark:bg-gray-950 text-white dark:text-white min-h-screen">
+      <body className="bg-white dark:bg-gray-950 text-gray-900 dark:text-white min-h-screen transition-colors">
         <QueryProvider>
           <ToastProvider>
             <Header />
