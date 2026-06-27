@@ -77,10 +77,27 @@ export const logoutBody = z.object({
 
 const MARKET_STATUSES = ['open', 'locked', 'resolved', 'cancelled', 'disputed'] as const;
 const MARKET_CATEGORIES = ['BOXING', 'MMA', 'KICKBOXING', 'OTHER'] as const;
+const MARKET_WEIGHT_CLASSES = [
+  'Heavyweight',
+  'Light Heavyweight',
+  'Super Middleweight',
+  'Middleweight',
+  'Super Welterweight',
+  'Welterweight',
+  'Super Lightweight',
+  'Lightweight',
+  'Super Featherweight',
+  'Featherweight',
+  'Super Bantamweight',
+  'Bantamweight',
+  'Super Flyweight',
+  'Flyweight',
+  'Minimumweight',
+] as const;
 
 export const listMarketsQuery = z.object({
   status: z.enum(MARKET_STATUSES).optional(),
-  weight_class: z.string().min(1).optional(),
+  weight_class: z.enum(MARKET_WEIGHT_CLASSES).optional(),
   fighter: z.string().min(1).optional(),
   dateFrom: z.string().datetime().optional(),
   dateTo: z.string().datetime().optional(),

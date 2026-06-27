@@ -62,7 +62,7 @@ export async function invokeContract(
     try {
       // Step 1-2: Build transaction
       const transaction = new TransactionBuilder(sourceAccount, {
-        fee: (baseFee * Math.pow(2, attempts)).toString(),
+        fee: (baseFee * (1 + attempts)).toString(),
         networkPassphrase,
       })
         .addOperation(Operation.invokeHostFunction({ hostFunction: invokeContractHostFunction, auth: [] }))
@@ -80,7 +80,7 @@ export async function invokeContract(
       const resourceFee = minResourceFee ? parseInt(minResourceFee, 10) : 0;
 
       // Step 4: Set total fee
-      const totalFee = (baseFee * Math.pow(2, attempts)) + resourceFee;
+      const totalFee = (baseFee * (1 + attempts)) + resourceFee;
       transaction.fee = totalFee.toString();
 
       // Step 5: Sign

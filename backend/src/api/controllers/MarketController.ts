@@ -19,11 +19,31 @@ import * as OracleService from '../../oracle/OracleService';
 const VALID_STATUSES = ['open', 'locked', 'resolved', 'cancelled', 'disputed'] as const;
 const MAX_LIMIT = 200;
 
+const VALID_WEIGHT_CLASSES = [
+  'Heavyweight',
+  'Light Heavyweight',
+  'Super Middleweight',
+  'Middleweight',
+  'Super Welterweight',
+  'Welterweight',
+  'Super Lightweight',
+  'Lightweight',
+  'Super Featherweight',
+  'Featherweight',
+  'Super Bantamweight',
+  'Bantamweight',
+  'Super Flyweight',
+  'Flyweight',
+  'Minimumweight',
+] as const;
+
 const listMarketsQuerySchema = z.object({
   status: z
     .enum(VALID_STATUSES)
     .optional(),
-  weight_class: z.string().min(1).optional(),
+  weight_class: z
+    .enum(VALID_WEIGHT_CLASSES)
+    .optional(),
   fighter: z.string().min(1).optional(),
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
