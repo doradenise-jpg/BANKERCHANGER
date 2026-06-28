@@ -1,0 +1,17 @@
+title = "BANKERCHANGER gitleaks config"
+
+[allowlist]
+description = "Known non-secret values"
+regexes = [
+  # Placeholder fallback used in development only — not a real secret
+  'dev-jwt-secret-change-me',
+  # Stellar testnet public keys are not secrets
+  'G[A-Z2-7]{55}',
+  # Playwright / test environment values
+  'e2e-test-secret',
+]
+paths = [
+  # Lock files contain package hashes that trip generic entropy rules
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)Cargo\.lock$''',
+]
