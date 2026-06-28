@@ -189,6 +189,37 @@ components:
         hasNext:    { type: boolean }
         hasPrev:    { type: boolean }
 
+  x-rateLimit-defaults:
+    description: |
+      All endpoints are rate-limited. Limits are enforced per route group using
+      Redis-backed counters. When a limit is exceeded the API returns HTTP 429
+      with a Retry-After header indicating seconds until the window resets.
+    groups:
+      - prefix: /auth
+        windowMs: 60000
+        max: 10
+        keyBy: ip
+      - prefix: /api
+        windowMs: 60000
+        max: 60
+        keyBy: ip
+      - prefix: /api/oracle
+        windowMs: 60000
+        max: 10
+        keyBy: ip
+      - prefix: /api/admin
+        windowMs: 60000
+        max: 20
+        keyBy: ip
+      - prefix: /trading/bet
+        windowMs: 60000
+        max: 60
+        keyBy: userId
+      - prefix: /wallet/withdraw
+        windowMs: 60000
+        max: 5
+        keyBy: userId
+
 paths:
   # ---------------------------------------------------------------------------
   # Auth
@@ -198,6 +229,9 @@ paths:
       summary: Register a new user
       operationId: register
       tags: [Auth]
+      x-rateLimit-windowMs: 60000
+      x-rateLimit-max: 10
+      x-rateLimit-keyBy: ip
       requestBody:
         required: true
         content:
@@ -649,6 +683,9 @@ paths:
       summary: List markets
       operationId: listMarkets
       tags: [Markets]
+      x-rateLimit-windowMs: 60000
+      x-rateLimit-max: 60
+      x-rateLimit-keyBy: ip
       parameters:
         - name: status
           in: query
@@ -1011,6 +1048,9 @@ paths:
       summary: Submit a signed oracle fight result
       operationId: submitOracleResult
       tags: [Oracle]
+      x-rateLimit-windowMs: 60000
+      x-rateLimit-max: 10
+      x-rateLimit-keyBy: ip
       security:
         - oracleKey: []
       requestBody:
@@ -1282,6 +1322,9 @@ paths:
       summary: List all disputes (admin only)
       operationId: adminListDisputes
       tags: [Admin]
+      x-rateLimit-windowMs: 60000
+      x-rateLimit-max: 20
+      x-rateLimit-keyBy: ip
       security:
         - bearerAuth: []
       responses:

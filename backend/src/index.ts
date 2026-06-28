@@ -18,6 +18,7 @@ import claimsRouter from "./routes/bet.routes";
 import { startAutoResolutionCron, startAutoLockCron } from "./cron/autoResolution.cron";
 import { startCleanupCron } from "./cron/cleanup.cron";
 import { initActivityFeed } from "./websocket/realtime";
+import { register, httpRequestDuration, httpRequestsTotal } from "./services/metrics.service";
 
 // Validate environment variables on startup
 const env = validateEnv();
@@ -36,6 +37,24 @@ app.use(requestLogging);
 if (env.NODE_ENV === 'development' || env.ENABLE_SWAGGER) {
   setupSwagger(app);
 }
+
+// Prometheus metrics endpoint (internal only — no auth required)
+app.get("/metrics", async (_req, res) => {
+  res.set("Content-Type", register.contentType);
+  res.end(await register.metrics());
+});
+
+// HTTP request metrics middleware
+app.use((req, res, next) => {
+  const end = httpRequestDuration.startTimer();
+  res.on("finish", () => {
+    const route = req.route?.path || req.path;
+    const labels = { method: req.method, route, status_code: String(res.statusCode) };
+    end(labels);
+    httpRequestsTotal.inc(labels);
+  });
+  next();
+});
 
 // Routes
 app.get("/health", async (_req, res) => {

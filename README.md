@@ -79,6 +79,9 @@ Deployment order: `shared` (build only) → `treasury` → `market_factory` → 
 ## Documentation
 
 - [Contributing Guidelines](docs/contributing.md)
+- [Architecture Overview](docs/architecture.md) — System diagram, data flows, sequence diagrams
+- [API Rate Limits](docs/api-rate-limits.md) — Rate limit values, headers, client best practices
+- [Observability Guide](docs/observability.md) — Prometheus metric names, alerting, logging
 - [Operational Runbook](docs/runbook.md) — Incident response procedures for production
 
 ## License
