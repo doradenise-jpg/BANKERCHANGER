@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AppError } from '../utils/AppError';
+import { getEnv } from '../config/env';
 
 export interface AdminJwtPayload extends jwt.JwtPayload {
   role: 'admin';
@@ -21,11 +22,8 @@ export function requireAdminJwt(req: Request, _res: Response, next: NextFunction
   }
 
   const token = authHeader.slice(7);
-  const secret = process.env.ADMIN_JWT_SECRET ?? process.env.JWT_SECRET;
-
-  if (!secret) {
-    return next(new AppError(500, 'JWT secret is not configured'));
-  }
+  const env = getEnv();
+  const secret = env.ADMIN_JWT_SECRET;
 
   try {
     const payload = jwt.verify(token, secret) as AdminJwtPayload;

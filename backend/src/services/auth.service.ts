@@ -8,17 +8,16 @@ import { generateSecret, generateQRCode, verifyToken } from './totp.service';
 import { sendPasswordResetEmail } from './email.service';
 import { redis } from './cache.service';
 import { pool } from '../config/db';
+import { getEnv } from '../config/env';
 import { password_reset_tokens } from '../db/schema';
 import { AppError } from '../utils/AppError';
 import { logger } from '../utils/logger';
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? '15m';
-const REFRESH_EXPIRES_IN = process.env.REFRESH_EXPIRES_IN ?? '7d';
-const TEMP_TOKEN_EXPIRES_IN = '5m';
-const RESET_TOKEN_EXPIRES_IN = '15m';
-const BCRYPT_ROUNDS = 12;
-const VERIFY_EMAIL_URL = process.env.VERIFY_EMAIL_URL ?? 'http://localhost:3001/auth/verify-email';
+const env = getEnv();
+const JWT_SECRET = env.JWT_SECRET;
+const JWT_EXPIRES_IN = env.JWT_EXPIRES_IN || '15m';
+const REFRESH_EXPIRES_IN = env.REFRESH_EXPIRES_IN || '7d';
+const VERIFY_EMAIL_URL = env.VERIFY_EMAIL_URL || 'http://localhost:3001/auth/verify-email';
 
 async function generateEmailVerificationToken(userId: string): Promise<string> {
   const token = randomUUID();

@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AppError } from '../utils/AppError';
 import { isSessionRevoked } from '../services/auth.service';
+import { getEnv } from '../config/env';
 import { flagDispute, investigateDispute, cancelMarket, resolveDispute, listDisputes, processRefunds, bulkPause, bulkCancel } from '../api/controllers/AdminController';
 import {
   logExportAudit,
@@ -14,7 +15,8 @@ import { sendExportReadyEmail } from '../services/email.service';
 
 const router = Router();
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+const env = getEnv();
+const JWT_SECRET = env.JWT_SECRET;
 
 /**
  * @swagger

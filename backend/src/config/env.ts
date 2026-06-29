@@ -10,7 +10,7 @@ const envSchema = z.object({
   FACTORY_CONTRACT_ADDRESS: z.string().min(1, 'FACTORY_CONTRACT_ADDRESS is required'),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  JWT_SECRET: z.string().min(1).default('change-me-in-production'),
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
   STELLAR_NETWORK: z.string().default('testnet'),
   HORIZON_URL: z.string().url().optional(),
   ORACLE_PUBLIC_KEY: z.string().optional(),
@@ -48,6 +48,15 @@ export function validateEnv(): Env {
   }
 
   validatedEnv = result.data;
+
+  // Production-only validation
+  if (validatedEnv.NODE_ENV === 'production') {
+    if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+      logger.error('Production safety check failed: JWT_SECRET must be set and at least 32 characters');
+      process.exit(1);
+    }
+  }
+
   logger.info('Environment variables validated successfully');
   return validatedEnv;
 }

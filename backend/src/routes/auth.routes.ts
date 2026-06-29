@@ -5,10 +5,12 @@ import * as authService from '../services/auth.service';
 import { AppError } from '../utils/AppError';
 import { validateBody } from '../api/middleware/validate';
 import { rateLimit } from '../middleware/rate-limit.middleware';
+import { getEnv } from '../config/env';
 
 const router = Router();
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+const env = getEnv();
+const JWT_SECRET = env.JWT_SECRET;
 
 /**
  * @swagger

@@ -1,10 +1,18 @@
 import type { Request, Response, NextFunction } from 'express';
 import { beforeEach, describe, it, expect, jest } from '@jest/globals';
 import jwt from 'jsonwebtoken';
-import { requireAdminJwt } from '../../src/middleware/requireAdminJwt.middleware';
 import { AppError } from '../../src/utils/AppError';
 
 const SECRET = 'test-secret';
+
+// Mock env before importing middleware
+jest.mock('../../src/config/env', () => ({
+  getEnv: jest.fn(() => ({
+    ADMIN_JWT_SECRET: SECRET,
+  })),
+}));
+
+import { requireAdminJwt } from '../../src/middleware/requireAdminJwt.middleware';
 
 function makeReqRes(authHeader?: string) {
   const req = {
@@ -18,7 +26,6 @@ function makeReqRes(authHeader?: string) {
 describe('requireAdminJwt', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.JWT_SECRET = SECRET;
   });
 
   it('calls next() with no error for a valid admin JWT', () => {
