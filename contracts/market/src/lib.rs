@@ -215,6 +215,26 @@ impl Market {
             return Err(ContractError::BetTooLarge);
         }
 
+        // ── COMPUTE DYNAMIC ODDS (AMM) ────────────────────────────────────────
+        let side_index = match side {
+            BetSide::FighterA => 0u32,
+            BetSide::FighterB => 1u32,
+            BetSide::Draw => 2u32,
+        };
+        
+        let (shares_received, _odds_bps) = compute_odds(
+            state.pool_a,
+            state.pool_b,
+            state.pool_draw,
+            amount,
+            side_index,
+        )?;
+
+        // Guard: ensure minimum shares received (price impact protection)
+        if shares_received == 0 {
+            return Err(ContractError::InsufficientLiquidity);
+        }
+
         // ── EFFECTS ───────────────────────────────────────────────────────────
         let mut new_state = state.clone();
         match side {
