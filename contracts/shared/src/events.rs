@@ -88,6 +88,16 @@ pub fn emit_dispute_resolved(env: &Env, market_id: u64, final_outcome: Outcome) 
     env.events().publish(topics, final_outcome);
 }
 
+/// Emits an `admin_proposed` event when the current admin nominates a successor.
+/// The transfer is not final until the nominee calls `accept_admin`.
+///
+/// Topics: `(Symbol("admin_proposed"),)`
+/// Data:   `(current_admin, proposed_admin)`
+pub fn emit_admin_proposed(env: &Env, current_admin: Address, proposed_admin: Address) {
+    let topics = (Symbol::new(env, "admin_proposed"),);
+    env.events().publish(topics, (current_admin, proposed_admin));
+}
+
 /// Emits an `admin_transferred` event when admin privileges change hands.
 ///
 /// Topics: `(Symbol("admin_transferred"),)`

@@ -13,6 +13,7 @@ use boxmeout_shared::{
 const MARKET_COUNT: &str    = "MARKET_COUNT";
 const MARKET_MAP: &str      = "MARKET_MAP";
 const ADMIN: &str           = "ADMIN";
+const PENDING_ADMIN: &str   = "PENDING_ADMIN";
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str          = "PAUSED";
 const DEFAULT_CONFIG: &str  = "DEFAULT_CONFIG";
@@ -380,11 +381,15 @@ impl MarketFactory {
         env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Transfers admin privileges to a new address.
+    /// Proposes a new admin address, starting the two-step transfer.
+    ///
+    /// The current admin writes the candidate to `PENDING_ADMIN`.  Nothing
+    /// changes until the candidate calls `accept_admin`.  Calling this again
+    /// before acceptance overwrites the previous proposal (re-propose).
     ///
     /// # Errors
     /// - `NotAdmin`: Caller is not the current admin
-    pub fn transfer_admin(
+    pub fn propose_admin(
         env: Env,
         current_admin: Address,
         new_admin: Address,
@@ -392,11 +397,39 @@ impl MarketFactory {
         current_admin.require_auth();
         Self::require_admin(&env, &current_admin)?;
 
+        env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
+        boxmeout_shared::emit_admin_proposed(&env, current_admin, new_admin);
+        Ok(())
+    }
+
+    /// Completes the two-step admin transfer.
+    ///
+    /// Must be called by the exact address stored in `PENDING_ADMIN`.
+    /// Clears `PENDING_ADMIN` and promotes the caller to `ADMIN`.
+    ///
+    /// # Errors
+    /// - `NotAdmin`: No pending proposal exists, or caller is not the pending admin
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage().persistent()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::NotAdmin)?;
+
+        if new_admin != pending {
+            return Err(ContractError::NotAdmin);
+        }
+
         let old_admin: Address = env
             .storage().persistent()
             .get(&ADMIN)
             .ok_or(ContractError::NotAdmin)?;
+
+        // EFFECTS
         env.storage().persistent().set(&ADMIN, &new_admin);
+        env.storage().persistent().remove(&PENDING_ADMIN);
+
         boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
         Ok(())
     }
@@ -739,5 +772,125 @@ mod tests {
 
         let ids = client.list_market_ids(&999u64, &10u32);
         assert_eq!(ids.len(), 0);
+    }
+}
+
+// ============================================================
+// ISSUE #26: Two-step admin transfer tests
+// ============================================================
+#[cfg(test)]
+mod admin_transfer_tests {
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use boxmeout_shared::types::FactoryConfig;
+    use crate::{MarketFactory, MarketFactoryClient};
+
+    fn setup() -> (Env, MarketFactoryClient<'static>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MarketFactory);
+        let client = MarketFactoryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        client.initialize(&admin, &treasury, &oracle, &FactoryConfig {
+            default_min_bet: 1_000_000,
+            default_max_bet: 100_000_000_000,
+            default_fee_bps: 200,
+            default_lock_before_secs: 3_600,
+            default_resolution_window: 86_400,
+        });
+        (env, client, admin)
+    }
+
+    /// Happy path: propose → accept promotes the new admin and clears PENDING_ADMIN.
+    #[test]
+    fn test_propose_then_accept_transfers_admin() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        // Step 1: current admin proposes
+        client.propose_admin(&admin, &new_admin);
+
+        // Step 2: nominee accepts
+        client.accept_admin(&new_admin);
+
+        // New admin can now call an admin-only function; old admin cannot
+        let non_admin = Address::generate(&env);
+        let result_old = client.try_pause_factory(&admin);
+        let result_new = client.try_pause_factory(&new_admin);
+        // old admin is rejected, new admin succeeds
+        assert!(result_old.is_err(), "Old admin must be rejected after transfer");
+        assert!(result_new.is_ok(), "New admin must be accepted after transfer");
+    }
+
+    /// Wrong caller: a third party cannot accept a pending proposal.
+    #[test]
+    fn test_wrong_caller_cannot_accept_admin() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+
+        let result = client.try_accept_admin(&impostor);
+        assert!(result.is_err(), "Impostor must not be able to accept pending proposal");
+    }
+
+    /// Accept with no pending proposal returns NotAdmin.
+    #[test]
+    fn test_accept_with_no_pending_proposal_fails() {
+        let (env, client, _admin) = setup();
+        let anyone = Address::generate(&env);
+
+        let result = client.try_accept_admin(&anyone);
+        assert!(result.is_err(), "accept_admin with no pending proposal must fail");
+    }
+
+    /// Non-admin cannot propose.
+    #[test]
+    fn test_non_admin_cannot_propose() {
+        let (env, client, _admin) = setup();
+        let non_admin = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        let result = client.try_propose_admin(&non_admin, &target);
+        assert!(result.is_err(), "Non-admin must not be able to propose a new admin");
+    }
+
+    /// Re-propose: calling propose_admin again overwrites the previous pending admin.
+    #[test]
+    fn test_re_propose_overwrites_previous_pending_admin() {
+        let (env, client, admin) = setup();
+        let first_nominee = Address::generate(&env);
+        let second_nominee = Address::generate(&env);
+
+        // First proposal
+        client.propose_admin(&admin, &first_nominee);
+
+        // Re-propose with a different address before first nominee accepts
+        client.propose_admin(&admin, &second_nominee);
+
+        // First nominee can no longer accept — the slot was overwritten
+        let result_first = client.try_accept_admin(&first_nominee);
+        assert!(result_first.is_err(), "Overwritten nominee must not be able to accept");
+
+        // Second nominee can accept
+        let result_second = client.try_accept_admin(&second_nominee);
+        assert!(result_second.is_ok(), "Current nominee must be able to accept after re-propose");
+    }
+
+    /// After a completed transfer, PENDING_ADMIN is cleared —
+    /// the old nominee cannot accept again (no double-accept).
+    #[test]
+    fn test_pending_admin_cleared_after_accept() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        // A second accept call must fail because PENDING_ADMIN was cleared
+        let result = client.try_accept_admin(&new_admin);
+        assert!(result.is_err(), "Second accept must fail after PENDING_ADMIN is cleared");
     }
 }
