@@ -1,5 +1,6 @@
 import { rpc, scValToNative } from '@stellar/stellar-sdk';
 import { getCursor, saveCursor, upsertInvoice } from './db';
+import { updateLastLedger } from './health';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -47,6 +48,10 @@ export async function pollEvents() {
       if (response.events && response.events.length > 0) {
         for (const event of response.events) {
           processEvent(event);
+          // Update last ledger from event
+          if (event.ledger) {
+            updateLastLedger(event.ledger);
+          }
         }
         cursor = response.cursor;
         await saveCursor(cursor);

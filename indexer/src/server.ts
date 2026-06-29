@@ -1,11 +1,32 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { getInvoices, getInvoiceById } from './db';
+import { getHealthState } from './health';
+import { version } from '../package.json';
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// Health check endpoint for K8s liveness/readiness probes
+app.get('/health', (req: Request, res: Response) => {
+  try {
+    const { lastLedger, cursorAge } = getHealthState();
+    
+    res.json({
+      status: 'ok',
+      lastLedger,
+      cursorAge,
+      version,
+    });
+  } catch (err: any) {
+    res.status(503).json({
+      status: 'error',
+      error: err.message,
+    });
+  }
+});
 
 app.get('/invoices', (req: Request, res: Response) => {
   try {
