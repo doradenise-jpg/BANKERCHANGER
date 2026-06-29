@@ -20,14 +20,31 @@ export class APIError extends Error {
   }
 }
 
+export class TimeoutError extends Error {
+  constructor(message = 'Request timeout (10s)') {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
+const TIMEOUT_MS = 10000; // 10 seconds
+
 // ─── Core fetch helper ────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}`);
+    res = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
   } catch (e) {
+    if ((e as Error).name === 'AbortError') {
+      throw new TimeoutError();
+    }
     throw new APIError(0, (e as Error).message);
+  } finally {
+    clearTimeout(timeoutId);
   }
   if (!res.ok) {
     throw new APIError(res.status, `API error ${res.status}: ${res.statusText}`);

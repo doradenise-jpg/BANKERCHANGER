@@ -22,12 +22,26 @@ export class NetworkError extends Error {
   constructor(message = 'Network error') { super(message); this.name = 'NetworkError'; }
 }
 
+export class TimeoutError extends Error {
+  constructor(message = 'Request timeout (10s)') { super(message); this.name = 'TimeoutError'; }
+}
+
+const TIMEOUT_MS = 10000; // 10 seconds
+
 async function apiFetch<T>(path: string): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}`);
+    res = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
   } catch (e) {
+    if ((e as Error).name === 'AbortError') {
+      throw new TimeoutError();
+    }
     throw new NetworkError((e as Error).message);
+  } finally {
+    clearTimeout(timeoutId);
   }
   if (res.status === 404) throw new NotFoundError();
   if (!res.ok) throw new NetworkError(`Unexpected response: ${res.status}`);
