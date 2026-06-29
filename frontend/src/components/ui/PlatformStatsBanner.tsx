@@ -20,15 +20,40 @@ function StatCellSkeleton() {
   );
 }
 
-export function PlatformStatsBanner(): JSX.Element {
-  const { stats, isLoading } = usePlatformStats();
+/** Shown when the API is unavailable — preserves layout, avoids empty cards. */
+function StatCellUnavailable({ label }: { label: string }) {
+  return (
+    <div className="bg-gray-900 rounded-xl p-4 text-center">
+      <p className="text-xs text-gray-400">{label}</p>
+      <p
+        className="text-lg font-bold text-gray-500 mt-1"
+        aria-label={`${label}: data unavailable`}
+      >
+        --
+      </p>
+    </div>
+  );
+}
 
-  if (isLoading || !stats) {
+export function PlatformStatsBanner(): JSX.Element {
+  const { stats, isLoading, error } = usePlatformStats();
+
+  if (isLoading) {
     return (
       <div className="grid grid-cols-3 gap-3">
         <StatCellSkeleton />
         <StatCellSkeleton />
         <StatCellSkeleton />
+      </div>
+    );
+  }
+
+  if (error || !stats) {
+    return (
+      <div className="grid grid-cols-3 gap-3">
+        <StatCellUnavailable label="Active Markets" />
+        <StatCellUnavailable label="Total Volume" />
+        <StatCellUnavailable label="Total Bets Placed" />
       </div>
     );
   }

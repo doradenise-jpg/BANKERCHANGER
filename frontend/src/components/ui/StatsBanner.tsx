@@ -1,7 +1,6 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../../services/api';
 
 interface Stats {
   totalMarkets: number;
@@ -10,7 +9,7 @@ interface Stats {
 }
 
 export function StatsBanner(): JSX.Element {
-  const { data: stats, isLoading } = useQuery<Stats>({
+  const { data: stats, isLoading, isError } = useQuery<Stats>({
     queryKey: ['stats'],
     queryFn: async () => {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/stats`);
@@ -21,9 +20,18 @@ export function StatsBanner(): JSX.Element {
   });
 
   const statItems = [
-    { label: 'Total Markets', value: stats?.totalMarkets ?? 0 },
-    { label: 'Total Volume', value: `$${(stats?.totalVolume ?? 0).toLocaleString()}` },
-    { label: 'Active Markets', value: stats?.activeMarkets ?? 0 },
+    {
+      label: 'Total Markets',
+      value: isError ? '--' : String(stats?.totalMarkets ?? 0),
+    },
+    {
+      label: 'Total Volume',
+      value: isError ? '--' : `$${(stats?.totalVolume ?? 0).toLocaleString()}`,
+    },
+    {
+      label: 'Active Markets',
+      value: isError ? '--' : String(stats?.activeMarkets ?? 0),
+    },
   ];
 
   return (
@@ -33,7 +41,12 @@ export function StatsBanner(): JSX.Element {
           {isLoading ? (
             <div className="h-8 bg-gray-700 rounded animate-pulse mb-2" />
           ) : (
-            <p className="text-2xl font-bold text-amber-400">{item.value}</p>
+            <p
+              className={`text-2xl font-bold ${isError ? 'text-gray-500' : 'text-amber-400'}`}
+              aria-label={`${item.label}: ${isError ? 'data unavailable' : item.value}`}
+            >
+              {item.value}
+            </p>
           )}
           <p className="text-gray-400 text-sm mt-1">{item.label}</p>
         </div>
