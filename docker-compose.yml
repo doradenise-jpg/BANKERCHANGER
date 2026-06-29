@@ -29,6 +29,17 @@ services:
       timeout: 5s
       retries: 5
 
+  indexer:
+    build: ./indexer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file: ./indexer/.env
+    ports:
+      - '3002:3002'
+    volumes:
+      - indexer_data:/app/data
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -37,6 +48,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      indexer:
+        condition: service_started
     env_file: ./backend/.env
     ports:
       - '3001:3001'
@@ -64,3 +77,4 @@ services:
 
 volumes:
   postgres_data:
+  indexer_data:

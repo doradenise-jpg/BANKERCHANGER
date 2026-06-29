@@ -25,20 +25,42 @@ docs/         Architecture and API documentation
 ## Quick Start
 
 ```bash
-# 1. Clone
+# 1. Clone the repository
 git clone https://github.com/your-org/boxmeout.git && cd boxmeout
 
-# 2. Start infrastructure
+# 2. Set up environment files
+cp backend/.env.example backend/.env
+cp indexer/.env.example indexer/.env
+cp frontend/.env.example frontend/.env
+# Edit .env files with your configuration
+
+# 3. Start all services with one command
+docker compose up
+
+# The full stack is now running:
+# - PostgreSQL:  localhost:5432
+# - Redis:       localhost:6379
+# - Indexer:     localhost:3002
+# - Backend API: localhost:3001
+# - Frontend:    localhost:3000
+```
+
+### Development Mode (Local)
+
+If you prefer to run services locally without Docker:
+
+```bash
+# 1. Start only infrastructure services
 docker compose up postgres redis
 
-# 3. Backend
-cd backend && cp .env.example .env && npm install && npm run dev
+# 2. Backend (in separate terminal)
+cd backend && npm install && npm run dev
 
-# 4. Frontend
-cd frontend && cp .env.example .env && npm install && npm run dev
+# 3. Indexer (in separate terminal)
+cd indexer && npm install && npm run dev
 
-# 5. Contracts (requires Rust + stellar-cli)
-cd contracts && cargo build --workspace
+# 4. Frontend (in separate terminal)
+cd frontend && npm install && npm run dev
 ```
 
 ## Contract Deployment
@@ -78,6 +100,7 @@ Deployment order: `shared` (build only) → `treasury` → `market_factory` → 
 
 ## Documentation
 
+- **[Getting Started Guide](docs/GETTING_STARTED.md)** — Complete setup guide with Docker
 - [Contributing Guidelines](docs/contributing.md)
 - [Architecture Overview](docs/architecture.md) — System diagram, data flows, sequence diagrams
 - [API Rate Limits](docs/api-rate-limits.md) — Rate limit values, headers, client best practices
