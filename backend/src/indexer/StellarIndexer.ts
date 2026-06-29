@@ -317,24 +317,32 @@ export async function processLedger(ledger_sequence: number): Promise<void> {
   }
 }
 
+/**
+ * Dispatch table mapping each known event type to its handler.
+ * Exported so that tests can replace individual entries with mocks
+ * without having to intercept module-level function bindings.
+ */
+export const EVENT_HANDLERS: Record<string, (event: RawStellarEvent) => Promise<void>> = {
+  market_created:   (e) => handleMarketCreated(e),
+  bet_placed:       (e) => handleBetPlaced(e),
+  market_locked:    (e) => handleMarketLocked(e),
+  market_resolved:  (e) => handleMarketResolved(e),
+  market_cancelled: (e) => handleMarketCancelled(e),
+  winnings_claimed: (e) => handleWinningsClaimed(e),
+  refund_claimed:   (e) => handleRefundClaimed(e),
+};
+
 export async function processEvent(event: RawStellarEvent): Promise<void> {
   try {
-    const eventType = event.event_type;
+    const handler = EVENT_HANDLERS[event.event_type];
 
-    if (eventType === 'market_created') {
-      await handleMarketCreated(event);
-    } else if (eventType === 'bet_placed') {
-      await handleBetPlaced(event);
-    } else if (eventType === 'market_locked') {
-      await handleMarketLocked(event);
-    } else if (eventType === 'market_resolved') {
-      await handleMarketResolved(event);
-    } else if (eventType === 'market_cancelled') {
-      await handleMarketCancelled(event);
-    } else if (eventType === 'winnings_claimed') {
-      await handleWinningsClaimed(event);
-    } else if (eventType === 'refund_claimed') {
-      await handleRefundClaimed(event);
+    if (handler) {
+      await handler(event);
+    } else {
+      console.warn(
+        `[Indexer] Unknown event type "${event.event_type}" on contract ${event.contract_address} ` +
+        `(tx: ${event.tx_hash}, ledger: ${event.ledger_sequence}) — skipping`,
+      );
     }
   } catch (err) {
     console.error(`Error processing event ${event.tx_hash}:`, err);
