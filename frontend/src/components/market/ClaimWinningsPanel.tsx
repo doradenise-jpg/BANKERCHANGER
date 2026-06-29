@@ -27,7 +27,7 @@ function getMyBets(allBets: Bet[], walletAddress: string | null | undefined): Be
 
 export function ClaimWinningsPanel({ market, allBets }: ClaimWinningsPanelProps): JSX.Element {
   const { address } = useWallet();
-  const { claimWinnings, txStatus, reset } = useClaimWinnings();
+  const { claimWinnings, txStatus, isSubmitting, reset } = useClaimWinnings();
 
   const myBets = useMemo(() => getMyBets(allBets, address), [allBets, address]);
   // Prefer the latest bet from this wallet.
@@ -46,6 +46,7 @@ export function ClaimWinningsPanel({ market, allBets }: ClaimWinningsPanelProps)
     myBet != null &&
     !alreadyClaimed &&
     !bettorLost &&
+    !isSubmitting &&
     txStatus.status === 'idle';
 
   const projectedPayout = useMemo(() => {
