@@ -55,44 +55,34 @@ export async function recordBet(
 
   const amount_xlm = Number(amount) / 10_000_000;
 
-  try {
-    const result = await pool.query(
-      `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (tx_hash) DO UPDATE SET tx_hash = EXCLUDED.tx_hash
-       RETURNING *`,
-      [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
-    );
+  const result = await pool.query(
+    `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (tx_hash) DO NOTHING
+     RETURNING *`,
+    [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
+  );
 
-    const bet = result.rows[0];
-
-    // Invalidate market cache
+  let bet: any;
+  if (result.rows.length > 0) {
+    bet = result.rows[0];
+    // Invalidate cache only on new insert
     await cacheDeletePattern(`market:${market_id}*`);
     await cacheDeletePattern('platform:stats');
-
-    return {
-      ...bet,
-      placed_at: new Date(bet.placed_at),
-      claimed_at: bet.claimed_at ? new Date(bet.claimed_at) : null,
-    } as Bet;
-  } catch (error) {
-    if ((error as any).code === '23505') {
-      // Unique constraint violation on tx_hash — idempotent, return existing bet
-      const existing = await pool.query(
-        'SELECT * FROM bets WHERE tx_hash = $1',
-        [tx_hash],
-      );
-      if (existing.rows.length > 0) {
-        const bet = existing.rows[0];
-        return {
-          ...bet,
-          placed_at: new Date(bet.placed_at),
-          claimed_at: bet.claimed_at ? new Date(bet.claimed_at) : null,
-        } as Bet;
-      }
-    }
-    throw error;
+  } else {
+    // Conflict occurred - fetch existing row
+    const existing = await pool.query(
+      'SELECT * FROM bets WHERE tx_hash = $1',
+      [tx_hash],
+    );
+    bet = existing.rows[0];
   }
+
+  return {
+    ...bet,
+    placed_at: new Date(bet.placed_at),
+    claimed_at: bet.claimed_at ? new Date(bet.claimed_at) : null,
+  } as Bet;
 }
 
 /**
