@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /admin
+Disallow: /payer
+Disallow: /governance
+Allow: /
+
+Sitemap: /sitemap.xml
