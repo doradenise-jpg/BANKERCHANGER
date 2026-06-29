@@ -26,6 +26,16 @@ const envSchema = z.object({
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
   DB_POOL_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   DB_POOL_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  EMAIL_PROVIDER: z.enum(['smtp', 'sendgrid']).default('smtp'),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().default(587),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().default('no-reply@boxmeout.app'),
+  SENDGRID_API_KEY: z.string().optional(),
+  VERIFY_EMAIL_URL: z.string().url().default('http://localhost:3001/auth/verify-email'),
+  APP_NAME: z.string().default('BoxMeOut'),
+  APP_BASE_URL: z.string().url().default('http://localhost:3001'),
 });
 
 export type Env = z.infer<typeof envSchema>;
