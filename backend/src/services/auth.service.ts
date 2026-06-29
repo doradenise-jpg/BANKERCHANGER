@@ -43,6 +43,7 @@ interface UserRecord {
   emailVerificationToken?: string; // UUID stored in Redis
   twoFactorSecret?: string;   // AES-GCM encrypted base32 secret
   twoFactorEnabled: boolean;
+  role?: 'admin' | 'user';
   /**
    * Monotonically increasing version number.
    * Stored inside every issued access/refresh token.
@@ -58,9 +59,9 @@ const db = drizzle(pool);
 // ---------------------------------------------------------------------------
 // JWT helpers
 // ---------------------------------------------------------------------------
-function signAccess(userId: string, sessionVersion: number): string {
+function signAccess(userId: string, sessionVersion: number, role?: string): string {
   return jwt.sign(
-    { sub: userId, type: 'access', sv: sessionVersion },
+    { sub: userId, type: 'access', sv: sessionVersion, ...(role && { role }) },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions,
   );
@@ -200,7 +201,7 @@ export async function login(
   }
 
   return {
-    accessToken: signAccess(user.id, user.sessionVersion),
+    accessToken: signAccess(user.id, user.sessionVersion, user.role === 'admin' ? 'admin' : undefined),
     refreshToken: signRefresh(user.id, user.sessionVersion),
   };
 }
@@ -363,7 +364,7 @@ export async function verify2FA(
   if (!verifyToken(secret, otp)) throw new AppError(401, 'Invalid or expired OTP');
 
   return {
-    accessToken: signAccess(userId, user.sessionVersion),
+    accessToken: signAccess(userId, user.sessionVersion, user.role === 'admin' ? 'admin' : undefined),
     refreshToken: signRefresh(userId, user.sessionVersion),
   };
 }

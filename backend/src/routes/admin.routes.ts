@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AppError } from '../utils/AppError';
+import { isSessionRevoked } from '../services/auth.service';
 import { flagDispute, investigateDispute, cancelMarket, resolveDispute, listDisputes, processRefunds, bulkPause, bulkCancel } from '../api/controllers/AdminController';
 import {
   logExportAudit,
@@ -23,7 +24,7 @@ const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
  */
 
 // ---------------------------------------------------------------------------
-// Admin middleware — verifies JWT and checks admin role
+// Admin middleware — verifies JWT, checks admin role and session revocation
 // ---------------------------------------------------------------------------
 async function requireAdmin(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
@@ -39,8 +40,16 @@ async function requireAdmin(req: Request, _res: Response, next: NextFunction): P
       throw new AppError(401, 'Invalid token type');
     }
 
+    if (payload.role !== 'admin') {
+      throw new AppError(403, 'Forbidden: admin role required');
+    }
+
     const userId = payload.sub as string;
     const sessionVersion: number = payload.sv ?? 0;
+
+    // Check Redis tombstone — set on password reset
+    const revoked = await isSessionRevoked(userId, sessionVersion);
+    if (revoked) throw new AppError(401, 'Session has been invalidated');
 
     (req as unknown as Record<string, unknown>).userId = userId;
     (req as unknown as Record<string, unknown>).sessionVersion = sessionVersion;

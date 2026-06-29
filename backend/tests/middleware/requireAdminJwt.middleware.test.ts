@@ -44,21 +44,21 @@ describe('requireAdminJwt', () => {
     expect(err.statusCode).toBe(401);
   });
 
-  it('returns 401 for an expired token', () => {
+  it('returns 403 for an expired token', () => {
     const token = jwt.sign({ role: 'admin' }, SECRET, { expiresIn: -1 });
     const { req, res, next } = makeReqRes(`Bearer ${token}`);
     requireAdminJwt(req, res, next);
     const err = (next as jest.Mock).mock.calls[0][0] as AppError;
     expect(err).toBeInstanceOf(AppError);
-    expect(err.statusCode).toBe(401);
+    expect(err.statusCode).toBe(403);
   });
 
-  it('returns 401 for a token signed with the wrong secret', () => {
+  it('returns 403 for a token signed with the wrong secret', () => {
     const token = jwt.sign({ role: 'admin' }, 'wrong-secret');
     const { req, res, next } = makeReqRes(`Bearer ${token}`);
     requireAdminJwt(req, res, next);
     const err = (next as jest.Mock).mock.calls[0][0] as AppError;
-    expect(err.statusCode).toBe(401);
+    expect(err.statusCode).toBe(403);
   });
 
   it('returns 403 for a valid JWT with a non-admin role', () => {
