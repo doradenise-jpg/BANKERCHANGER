@@ -5,6 +5,7 @@
 // ============================================================
 
 import { create } from 'zustand';
+import { devtools } from 'zustand/middleware';
 import type { TxStatus } from '../types';
 
 export type Network = 'testnet' | 'mainnet';
@@ -32,15 +33,40 @@ interface AppState {
   setTxStatus: (status: TxStatus) => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
-  walletAddress: null,
-  walletBalance: null,
-  isConnecting: false,
-  network: (process.env.NEXT_PUBLIC_STELLAR_NETWORK as Network) ?? 'testnet',
-  lastTxStatus: { hash: null, status: 'idle', error: null },
+/**
+ * Store Shape Documentation:
+ * 
+ * walletAddress: string | null
+ *   - Connected wallet public key (G...), or null if not connected
+ * 
+ * walletBalance: number | null
+ *   - XLM balance in stroops (1 XLM = 10_000_000 stroops), or null if not loaded
+ * 
+ * isConnecting: boolean
+ *   - Flag indicating active wallet connection attempt
+ * 
+ * network: 'testnet' | 'mainnet'
+ *   - Current Stellar network (default from NEXT_PUBLIC_STELLAR_NETWORK)
+ * 
+ * lastTxStatus: { hash, status, error }
+ *   - Last transaction result for TxStatusToast notifications
+ *   - status: 'idle' | 'pending' | 'success' | 'error'
+ */
 
-  setWallet: (address, balance) => set({ walletAddress: address, walletBalance: balance }),
-  clearWallet: () => set({ walletAddress: null, walletBalance: null }),
-  setNetwork: (network) => set({ network }),
-  setTxStatus: (status) => set({ lastTxStatus: status }),
-}));
+export const useAppStore = create<AppState>()(
+  devtools(
+    (set) => ({
+      walletAddress: null,
+      walletBalance: null,
+      isConnecting: false,
+      network: (process.env.NEXT_PUBLIC_STELLAR_NETWORK as Network) ?? 'testnet',
+      lastTxStatus: { hash: null, status: 'idle', error: null },
+
+      setWallet: (address, balance) => set({ walletAddress: address, walletBalance: balance }),
+      clearWallet: () => set({ walletAddress: null, walletBalance: null }),
+      setNetwork: (network) => set({ network }),
+      setTxStatus: (status) => set({ lastTxStatus: status }),
+    }),
+    { name: 'BoxmeoutAppStore' },
+  ),
+);

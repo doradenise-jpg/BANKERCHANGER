@@ -26,7 +26,24 @@ const SOROBAN_RPC_URL =
 const NETWORK_PASSPHRASE =
   NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
-const LS_KEY = 'boxmeout_wallet_address';
+const WALLET_STORAGE_KEY = 'boxmeout_wallet_address';
+
+/**
+ * Storage Decision: sessionStorage vs localStorage
+ * 
+ * TRADE-OFF: Using sessionStorage instead of localStorage for wallet address.
+ * 
+ * sessionStorage benefits:
+ *  - Auto-clears when tab/browser closes (security on shared/public devices)
+ *  - Wallet connection cannot persist after logout or browser restart
+ *  - Prevents token theft if device is compromised between sessions
+ * 
+ * Downside:
+ *  - Users must reconnect wallet if they refresh the page or open a new tab
+ * 
+ * This choice prioritizes security on shared devices over convenience.
+ * For public/shared computers, indefinite persistence is a significant risk.
+ */
 
 // ─── Custom Errors ───────────────────────────────────────────────────────────
 
@@ -139,7 +156,7 @@ export async function connectWallet(): Promise<string> {
     try {
       await freighter.requestAccess();
       const { publicKey } = await freighter.getPublicKey();
-      localStorage.setItem(LS_KEY, publicKey);
+      sessionStorage.setItem(WALLET_STORAGE_KEY, publicKey);
       return publicKey;
     } catch (err) {
       throw new WalletConnectionError(
@@ -150,7 +167,7 @@ export async function connectWallet(): Promise<string> {
   if (albedo) {
     try {
       const { pubkey } = await albedo.publicKey({ token: 'boxmeout' });
-      localStorage.setItem(LS_KEY, pubkey);
+      sessionStorage.setItem(WALLET_STORAGE_KEY, pubkey);
       return pubkey;
     } catch (err) {
       throw new WalletConnectionError(
@@ -164,12 +181,12 @@ export async function connectWallet(): Promise<string> {
 }
 
 export function disconnectWallet(): void {
-  localStorage.removeItem(LS_KEY);
+  sessionStorage.removeItem(WALLET_STORAGE_KEY);
 }
 
 export function getConnectedAddress(): string | null {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem(LS_KEY);
+  return sessionStorage.getItem(WALLET_STORAGE_KEY);
 }
 
 // ─── Contract invocations ─────────────────────────────────────────────────────
