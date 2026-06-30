@@ -5,7 +5,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from './crypto.service';
 import { generateSecret, generateQRCode, verifyToken } from './totp.service';
-import { sendPasswordResetEmail } from './email.service';
+import { sendPasswordResetEmail, sendEmail } from './email.service';
 import { redis } from './cache.service';
 import { pool } from '../config/db';
 import { password_reset_tokens } from '../db/schema';
@@ -27,9 +27,21 @@ async function generateEmailVerificationToken(userId: string): Promise<string> {
 }
 
 async function sendVerificationEmail(email: string, token: string, url: string): Promise<boolean> {
-  // Stubbed email delivery for dev/test. In production, use a real email service.
-  logger.info({ email, url: `${url}?token=${token}` }, 'Email verification link generated');
-  return true;
+  // In test mode, stub the email (don't actually send)
+  if (process.env.NODE_ENV === 'test') {
+    logger.info({ email, url: `${url}?token=${token}` }, 'Email verification link generated (test mode)');
+    return true;
+  }
+
+  // Send real verification email
+  try {
+    const verifyUrl = `${url}?token=${token}`;
+    await sendEmail(email, 'verify_email', { verifyUrl });
+    return true;
+  } catch (err) {
+    logger.error({ msg: 'Failed to send verification email', email, error: err });
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -2,8 +2,15 @@
 // Integration test: buy shares → WebSocket client receives trade event
 
 import http from 'http';
+import jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
 import { ActivityFeed, type ActivityEvent } from '../../src/websocket/realtime';
+
+const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+
+function generateTestToken(): string {
+  return jwt.sign({ sub: 'test-user', type: 'access' }, JWT_SECRET);
+}
 
 function waitForMessage(ws: WebSocket, timeoutMs = 1000): Promise<ActivityEvent> {
   return new Promise((resolve, reject) => {
@@ -11,6 +18,16 @@ function waitForMessage(ws: WebSocket, timeoutMs = 1000): Promise<ActivityEvent>
     ws.once('message', (data) => {
       clearTimeout(timer);
       resolve(JSON.parse(data.toString()) as ActivityEvent);
+    });
+  });
+}
+
+function waitForClose(ws: WebSocket, timeoutMs = 1000): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout waiting for close')), timeoutMs);
+    ws.once('close', (code, reason) => {
+      clearTimeout(timer);
+      resolve({ code, reason: reason.toString() });
     });
   });
 }
@@ -35,7 +52,8 @@ describe('ActivityFeed integration', () => {
   });
 
   it('delivers a trade event to a subscribed client after buying shares', async () => {
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const token = generateTestToken();
+    const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
 
     await new Promise<void>((resolve) => ws.once('open', resolve));
 
@@ -66,7 +84,8 @@ describe('ActivityFeed integration', () => {
   });
 
   it('does not deliver events to unsubscribed markets', async () => {
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const token = generateTestToken();
+    const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
     await new Promise<void>((resolve) => ws.once('open', resolve));
 
     // Subscribe to a different market
@@ -85,7 +104,8 @@ describe('ActivityFeed integration', () => {
   });
 
   it('rate-limits to 20 events/sec per market', async () => {
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const token = generateTestToken();
+    const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
     await new Promise<void>((resolve) => ws.once('open', resolve));
 
     ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-rl' }));
@@ -104,4 +124,37 @@ describe('ActivityFeed integration', () => {
 
     ws.close();
   });
-});
+
+  it('removes empty subscription sets to prevent memory leaks', async () => {
+    const token = generateTestToken();
+    // Create and disconnect 1000 subscriptions
+    for (let i = 0; i < 1000; i++) {
+      const ws = new WebSocket(`ws://localhost:${port}?token=${token}`);
+      await new Promise<void>((resolve) => ws.once('open', resolve));
+      ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: `market-${i}` }));
+      await new Promise((r) => setImmediate(r));
+      ws.close();
+      await new Promise((r) => setImmediate(r));
+    }
+
+    // All subscription sets should be cleaned up
+    expect(feed['subscriptions'].size).toBe(0);
+  });
+
+  it('rejects connections without valid JWT token', async () => {
+    const ws = new WebSocket(`ws://localhost:${port}`);
+    const close = waitForClose(ws);
+    const { code, reason } = await close;
+
+    expect(code).toBe(4001);
+    expect(reason).toBe('Unauthorized');
+  });
+
+  it('rejects connections with invalid JWT token', async () => {
+    const ws = new WebSocket(`ws://localhost:${port}?token=invalid-token`);
+    const close = waitForClose(ws);
+    const { code, reason } = await close;
+
+    expect(code).toBe(4001);
+    expect(reason).toBe('Unauthorized');
+  });

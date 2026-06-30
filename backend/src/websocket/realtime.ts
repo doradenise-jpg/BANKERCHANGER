@@ -1,7 +1,13 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import type { Server } from 'http';
+import jwt from 'jsonwebtoken';
 import { logger } from '../utils/logger';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -43,17 +49,43 @@ export class ActivityFeed {
   // marketId → set of subscribed sockets
   private subscriptions = new Map<string, Set<WebSocket>>();
   private rateLimiter = new MarketRateLimiter();
+  // Track authenticated connections
+  private authenticated = new WeakSet<WebSocket>();
 
   constructor(server: Server) {
     this.wss = new WebSocketServer({ server });
-    this.wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
+    this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+      // Verify JWT from query param
+      const url = new URL(req.url || '', `http://${req.headers.host}`);
+      const token = url.searchParams.get('token');
+
+      if (!token || !this.verifyToken(token)) {
+        ws.close(4001, 'Unauthorized');
+        return;
+      }
+
+      this.authenticated.add(ws);
       ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
       ws.on('close', () => this.removeSocket(ws));
     });
     logger.info('ActivityFeed WebSocket server attached');
   }
 
+  private verifyToken(token: string): boolean {
+    try {
+      jwt.verify(token, JWT_SECRET);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private handleMessage(ws: WebSocket, raw: string): void {
+    if (!this.authenticated.has(ws)) {
+      ws.close(4001, 'Unauthorized');
+      return;
+    }
+
     let msg: unknown;
     try { msg = JSON.parse(raw); } catch { return; }
 
@@ -67,8 +99,11 @@ export class ActivityFeed {
   }
 
   private removeSocket(ws: WebSocket): void {
-    for (const sockets of this.subscriptions.values()) {
+    for (const [marketId, sockets] of this.subscriptions.entries()) {
       sockets.delete(ws);
+      if (sockets.size === 0) {
+        this.subscriptions.delete(marketId);
+      }
     }
   }
 

@@ -1,7 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../utils/logger';
 
-const SENSITIVE_PATHS = ['/api/oracle/submit', '/api/admin'];
+const SENSITIVE_PATHS = [
+  '/auth/login',
+  '/auth/register',
+  '/auth/reset-password',
+  '/api/oracle/submit',
+  '/api/admin',
+];
 
 /**
  * Request logging middleware with structured format.
