@@ -5,7 +5,7 @@
 
 'use client';
 
-import { useCallback, useMemo } from 'react';
+import { useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useMarkets } from '../hooks/useMarkets';
 import { MarketCard } from '../components/market/MarketCard';
@@ -43,17 +43,10 @@ export default function HomePage(): JSX.Element {
     {
       weight_class: weightClass === 'All Weight Classes' ? undefined : weightClass,
       status: status === 'All' ? undefined : status.toLowerCase(),
+      sort: sort as 'date_asc' | 'date_desc' | 'pool_desc',
     },
     { page, limit: LIMIT },
   );
-
-  const sorted = useMemo(() => {
-    const copy = [...markets];
-    if (sort === 'date_asc') copy.sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
-    else if (sort === 'date_desc') copy.sort((a, b) => b.scheduled_at.localeCompare(a.scheduled_at));
-    else if (sort === 'pool_desc') copy.sort((a, b) => Number(b.total_pool) - Number(a.total_pool));
-    return copy;
-  }, [markets, sort]);
 
   const totalPages = Math.ceil(total / LIMIT);
   const showSkeleton = isLoading && markets.length === 0;
@@ -94,13 +87,13 @@ export default function HomePage(): JSX.Element {
             <MarketCardSkeleton key={i} />
           ))}
         </div>
-      ) : sorted.length === 0 ? (
+      ) : markets.length === 0 ? (
         <p className="text-gray-500 text-center py-16">
           No markets found. Try changing your filters.
         </p>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {sorted.map((m) => (
+          {markets.map((m) => (
             <MarketCard key={m.market_id} market={m} />
           ))}
         </div>

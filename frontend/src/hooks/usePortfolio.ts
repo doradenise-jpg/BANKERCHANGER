@@ -10,9 +10,14 @@ import { submitClaim, submitRefund } from '../services/wallet';
 
 export interface UsePortfolioResult {
   portfolio: Portfolio | null;
+  bets: any[];
   isLoading: boolean;
   error: Error | null;
   claimTxStatus: TxStatus;
+  page: number;
+  limit: number;
+  total: number;
+  loadNextPage: () => Promise<void>;
   /** Submits claim_winnings for a market contract. Refreshes portfolio after. */
   claimWinnings: (market_contract_address: string) => Promise<void>;
   /** Submits claim_refund for a cancelled market. Refreshes portfolio after. */
@@ -22,13 +27,17 @@ export interface UsePortfolioResult {
 /**
  * Fetches the portfolio for the currently connected wallet.
  * Returns null portfolio if no wallet is connected.
- * Refreshes automatically after a successful claim.
+ * Supports paginated bets loading with loadNextPage().
  */
 export function usePortfolio(): UsePortfolioResult {
   const { address } = useWallet();
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [bets, setBets] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [page, setPage] = useState(1);
+  const [limit] = useState(50);
+  const [total, setTotal] = useState(0);
   const [claimTxStatus, setClaimTxStatus] = useState<TxStatus>({
     hash: null,
     status: 'idle',
@@ -36,19 +45,46 @@ export function usePortfolio(): UsePortfolioResult {
   });
 
   const load = useCallback(async () => {
-    if (!address) { setPortfolio(null); return; }
+    if (!address) { 
+      setPortfolio(null);
+      setBets([]);
+      setTotal(0);
+      return; 
+    }
     setIsLoading(true);
     setError(null);
     try {
       setPortfolio(await fetchPortfolio(address));
+      // Load first page of bets
+      const response = await fetch(`/api/bets/${address}?page=1&limit=${limit}`);
+      const data = await response.json();
+      setBets(data.bets);
+      setTotal(data.total);
+      setPage(1);
     } catch (e: any) {
       setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
       setIsLoading(false);
     }
-  }, [address]);
+  }, [address, limit]);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadNextPage = useCallback(async () => {
+    if (!address) return;
+    setIsLoading(true);
+    try {
+      const nextPage = page + 1;
+      const response = await fetch(`/api/bets/${address}?page=${nextPage}&limit=${limit}`);
+      const data = await response.json();
+      setBets([...bets, ...data.bets]);
+      setPage(nextPage);
+    } catch (e: any) {
+      setError(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, page, limit, bets]);
 
   // Refresh when useClaimWinnings hook fires a successful claim
   useEffect(() => {
@@ -80,5 +116,17 @@ export function usePortfolio(): UsePortfolioResult {
     [runClaim],
   );
 
-  return { portfolio, isLoading, error, claimTxStatus, claimWinnings, claimRefund };
+  return { 
+    portfolio, 
+    bets,
+    isLoading, 
+    error, 
+    claimTxStatus, 
+    page,
+    limit,
+    total,
+    loadNextPage,
+    claimWinnings, 
+    claimRefund 
+  };
 }

@@ -89,7 +89,7 @@ export async function getBettorStats(
 /**
  * GET /api/bets/:bettor_address
  *
- * Returns all bets placed by a given Stellar address.
+ * Returns paginated bets placed by a given Stellar address.
  */
 export async function getBetsByAddress(
   req: Request,
@@ -98,6 +98,8 @@ export async function getBetsByAddress(
 ): Promise<void> {
   try {
     const { bettor_address } = req.params;
+    let page = parseInt(req.query.page as string, 10) || 1;
+    let limit = parseInt(req.query.limit as string, 10) || 50;
 
     if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
       throw AppError.badRequest(
@@ -106,8 +108,18 @@ export async function getBetsByAddress(
       );
     }
 
-    const bets = await BetService.fetchBetsByAddress(bettor_address);
-    res.status(200).json(bets);
+    // Validate pagination params
+    if (page < 1) page = 1;
+    if (limit < 1) limit = 50;
+    if (limit > 200) limit = 200;
+
+    const result = await BetService.fetchBetsByAddress(bettor_address, page, limit);
+    res.status(200).json({
+      bets: result.bets,
+      total: result.total,
+      page,
+      limit,
+    });
   } catch (err) {
     next(err);
   }

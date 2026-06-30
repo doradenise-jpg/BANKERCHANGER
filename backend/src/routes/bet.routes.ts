@@ -84,7 +84,7 @@ router.get('/:bettor_address/stats', getBettorStats);
  * @swagger
  * /bets/{bettor_address}:
  *   get:
- *     summary: Get all bets for an address
+ *     summary: Get paginated bets for an address
  *     tags: [Bets]
  *     parameters:
  *       - in: path
@@ -101,10 +101,11 @@ router.get('/:bettor_address/stats', getBettorStats);
  *         name: limit
  *         schema:
  *           type: integer
- *           default: 20
+ *           default: 50
+ *           maximum: 200
  *     responses:
  *       200:
- *         description: Paginated list of bets
+ *         description: Paginated list of bets with total count
  */
 router.get('/:bettor_address', getBetsByAddress);
 

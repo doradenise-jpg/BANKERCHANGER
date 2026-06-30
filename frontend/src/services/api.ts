@@ -38,6 +38,7 @@ export interface MarketFilters {
   status?: string;
   weight_class?: string;
   search?: string;
+  sort?: 'date_asc' | 'date_desc' | 'pool_desc';
 }
 
 export interface PaginationParams {
@@ -65,6 +66,7 @@ export async function fetchMarkets(
   if (filters?.status) params.set('status', filters.status);
   if (filters?.weight_class) params.set('weight_class', filters.weight_class);
   if (filters?.search) params.set('search', filters.search);
+  if (filters?.sort) params.set('sort', filters.sort);
   if (pagination?.page) params.set('page', pagination.page.toString());
   if (pagination?.limit) params.set('limit', pagination.limit.toString());
   const qs = params.toString();

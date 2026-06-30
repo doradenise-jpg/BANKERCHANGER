@@ -50,12 +50,12 @@ async function pipeQueryToCsv(
   res: Response,
   sql: string,
   values: unknown[],
-  header: string,
+  header: string[],
   rowMapper: (row: Record<string, unknown>) => string,
 ): Promise<void> {
   const client = await pool.connect();
   try {
-    res.write(header);
+    res.write(csvRow(header));
     await client.query('BEGIN');
     await client.query(`DECLARE export_cursor NO SCROLL CURSOR FOR ${sql}`, values);
 
@@ -95,7 +95,7 @@ export async function streamUsersExport(res: Response): Promise<void> {
      GROUP BY bettor_address
      ORDER BY first_bet_at`,
     [],
-    csvRow(['wallet_address', 'first_bet_at', 'total_bets', 'total_wagered']),
+    ['wallet_address', 'first_bet_at', 'total_bets', 'total_wagered'],
     (r) => csvRow([r.wallet_address, r.first_bet_at, r.total_bets, r.total_wagered]),
   );
 }
@@ -117,7 +117,7 @@ export async function streamTradesExport(
     `SELECT id, market_id, bettor_address, side, amount, placed_at, claimed, payout, tx_hash
      FROM bets ${where} ORDER BY placed_at`,
     vals,
-    csvRow(['id', 'market_id', 'bettor_address', 'side', 'amount', 'placed_at', 'claimed', 'payout', 'tx_hash']),
+    ['id', 'market_id', 'bettor_address', 'side', 'amount', 'placed_at', 'claimed', 'payout', 'tx_hash'],
     (r) => csvRow([r.id, r.market_id, r.bettor_address, r.side, r.amount, r.placed_at, r.claimed, r.payout, r.tx_hash]),
   );
 }
@@ -131,7 +131,7 @@ export async function streamTreasuryExport(res: Response): Promise<void> {
      WHERE event_type ILIKE '%fee%' OR event_type ILIKE '%treasury%'
      ORDER BY ledger_close_time`,
     [],
-    csvRow(['id', 'contract_address', 'event_type', 'ledger_sequence', 'ledger_close_time', 'tx_hash', 'payload']),
+    ['id', 'contract_address', 'event_type', 'ledger_sequence', 'ledger_close_time', 'tx_hash', 'payload'],
     (r) => csvRow([r.id, r.contract_address, r.event_type, r.ledger_sequence, r.ledger_close_time, r.tx_hash, JSON.stringify(r.payload)]),
   );
 }
