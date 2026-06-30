@@ -5,6 +5,8 @@ import { RawStellarEvent, StellarEventProcessor } from '../../backend/src/indexe
 
 dotenv.config();
 
+const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
+
 const RPC_URL = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.INVOICE_CONTRACT_ID || 'C_MOCK_INVOICE_CONTRACT_ID';
 
@@ -12,7 +14,7 @@ const server = new rpc.Server(RPC_URL);
 const eventProcessor = new StellarEventProcessor();
 
 export async function pollEvents() {
-  console.log('Started polling Horizon for contract events...');
+  logger.info({ contract_id: CONTRACT_ID }, 'Started polling Horizon for contract events...');
 
   let cursor = (await getCursor()) || '';
 
@@ -52,7 +54,7 @@ export async function pollEvents() {
         await saveCursor(cursor);
       }
     } catch (err) {
-      console.error('Error fetching events:', err);
+      logger.error({ err }, 'Error fetching events');
     }
   }, 5000);
 }
@@ -62,7 +64,7 @@ async function getLatestLedger(): Promise<number> {
     const health = await server.getLatestLedger();
     return health.sequence;
   } catch (err) {
-    console.error('Could not get latest ledger', err);
+    logger.error({ err }, 'Could not get latest ledger');
     return 1;
   }
 }

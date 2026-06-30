@@ -1,5 +1,6 @@
 import * as Sentry from '@sentry/node';
 import type { Application } from 'express';
+import { version } from '../../package.json';
 
 const SENSITIVE_FIELDS = new Set(['password', 'token', 'privateKey', 'private_key']);
 
@@ -9,6 +10,7 @@ export function initSentry(dsn: string | undefined, environment: string): void {
   Sentry.init({
     dsn,
     environment,
+    release: process.env.GIT_SHA ?? version,
     tracesSampleRate: 0.1,
     beforeSend(event) {
       if (event.request?.data && typeof event.request.data === 'object') {

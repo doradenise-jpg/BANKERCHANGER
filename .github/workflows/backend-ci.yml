@@ -90,6 +90,8 @@ jobs:
       - name: Build
         working-directory: backend
         run: npm run build
+        env:
+          GIT_SHA: ${{ github.sha }}
 
       - name: Test
         working-directory: backend
