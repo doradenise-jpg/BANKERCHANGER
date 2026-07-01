@@ -29,6 +29,7 @@ function makeAdapter(overrides: Partial<CronDbAdapter> = {}): CronDbAdapter {
     deleteExpiredResetTokens: jest.fn().mockResolvedValue(0),
     softDeleteOldNotifications: jest.fn().mockResolvedValue(0),
     archiveFailedDistributions: jest.fn().mockResolvedValue(0),
+    writeAuditLog: jest.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -168,6 +169,74 @@ describe('cron.service', () => {
       expect(adapter.deleteExpiredResetTokens).not.toHaveBeenCalled();
       expect(adapter.softDeleteOldNotifications).not.toHaveBeenCalled();
       expect(adapter.archiveFailedDistributions).not.toHaveBeenCalled();
+    });
+  });
+
+  // 6 — audit log: session_cleanup entries are written ─────────────────────────
+  describe('audit log (admin_audit_log)', () => {
+    it('writes an audit entry with action=session_cleanup after deleteExpiredSessions', async () => {
+      const adapter = makeAdapter({
+        deleteExpiredSessions: jest.fn().mockResolvedValue(5),
+      });
+      setDbAdapter(adapter);
+
+      await deleteExpiredSessions();
+
+      expect(adapter.writeAuditLog).toHaveBeenCalledTimes(1);
+      expect(adapter.writeAuditLog).toHaveBeenCalledWith(
+        'session_cleanup',
+        expect.objectContaining({ deleted_sessions: 5 }),
+      );
+    });
+
+    it('writes an audit entry with action=session_cleanup after deleteExpiredResetTokens', async () => {
+      const adapter = makeAdapter({
+        deleteExpiredResetTokens: jest.fn().mockResolvedValue(3),
+      });
+      setDbAdapter(adapter);
+
+      await deleteExpiredResetTokens();
+
+      expect(adapter.writeAuditLog).toHaveBeenCalledTimes(1);
+      expect(adapter.writeAuditLog).toHaveBeenCalledWith(
+        'session_cleanup',
+        expect.objectContaining({ deleted_reset_tokens: 3 }),
+      );
+    });
+
+    it('includes run_at timestamp in audit entry', async () => {
+      const adapter = makeAdapter({
+        deleteExpiredSessions: jest.fn().mockResolvedValue(0),
+      });
+      setDbAdapter(adapter);
+
+      await deleteExpiredSessions();
+
+      const [, details] = (adapter.writeAuditLog as jest.Mock).mock.calls[0];
+      expect(details).toHaveProperty('run_at');
+      expect(typeof details.run_at).toBe('string');
+    });
+
+    it('does NOT write audit log for softDeleteOldNotifications', async () => {
+      const adapter = makeAdapter({
+        softDeleteOldNotifications: jest.fn().mockResolvedValue(10),
+      });
+      setDbAdapter(adapter);
+
+      await softDeleteOldNotifications();
+
+      expect(adapter.writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('does NOT write audit log for archiveFailedDistributions', async () => {
+      const adapter = makeAdapter({
+        archiveFailedDistributions: jest.fn().mockResolvedValue(2),
+      });
+      setDbAdapter(adapter);
+
+      await archiveFailedDistributions();
+
+      expect(adapter.writeAuditLog).not.toHaveBeenCalled();
     });
   });
 });

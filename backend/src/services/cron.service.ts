@@ -15,6 +15,7 @@ export interface CronDbAdapter {
   deleteExpiredResetTokens(): Promise<number>;
   softDeleteOldNotifications(): Promise<number>;
   archiveFailedDistributions(): Promise<number>;
+  writeAuditLog(action: string, details: Record<string, unknown>): Promise<void>;
 }
 
 const defaultAdapter: CronDbAdapter = {
@@ -52,6 +53,13 @@ const defaultAdapter: CronDbAdapter = {
     );
     return result.rowCount ?? 0;
   },
+
+  async writeAuditLog(action: string, details: Record<string, unknown>) {
+    await pool.query(
+      `INSERT INTO admin_audit_log (action, details) VALUES ($1, $2)`,
+      [action, JSON.stringify(details)],
+    );
+  },
 };
 
 let adapter: CronDbAdapter = defaultAdapter;
@@ -71,12 +79,20 @@ export function getCronAdapter(): CronDbAdapter {
 export async function deleteExpiredSessions(): Promise<number> {
   const count = await adapter.deleteExpiredSessions();
   cronSessionsDeleted.inc(count);
+  await adapter.writeAuditLog('session_cleanup', {
+    deleted_sessions: count,
+    run_at: new Date().toISOString(),
+  });
   return count;
 }
 
 export async function deleteExpiredResetTokens(): Promise<number> {
   const count = await adapter.deleteExpiredResetTokens();
   cronResetTokensDeleted.inc(count);
+  await adapter.writeAuditLog('session_cleanup', {
+    deleted_reset_tokens: count,
+    run_at: new Date().toISOString(),
+  });
   return count;
 }
 
