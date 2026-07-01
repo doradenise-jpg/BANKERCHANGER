@@ -14,15 +14,67 @@ if (!CONTRACT_ID) {
 
 const server = new rpc.Server(RPC_URL);
 
+// ── Polling state for health monitoring ────────────────────────────────────
+interface PollerHealth {
+  isRunning: boolean;
+  consecutiveFailures: number;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  lastSuccessfulPollAt: string | null;
+  eventsProcessed: number;
+}
+
+let pollerHealth: PollerHealth = {
+  isRunning: false,
+  consecutiveFailures: 0,
+  lastError: null,
+  lastErrorAt: null,
+  lastSuccessfulPollAt: null,
+  eventsProcessed: 0,
+};
+
+export function getPollerHealth(): PollerHealth {
+  return { ...pollerHealth };
+}
+
+// ── Exponential backoff strategy ────────────────────────────────────────────
+const MIN_BACKOFF_MS = 1000;      // 1 second
+const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+const BACKOFF_MULTIPLIER = 2;
+
+function calculateBackoff(failureCount: number): number {
+  const backoff = MIN_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, failureCount - 1);
+  return Math.min(backoff, MAX_BACKOFF_MS);
+}
+
+// ── Structured logging ──────────────────────────────────────────────────────
+interface LogEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  context?: Record<string, unknown>;
+}
+
+function log(level: 'info' | 'warn' | 'error', message: string, context?: Record<string, unknown>): void {
+  const entry: LogEntry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    context,
+  };
+  console.log(JSON.stringify(entry));
+}
+
 export async function pollEvents() {
-  console.log('Started polling Horizon for contract events...');
+  log('info', 'Indexer poller started', { contractId: CONTRACT_ID, rpcUrl: RPC_URL });
+  pollerHealth.isRunning = true;
 
   let cursor = (await getCursor()) || '';
 
-  // Polling loop
-  setInterval(async () => {
+  // Recursive async loop with exponential backoff
+  async function pollLoop(): Promise<void> {
     try {
-      // Soroban getEvents requests
+      // Build request
       const request: rpc.Api.GetEventsRequest = cursor
         ? {
             cursor,
@@ -47,8 +99,10 @@ export async function pollEvents() {
             limit: 100
           };
 
+      // Poll for events
       const response = await server.getEvents(request);
 
+      // Process events only if successful
       if (response.events && response.events.length > 0) {
         for (const event of response.events) {
           processEvent(event);
@@ -57,13 +111,63 @@ export async function pollEvents() {
             updateLastLedger(event.ledger);
           }
         }
+        // Only advance cursor on successful poll
+        const oldCursor = cursor;
         cursor = response.cursor;
         await saveCursor(cursor);
+        pollerHealth.eventsProcessed += response.events.length;
+
+        log('info', 'Events polled and processed', {
+          eventCount: response.events.length,
+          oldCursor,
+          newCursor: cursor,
+          consecutiveFailures: pollerHealth.consecutiveFailures,
+        });
+      } else {
+        log('info', 'Poll successful but no new events', {
+          cursor,
+          consecutiveFailures: pollerHealth.consecutiveFailures,
+        });
       }
+
+      // Reset failure counter on success
+      pollerHealth.consecutiveFailures = 0;
+      pollerHealth.lastError = null;
+      pollerHealth.lastErrorAt = null;
+      pollerHealth.lastSuccessfulPollAt = new Date().toISOString();
+
+      // Schedule next poll immediately (no fixed interval, just loop)
+      await new Promise(resolve => setImmediate(resolve));
+      await pollLoop();
+
     } catch (err) {
-      console.error('Error fetching events:', err);
+      pollerHealth.consecutiveFailures++;
+      pollerHealth.lastError = err instanceof Error ? err.message : String(err);
+      pollerHealth.lastErrorAt = new Date().toISOString();
+
+      const backoffMs = calculateBackoff(pollerHealth.consecutiveFailures);
+
+      log('error', 'Poll failed, scheduling retry', {
+        error: pollerHealth.lastError,
+        consecutiveFailures: pollerHealth.consecutiveFailures,
+        backoffMs,
+        cursor,
+      });
+
+      // Wait with exponential backoff before retrying
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+      await pollLoop();
     }
-  }, 5000); // Poll every 5 seconds
+  }
+
+  // Start the polling loop
+  pollLoop().catch(err => {
+    log('error', 'Polling loop terminated with unrecoverable error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    pollerHealth.isRunning = false;
+    process.exit(1);
+  });
 }
 
 async function getLatestLedger(): Promise<number> {
@@ -71,7 +175,10 @@ async function getLatestLedger(): Promise<number> {
     const health = await server.getLatestLedger();
     return health.sequence;
   } catch (err) {
-    console.error('Could not get latest ledger', err);
+    log('error', 'Failed to get latest ledger', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // Return a conservative starting point
     return 1;
   }
 }
@@ -104,30 +211,33 @@ export function processEvent(event: rpc.Api.EventResponse) {
         due_date: data.dueDate || new Date().toISOString(),
         status: 'Pending'
       });
-      console.log(`Processed submitted event for invoice ${data.id}`);
+      log('info', 'Processed event: submitted', { invoiceId: data.id });
     } else if (eventType === 'funded') {
       upsertInvoice({
         id: data.id || data,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Funded'
       });
-      console.log(`Processed funded event for invoice ${data.id || data}`);
+      log('info', 'Processed event: funded', { invoiceId: data.id || data });
     } else if (eventType === 'paid') {
       upsertInvoice({
         id: data.id || data,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Paid'
       });
-      console.log(`Processed paid event for invoice ${data.id || data}`);
+      log('info', 'Processed event: paid', { invoiceId: data.id || data });
     } else if (eventType === 'defaulted') {
       upsertInvoice({
         id: data.id || data,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Defaulted'
       });
-      console.log(`Processed defaulted event for invoice ${data.id || data}`);
+      log('info', 'Processed event: defaulted', { invoiceId: data.id || data });
     }
   } catch (err) {
-    console.error(`Failed to process event ${event.id}:`, err);
+    log('error', 'Failed to process event', {
+      eventId: event.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
