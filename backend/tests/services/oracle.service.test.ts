@@ -1,14 +1,14 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { Keypair } from '@stellar/stellar-sdk';
-
-jest.mock('../../src/utils/logger');
-jest.mock('../../src/services/StellarService');
-jest.mock('../../src/config/db');
-
 import * as OracleService from '../../src/oracle/OracleService';
 import * as StellarService from '../../src/services/StellarService';
 import { pool } from '../../src/config/db';
 
+jest.mock('../../src/services/StellarService');
+jest.mock('../../src/config/db');
+
+const mockRedisIncr = jest.fn().mockResolvedValue(1);
+const mockRedisExpire = jest.fn().mockResolvedValue(1);
 const mockRedisGet = jest.fn().mockResolvedValue(null);
 const mockRedisDel = jest.fn().mockResolvedValue(1);
 const mockRedisSet = jest.fn().mockResolvedValue('OK');
@@ -20,17 +20,14 @@ jest.mock('../../src/services/cache.service', () => {
     cacheGet: jest.fn().mockResolvedValue(undefined),
     cacheSet: jest.fn().mockResolvedValue(undefined),
     redis: {
+      incr: jest.fn((...args: any[]) => mockRedisIncr(...args)),
+      expire: jest.fn((...args: any[]) => mockRedisExpire(...args)),
       get: jest.fn((...args: any[]) => mockRedisGet(...args)),
       del: jest.fn((...args: any[]) => mockRedisDel(...args)),
       set: jest.fn((...args: any[]) => mockRedisSet(...args)),
     },
   };
 });
-
-const mockIncrWithExpire = jest.fn().mockResolvedValue(1);
-jest.mock('../../src/services/redis-lua', () => ({
-  incrWithExpire: jest.fn((...args: any[]) => mockIncrWithExpire(...args)),
-}));
 
 // Mock global fetch for external API calls
 const mockFetch = jest.fn() as jest.Mock;
@@ -399,8 +396,7 @@ describe('OracleService', () => {
       mockFetch.mockRejectedValue(new Error('API error'));
       
       // Set up redis mocks for 3rd failure
-      // incrWithExpire will return 3 on the third failure
-      mockIncrWithExpire.mockResolvedValue(3);
+      mockRedisIncr.mockResolvedValue(3);
       mockRedisGet.mockResolvedValue(null);
 
       // Set ALERT_WEBHOOK_URL
@@ -422,52 +418,110 @@ describe('OracleService', () => {
     });
   });
 
-  describe('trackFailure crash scenario', () => {
-    it('would lose expire if process crashed between INCR and EXPIRE (before fix)', () => {
-      // OLD BEHAVIOR (before Lua script):
-      // 1. redis.incr(failureKey) -> returns N, increments counter
-      // 2. [CRASH HERE] Process dies before expire is set
-      // 3. Key persists forever, permanently blocking user from resolving market
-      // 4. Future failures won't increment (key has no expiration)
-      //
-      // NEW BEHAVIOR (with Lua script - incrWithExpire):
-      // 1. redis.eval(INCR_EXPIRE_SCRIPT) -> atomically on Redis server:
-      //    a. INCR failureKey -> N
-      //    b. EXPIRE failureKey 604800 -> OK (7 days in seconds)
-      // 2. Both operations guaranteed to complete or both roll back
-      // 3. Process can crash before or after, doesn't matter - Redis has atomic guarantee
-      //
-      // This test documents that the Lua script prevents permanent key accumulation.
-      mockIncrWithExpire.mockResolvedValue(1);
-      mockRedisGet.mockResolvedValue(null);
-
-      // The trackFailure function now uses atomic Lua script
-      // Both INCR and EXPIRE happen on Redis side atomically
-      // If we can verify incrWithExpire was called, we know both ops happened
-      expect(mockIncrWithExpire).toBeDefined();
+  describe('runAutoResolutionJob — per-market isolation', () => {
+    beforeEach(() => {
+      process.env.BOXING_API_URL = 'http://mock-boxing-api';
+      process.env.BOXING_API_KEY = 'mock-key';
     });
 
-    it('ensures incrWithExpire is called for atomic INCR+EXPIRE', async () => {
-      // Simulate multiple failures incrementing the counter
-      const mockMarkets = {
+    afterEach(() => {
+      delete process.env.BOXING_API_URL;
+      delete process.env.BOXING_API_KEY;
+    });
+
+    it('processes market 2 even when market 1 throws', async () => {
+      const market1 = { market_id: 'market-1', match_id: 'match-1' };
+      const market2 = { market_id: 'market-2', match_id: 'match-2' };
+
+      // First call: query markets list
+      (pool.query as jest.Mock).mockResolvedValueOnce({
+        rowCount: 2,
+        rows: [market1, market2],
+      });
+
+      // market-1: fetch throws (e.g. RPC timeout)
+      // market-2: fetch returns a confirmed result
+      mockFetch
+        .mockRejectedValueOnce(new Error('RPC timeout for market-1'))
+        // market-2 primary fetch
+        .mockResolvedValueOnce({
+          status: 200,
+          ok: true,
+          json: async () => ({
+            fights: [{ fight_id: 'match-2', status: 'confirmed', result: 'fighter_b' }],
+          }),
+        })
+        // market-2 alert webhook (if triggered) — not expected here but guard
+        .mockResolvedValue({
+          status: 200,
+          ok: true,
+          json: async () => ({ fights: [] }),
+        });
+
+      // market-2: submitFightResult DB calls — insert oracle_report, select contract, update report
+      const market2InsertResult = {
         rowCount: 1,
-        rows: [{ market_id: 'market-123', match_id: mockMatchId }],
+        rows: [{ id: 2, match_id: 'match-2', oracle_address: mockOracleAddress, outcome: 'fighter_b', reported_at: new Date(), signature: 'sig-2', accepted: false, tx_hash: null, created_at: new Date() }],
+      };
+      const market2SelectResult = { rowCount: 1, rows: [{ contract_address: 'contract-2' }] };
+      const market2UpdateResult = {
+        rowCount: 1,
+        rows: [{ id: 2, match_id: 'match-2', accepted: true, tx_hash: 'tx-market-2' }],
       };
 
-      (pool.query as jest.Mock).mockResolvedValueOnce(mockMarkets);
-      mockFetch.mockRejectedValue(new Error('API error'));
-      
-      // Simulate first failure
-      mockIncrWithExpire.mockResolvedValueOnce(1);
-      mockRedisGet.mockResolvedValueOnce(null);
+      (pool.query as jest.Mock)
+        .mockResolvedValueOnce(market2InsertResult)
+        .mockResolvedValueOnce(market2SelectResult)
+        .mockResolvedValueOnce(market2UpdateResult);
 
-      await OracleService.pollFightResults();
+      (StellarService.invokeContract as jest.Mock).mockResolvedValue('tx-market-2');
 
-      // Verify incrWithExpire was called (not separate incr+expire)
-      expect(mockIncrWithExpire).toHaveBeenCalled();
-      const callArgs = (mockIncrWithExpire as jest.Mock).mock.calls[0];
-      expect(callArgs[1]).toBe('oracle:failure:market-123');
-      expect(callArgs[2]).toBe(7 * 24 * 60 * 60); // 7 day TTL
+      const stats = await OracleService.runAutoResolutionJob();
+
+      // market-1 failed but market-2 resolved — batch was NOT aborted
+      expect(stats.failed).toBe(1);
+      expect(stats.resolved).toBe(1);
+      expect(StellarService.invokeContract).toHaveBeenCalledWith(
+        'contract-2',
+        'resolve_market',
+        expect.any(Array),
+      );
+    });
+
+    it('logs market_id and error details for each failed market', async () => {
+      const market1 = { market_id: 'market-err-1', match_id: 'match-err-1' };
+
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rowCount: 1, rows: [market1] });
+      mockFetch.mockRejectedValueOnce(new Error('contract error: insufficient funds'));
+
+      const stats = await OracleService.runAutoResolutionJob();
+
+      expect(stats.failed).toBe(1);
+      expect(stats.resolved).toBe(0);
+    });
+
+    it('sends alert after 3 consecutive failures for the same market', async () => {
+      const market1 = { market_id: 'market-alert', match_id: 'match-alert' };
+
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rowCount: 1, rows: [market1] });
+      mockFetch.mockRejectedValueOnce(new Error('RPC timeout'));
+
+      mockRedisIncr.mockResolvedValue(3);
+      mockRedisGet.mockResolvedValue(null);
+
+      process.env.ALERT_WEBHOOK_URL = 'http://mock-webhook';
+
+      // second mockFetch call will be the alert webhook POST
+      mockFetch.mockResolvedValueOnce({ status: 200, ok: true, json: async () => ({}) });
+
+      await OracleService.runAutoResolutionJob();
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://mock-webhook',
+        expect.objectContaining({ method: 'POST' }),
+      );
+
+      delete process.env.ALERT_WEBHOOK_URL;
     });
   });
 
