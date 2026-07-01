@@ -244,7 +244,7 @@ export async function streamMarketOdds(
   req.on('close', () => clearInterval(timer));
 }
 
-
+const simulateQuerySchema = z.object({
   amount: z.coerce.number().positive({ message: 'amount must be a positive number' }),
   outcome: z.enum(MARKET_ODDS_OUTCOMES),
 });

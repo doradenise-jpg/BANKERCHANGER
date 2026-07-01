@@ -6,11 +6,7 @@ import {
   softDeleteOldNotifications,
   archiveFailedDistributions,
 } from '../services/cron.service';
-
-let isSessionsRunning = false;
-let isResetTokensRunning = false;
-let isNotificationsRunning = false;
-let isDistributionsRunning = false;
+import { withDistributedLock } from '../utils/distributedLock';
 
 export function startCleanupCron(): void {
   if (process.env.CLEANUP_CRON_DISABLED === 'true') {
@@ -19,72 +15,40 @@ export function startCleanupCron(): void {
   }
 
   // Hourly — expired sessions
-  cron.schedule('0 * * * *', async () => {
-    if (isSessionsRunning) {
-      logger.warn('cleanupSessions: previous run still in progress, skipping');
-      return;
-    }
-    isSessionsRunning = true;
-    try {
-      const count = await deleteExpiredSessions();
-      logger.info({ count }, 'cleanupSessions: completed');
-    } catch (err) {
-      logger.error({ err }, 'cleanupSessions: failed');
-    } finally {
-      isSessionsRunning = false;
-    }
+  // Lock TTL: 90 minutes (longer than cron interval)
+  const cleanupSessionsWithLock = withDistributedLock('cleanupSessions', 90 * 60, async () => {
+    const count = await deleteExpiredSessions();
+    logger.info({ count }, 'cleanupSessions: completed');
   });
+
+  cron.schedule('0 * * * *', cleanupSessionsWithLock);
 
   // Hourly — expired password-reset tokens
-  cron.schedule('0 * * * *', async () => {
-    if (isResetTokensRunning) {
-      logger.warn('cleanupResetTokens: previous run still in progress, skipping');
-      return;
-    }
-    isResetTokensRunning = true;
-    try {
-      const count = await deleteExpiredResetTokens();
-      logger.info({ count }, 'cleanupResetTokens: completed');
-    } catch (err) {
-      logger.error({ err }, 'cleanupResetTokens: failed');
-    } finally {
-      isResetTokensRunning = false;
-    }
+  // Lock TTL: 90 minutes (longer than cron interval)
+  const cleanupResetTokensWithLock = withDistributedLock('cleanupResetTokens', 90 * 60, async () => {
+    const count = await deleteExpiredResetTokens();
+    logger.info({ count }, 'cleanupResetTokens: completed');
   });
+
+  cron.schedule('0 * * * *', cleanupResetTokensWithLock);
 
   // Daily at 02:00 — soft-delete old notifications
-  cron.schedule('0 2 * * *', async () => {
-    if (isNotificationsRunning) {
-      logger.warn('cleanupNotifications: previous run still in progress, skipping');
-      return;
-    }
-    isNotificationsRunning = true;
-    try {
-      const count = await softDeleteOldNotifications();
-      logger.info({ count }, 'cleanupNotifications: completed');
-    } catch (err) {
-      logger.error({ err }, 'cleanupNotifications: failed');
-    } finally {
-      isNotificationsRunning = false;
-    }
+  // Lock TTL: 2 hours (longer than daily interval margin)
+  const cleanupNotificationsWithLock = withDistributedLock('cleanupNotifications', 2 * 60 * 60, async () => {
+    const count = await softDeleteOldNotifications();
+    logger.info({ count }, 'cleanupNotifications: completed');
   });
 
+  cron.schedule('0 2 * * *', cleanupNotificationsWithLock);
+
   // Weekly on Sunday at 03:00 — archive failed distributions
-  cron.schedule('0 3 * * 0', async () => {
-    if (isDistributionsRunning) {
-      logger.warn('cleanupDistributions: previous run still in progress, skipping');
-      return;
-    }
-    isDistributionsRunning = true;
-    try {
-      const count = await archiveFailedDistributions();
-      logger.info({ count }, 'cleanupDistributions: completed');
-    } catch (err) {
-      logger.error({ err }, 'cleanupDistributions: failed');
-    } finally {
-      isDistributionsRunning = false;
-    }
+  // Lock TTL: 3 hours (longer than weekly interval margin)
+  const cleanupDistributionsWithLock = withDistributedLock('cleanupDistributions', 3 * 60 * 60, async () => {
+    const count = await archiveFailedDistributions();
+    logger.info({ count }, 'cleanupDistributions: completed');
   });
+
+  cron.schedule('0 3 * * 0', cleanupDistributionsWithLock);
 
   logger.info('Cleanup cron jobs scheduled (sessions/tokens: hourly, notifications: daily, distributions: weekly)');
 }
