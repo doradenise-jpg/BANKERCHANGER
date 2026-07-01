@@ -557,7 +557,7 @@ mod place_bet_edge_cases {
 // ============================================================
 #[cfg(test)]
 mod claim_winnings_payout_math {
-    use boxmeout_shared::types::BetSide;
+    use boxmeout_shared::types::{BetSide, Outcome};
 
     /// Test: Single winner takes full net pool
     #[test]
@@ -1721,6 +1721,61 @@ mod claim_routing_tests {
         assert_eq!(token_client.balance(&bettor), 9_800_000);
     }
 
+    /// Draw outcome: fee deducted once and payout plus fee equals total pool.
+    #[test]
+    fn test_claim_winnings_draw_outcome_applies_fee_once() {
+        let env = Env::default();
+        setup_env(&env);
+
+        let factory = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let bettor = Address::generate(&env);
+        let (client, contract_id) = register_market(&env, &factory, &treasury);
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        StellarAssetClient::new(&env, &token_id).mint(&contract_id, &10_000_000i128);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: default_fight(&env),
+            config: default_config(),
+            status: MarketStatus::Resolved,
+            outcome: OptionalOutcome::Some(Outcome::Draw),
+            pool_a: 0,
+            pool_b: 0,
+            pool_draw: 10_000_000,
+            total_pool: 10_000_000,
+            resolved_at: 50_000,
+            oracle_used: OptionalOracleRole::Some(OracleRole::Primary),
+        };
+        let bet = BetRecord {
+            bettor: bettor.clone(),
+            market_id: 1,
+            side: BetSide::Draw,
+            amount: 10_000_000,
+            placed_at: 1_000,
+            claimed: false,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+            let mut map = soroban_sdk::Map::<Address, soroban_sdk::Vec<BetRecord>>::new(&env);
+            let mut bets = soroban_sdk::Vec::new(&env);
+            bets.push_back(bet);
+            map.set(bettor.clone(), bets);
+            env.storage().persistent().set(&"BETS", &map);
+        });
+
+        let receipt = client.claim_winnings(&bettor, &token_id);
+
+        assert_eq!(receipt.fee_deducted, 200_000);
+        assert_eq!(receipt.amount_won, 9_800_000);
+        assert_eq!(receipt.fee_deducted + receipt.amount_won, 10_000_000);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+        assert_eq!(token_client.balance(&treasury), 200_000);
+        assert_eq!(token_client.balance(&bettor), 9_800_000);
+    }
+
     /// Bets marked claimed BEFORE transfers (CEI): double-claim returns AlreadyClaimed.
     #[test]
     fn test_claim_winnings_double_claim_returns_already_claimed() {
@@ -2122,6 +2177,128 @@ mod min_bet_enforcement_tests {
         // min_bet_amount must succeed
         let ok = client.try_place_bet(&bettor, &BetSide::FighterA, &min_bet_amount, &token_id);
         assert!(ok.is_ok());
+    }
+}
+
+// ============================================================
+// ISSUE #25: place_bet amount boundary and fuzz tests
+// ============================================================
+#[cfg(test)]
+mod place_bet_boundary_fuzz_tests {
+    use proptest::prelude::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{BetSide, FightDetails, MarketConfig};
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1,
+            max_bet: i128::MAX,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(env: &Env) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, treasury, token_id)
+    }
+
+    #[test]
+    fn test_place_bet_zero_amount_returns_invalid_amount() {
+        let env = Env::default();
+        let (client, _contract_id, _treasury, token_id) = setup(&env);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &0i128, &token_id);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
+    }
+
+    #[test]
+    fn test_place_bet_negative_amount_returns_invalid_amount() {
+        let env = Env::default();
+        let (client, _contract_id, _treasury, token_id) = setup(&env);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &(-1i128), &token_id);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
+    }
+
+    #[test]
+    fn test_place_bet_amount_exceeding_balance_fails() {
+        let env = Env::default();
+        let (client, _contract_id, _treasury, token_id) = setup(&env);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &2_000_000i128, &token_id);
+        assert!(result.is_err(), "Amount greater than balance must fail gracefully");
+    }
+
+    #[test]
+    fn test_place_bet_i128_max_does_not_overflow_pool_arithmetic() {
+        let env = Env::default();
+        let (client, _contract_id, _treasury, token_id) = setup(&env);
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &i128::MAX);
+
+        let amount = i128::MAX;
+        let result = client.try_place_bet(&bettor, &BetSide::Draw, &amount, &token_id);
+        assert!(result.is_ok(), "Max i128 bet amount must not overflow pool arithmetic");
+        let state = client.get_state();
+        assert_eq!(state.pool_draw, amount);
+        assert_eq!(state.total_pool, amount);
+    }
+
+    proptest! {
+        #[test]
+        fn test_place_bet_zero_or_negative_amount_fails(amount in -1_000i128..=0i128) {
+            let env = Env::default();
+            let (client, _contract_id, _treasury, token_id) = setup(&env);
+            let bettor = Address::generate(&env);
+            StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+            let result = client.try_place_bet(&bettor, &BetSide::FighterB, &amount, &token_id);
+            prop_assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
+        }
     }
 }
 
@@ -2563,7 +2740,7 @@ mod market_lifecycle_tests {
 
         // Place some bets to create mutable state
         let bettor = Address::generate(&env);
-        let token_id = create_token(&env);
+        let token_id = env.register_stellar_asset_contract(factory.clone());
         StellarAssetClient::new(&env, &token_id).mint(&bettor, &50_000_000i128);
         client.place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id);
 
