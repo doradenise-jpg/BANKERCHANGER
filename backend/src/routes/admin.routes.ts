@@ -12,6 +12,7 @@ import {
   buildTradesCsv,
 } from '../services/export.service';
 import { sendExportReadyEmail } from '../services/email.service';
+import { flushOracleWhitelistCache } from '../oracle/OracleService';
 
 const router = Router();
 
@@ -452,6 +453,37 @@ router.post('/export/request', requireAdmin, async (req: Request, res: Response,
         logger.error({ msg: 'Async export failed', err });
       }
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /admin/oracle/refresh-whitelist:
+ *   post:
+ *     summary: Force-flush the oracle whitelist Redis cache (admin only)
+ *     description: >
+ *       Deletes the cached oracle whitelist from Redis so the next
+ *       verification call re-reads ORACLE_WHITELIST env var and repopulates
+ *       the cache. Use this immediately after removing a compromised oracle
+ *       from the env config so all instances propagate the change within
+ *       one TTL cycle.
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Cache flushed successfully
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Redis error
+ */
+router.post('/oracle/refresh-whitelist', requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    await flushOracleWhitelistCache();
+    res.json({ message: 'Oracle whitelist cache flushed. New whitelist will be loaded on next verification.' });
   } catch (err) {
     next(err);
   }

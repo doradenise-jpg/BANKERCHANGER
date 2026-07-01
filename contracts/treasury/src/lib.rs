@@ -39,6 +39,21 @@ impl Treasury {
         env.ledger().timestamp() / 86400
     }
 
+    /// Prune DAILY_WITHDRAWN to keep only the current bucket and the one before it.
+    /// Called on every withdrawal so the map never grows beyond 2 entries.
+    fn prune_daily_withdrawn(env: &Env, daily: &mut Map<u64, i128>, current_bucket: u64) {
+        // Collect keys older than current_bucket - 1 (keep current and previous)
+        let mut stale: Vec<u64> = Vec::new(env);
+        for (k, _) in daily.iter() {
+            if k + 1 < current_bucket {
+                stale.push_back(k);
+            }
+        }
+        for k in stale.iter() {
+            daily.remove(k);
+        }
+    }
+
     fn add_to_accumulated_token(env: &Env, token: &Address, amount: i128) {
         let mut fees: Map<Address, i128> =
             env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(env));
@@ -255,6 +270,8 @@ impl Treasury {
         fees.set(token.clone(), balance - amount);
         env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
         daily.set(bucket, today_total + amount);
+        // Prune stale day-buckets so the map never grows beyond 2 entries
+        Self::prune_daily_withdrawn(&env, &mut daily, bucket);
         env.storage().persistent().set(&DAILY_WITHDRAWN, &daily);
 
         // INTERACTIONS

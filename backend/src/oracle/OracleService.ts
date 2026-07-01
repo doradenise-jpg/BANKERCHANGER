@@ -101,21 +101,48 @@ const OUTCOME_INDEX: Record<FightOutcome, number> = {
 };
 
 // ─── Whitelist cache ──────────────────────────────────────────────────────────
+// Stored in Redis so all instances share one cache and TTL.
+// Key: oracle:whitelist  Value: JSON array of address strings  TTL: 5 minutes
 
-let whitelistCache: Set<string> | null = null;
-let whitelistFetchedAt = 0;
-const WHITELIST_TTL_MS = 5 * 60 * 1000;
+const WHITELIST_REDIS_KEY = 'oracle:whitelist';
+const WHITELIST_TTL_SECS = 5 * 60;
 
 async function getOracleWhitelist(): Promise<Set<string>> {
-  if (whitelistCache && Date.now() - whitelistFetchedAt < WHITELIST_TTL_MS) {
-    return whitelistCache;
+  try {
+    const cached = await redis.get(WHITELIST_REDIS_KEY);
+    if (cached) {
+      const addresses = JSON.parse(cached) as string[];
+      return new Set(addresses);
+    }
+  } catch (err) {
+    logger.warn({ err }, 'getOracleWhitelist: Redis read error, falling back to env');
   }
+
   const addresses: string[] = process.env.ORACLE_WHITELIST
     ? process.env.ORACLE_WHITELIST.split(',').map((s) => s.trim())
     : [];
-  whitelistCache = new Set(addresses);
-  whitelistFetchedAt = Date.now();
-  return whitelistCache;
+
+  try {
+    await redis.set(WHITELIST_REDIS_KEY, JSON.stringify(addresses), 'EX', WHITELIST_TTL_SECS);
+  } catch (err) {
+    logger.warn({ err }, 'getOracleWhitelist: Redis write error, cache not populated');
+  }
+
+  return new Set(addresses);
+}
+
+/**
+ * Force-flush the oracle whitelist cache from Redis.
+ * The next call to getOracleWhitelist() will re-read from ORACLE_WHITELIST env var.
+ */
+export async function flushOracleWhitelistCache(): Promise<void> {
+  try {
+    await redis.del(WHITELIST_REDIS_KEY);
+    logger.info('flushOracleWhitelistCache: whitelist cache flushed');
+  } catch (err) {
+    logger.error({ err }, 'flushOracleWhitelistCache: Redis error');
+    throw err;
+  }
 }
 
 // ─── ScVal helpers ────────────────────────────────────────────────────────────
@@ -170,7 +197,11 @@ function buildSignedMessage(match_id: string, outcomeIndex: number, reportedAtMs
  *   [2] reported_at:    u64          → ScvU64
  *   [3] signature:      BytesN<64>   → ScvBytes
  *   [4] oracle_address: Address      → ScvAddress
- *   [5] pub_key:        BytesN<32>   → ScvBytes
+ *   [5] pub_key:        BytesN<32>   → ScvBytes  (raw Ed25519 key, for transparency only)
+ *
+ * NOTE: The on-chain resolve_market uses the pub_key stored in ORACLE_WHITELIST
+ * (registered by admin via add_oracle) for signature verification — NOT report.pub_key.
+ * Passing rawPublicKey() here keeps the report self-describing for off-chain indexers.
  */
 function buildOracleReportScVal(
   match_id: string,

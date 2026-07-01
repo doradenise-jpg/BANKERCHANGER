@@ -71,6 +71,7 @@ impl MarketFactory {
         admin: Address,
         treasury: Address,
         oracle: Address,
+        oracle_raw_key: BytesN<32>,
         config: FactoryConfig,
     ) -> Result<(), ContractError> {
         // CHECKS
@@ -81,8 +82,8 @@ impl MarketFactory {
         env.storage().persistent().set(&ADMIN, &admin);
         env.storage().persistent().set(&TREASURY, &treasury);
 
-        let mut oracles: Vec<Address> = Vec::new(&env);
-        oracles.push_back(oracle);
+        let mut oracles: Map<Address, BytesN<32>> = Map::new(&env);
+        oracles.set(oracle, oracle_raw_key);
         env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
 
         env.storage().persistent().set(&PAUSED, &false);
@@ -304,8 +305,8 @@ impl MarketFactory {
         caller.require_auth();
 
         let admin: Address = env.storage().persistent().get(&ADMIN).ok_or(ContractError::NotAdmin)?;
-        let oracles: Vec<Address> = env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env));
-        if caller != admin && !oracles.contains(caller.clone()) {
+        let oracles: Map<Address, BytesN<32>> = env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Map::new(&env));
+        if caller != admin && !oracles.contains_key(caller.clone()) {
             return Err(ContractError::NotAdmin);
         }
 
@@ -332,19 +333,21 @@ impl MarketFactory {
         Ok(())
     }
 
-    /// Adds an oracle to the whitelist.
+    /// Adds an oracle to the whitelist with its raw Ed25519 public key.
+    ///
+    /// # Arguments
+    /// - `oracle`: Stellar address of the oracle (G... address)
+    /// - `raw_key`: Raw 32-byte Ed25519 public key corresponding to `oracle`
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the admin
-    pub fn add_oracle(env: Env, admin: Address, oracle: Address) -> Result<(), ContractError> {
+    pub fn add_oracle(env: Env, admin: Address, oracle: Address, raw_key: BytesN<32>) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
 
-        let mut oracles: Vec<Address> =
-            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env));
-        if !oracles.contains(oracle.clone()) {
-            oracles.push_back(oracle);
-        }
+        let mut oracles: Map<Address, BytesN<32>> =
+            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Map::new(&env));
+        oracles.set(oracle, raw_key);
         env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
         Ok(())
     }
@@ -358,27 +361,32 @@ impl MarketFactory {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
 
-        let oracles: Vec<Address> =
-            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env));
-        let mut updated: Vec<Address> = Vec::new(&env);
-        let mut found = false;
-        for o in oracles.iter() {
-            if o == oracle {
-                found = true;
-            } else {
-                updated.push_back(o);
-            }
-        }
-        if !found {
+        let mut oracles: Map<Address, BytesN<32>> =
+            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Map::new(&env));
+        if !oracles.contains_key(oracle.clone()) {
             return Err(ContractError::OracleNotWhitelisted);
         }
-        env.storage().persistent().set(&ORACLE_WHITELIST, &updated);
+        oracles.remove(oracle);
+        env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
         Ok(())
     }
 
-    /// Returns the list of whitelisted oracles.
+    /// Returns the list of whitelisted oracle addresses.
     pub fn get_oracles(env: Env) -> Vec<Address> {
-        env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Vec::new(&env))
+        let oracles: Map<Address, BytesN<32>> =
+            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Map::new(&env));
+        let mut result: Vec<Address> = Vec::new(&env);
+        for (addr, _) in oracles.iter() {
+            result.push_back(addr);
+        }
+        result
+    }
+
+    /// Returns the raw Ed25519 public key for a whitelisted oracle, or None if not found.
+    pub fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>> {
+        let oracles: Map<Address, BytesN<32>> =
+            env.storage().persistent().get(&ORACLE_WHITELIST).unwrap_or_else(|| Map::new(&env));
+        oracles.get(oracle)
     }
 
     /// Proposes a new admin address, starting the two-step transfer.
@@ -601,7 +609,8 @@ mod tests {
         let admin = Address::generate(env);
         let treasury = Address::generate(env);
         let oracle = Address::generate(env);
-        client.initialize(&admin, &treasury, &oracle, &default_config());
+        let oracle_raw_key: BytesN<32> = BytesN::from_array(env, &[1u8; 32]);
+        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &default_config());
     }
 
     // ── initialize tests ────────────────────────────────────
@@ -613,11 +622,12 @@ mod tests {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
+        let oracle_raw_key: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
         let config = default_config();
         let mut expected_oracles: Vec<Address> = Vec::new(&env);
         expected_oracles.push_back(oracle.clone());
 
-        client.initialize(&admin, &treasury, &oracle, &config);
+        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &config);
 
         assert!(!client.is_paused());
         assert_eq!(client.get_oracles(), expected_oracles);
@@ -630,11 +640,12 @@ mod tests {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
+        let oracle_raw_key: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
         let config = default_config();
 
-        client.initialize(&admin, &treasury, &oracle, &config);
+        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &config);
 
-        let result = client.try_initialize(&admin, &treasury, &oracle, &config);
+        let result = client.try_initialize(&admin, &treasury, &oracle, &oracle_raw_key, &config);
         assert!(result.is_err());
     }
 
@@ -646,7 +657,8 @@ mod tests {
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
-        client.initialize(&admin, &treasury, &oracle, &default_config());
+        let oracle_raw_key: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
+        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &default_config());
         client.pause_factory(&admin);
 
         let caller = Address::generate(&env);
