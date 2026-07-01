@@ -10,6 +10,7 @@ import { pool } from '../config/db';
 import { invokeContract } from '../services/StellarService';
 import { logger } from '../utils/logger';
 import { cacheGet, cacheSet, redis } from '../services/cache.service';
+import { incrWithExpire } from '../services/redis-lua';
 import type { OracleReport } from '../models/OracleReport';
 import type { Market } from '../models/Market';
 
@@ -24,9 +25,8 @@ async function trackFailure(market_id: string): Promise<boolean> {
   const alertSentKey = `${ALERT_SENT_KEY_PREFIX}${market_id}`;
 
   try {
-    const failures = await redis.incr(failureKey);
-    // Set TTL to 7 days to prevent key buildup
-    await redis.expire(failureKey, 7 * 24 * 60 * 60);
+    // Use atomic Lua script to prevent race condition between INCR and EXPIRE
+    const failures = await incrWithExpire(redis, failureKey, 7 * 24 * 60 * 60);
 
     const alertSent = await redis.get(alertSentKey);
     if (failures >= FAILURE_THRESHOLD && !alertSent) {

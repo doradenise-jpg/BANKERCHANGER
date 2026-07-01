@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { redis } from '../services/cache.service';
+import { incrWithExpire } from '../services/redis-lua';
 import { AppError } from '../utils/AppError';
 
 export interface RateLimitOptions {
@@ -19,8 +20,8 @@ export function rateLimit(opts: RateLimitOptions) {
 
     const key = `rl:${req.path}:${id}`;
 
-    const count = await redis.incr(key);
-    if (count === 1) await redis.expire(key, windowSec);
+    // Use atomic Lua script to prevent race condition between INCR and EXPIRE
+    const count = await incrWithExpire(redis, key, windowSec);
 
     if (count > opts.max) {
       const ttl = await redis.ttl(key);
