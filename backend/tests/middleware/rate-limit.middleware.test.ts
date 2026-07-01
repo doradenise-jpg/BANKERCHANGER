@@ -108,4 +108,61 @@ describe('rateLimit middleware', () => {
       expect(next).toHaveBeenCalledWith();
     });
   });
+
+  describe('X-Forwarded-For header handling (trust proxy)', () => {
+    const mw = rateLimit({ windowMs: 60_000, max: 2, keyBy: 'ip' });
+
+    it('validates req.ip is extracted correctly from X-Forwarded-For', async () => {
+      mockIncr.mockResolvedValue(1);
+      const req = {
+        ip: '203.0.113.5', // Real client IP set by trust proxy from X-Forwarded-For
+        path: '/auth/login',
+        get: jest.fn((header: string) => {
+          if (header === 'X-Forwarded-For') return '203.0.113.5, 10.0.0.1';
+          return undefined;
+        }),
+      } as unknown as Request;
+      const res = { set: jest.fn().mockReturnThis() } as unknown as Response;
+      const next = jest.fn() as unknown as NextFunction;
+
+      await mw(req, res, next);
+      expect(mockIncr).toHaveBeenCalledWith('rl:/auth/login:203.0.113.5');
+      expect(next).toHaveBeenCalledWith();
+    });
+  });
+
+  describe('separate rate limit buckets per IP', () => {
+    const mw = rateLimit({ windowMs: 60_000, max: 2, keyBy: 'ip' });
+
+    it('different IPs get separate rate limit buckets', async () => {
+      mockExpire.mockResolvedValue(1);
+      mockTtl.mockResolvedValue(55);
+
+      // First IP: 1.2.3.4
+      mockIncr.mockResolvedValueOnce(1);
+      let { req, res, next } = makeReqRes('1.2.3.4');
+      await mw(req, res, next);
+      expect(mockIncr).toHaveBeenCalledWith('rl:/auth/login:1.2.3.4');
+
+      // Second IP: 5.6.7.8
+      mockIncr.mockResolvedValueOnce(1);
+      ({ req, res, next } = makeReqRes('5.6.7.8'));
+      await mw(req, res, next);
+      expect(mockIncr).toHaveBeenCalledWith('rl:/auth/login:5.6.7.8');
+
+      // First IP again: should increment to 2 (not shared with second IP)
+      mockIncr.mockResolvedValueOnce(2);
+      ({ req, res, next } = makeReqRes('1.2.3.4'));
+      await mw(req, res, next);
+      expect(mockIncr).toHaveBeenCalledWith('rl:/auth/login:1.2.3.4');
+      expect(next).toHaveBeenLastCalledWith(); // Still within limit (max 2)
+
+      // Second IP again: should increment to 2 (not affected by first IP's limit)
+      mockIncr.mockResolvedValueOnce(2);
+      ({ req, res, next } = makeReqRes('5.6.7.8'));
+      await mw(req, res, next);
+      expect(mockIncr).toHaveBeenCalledWith('rl:/auth/login:5.6.7.8');
+      expect(next).toHaveBeenLastCalledWith(); // Still within limit (max 2)
+    });
+  });
 });

@@ -28,6 +28,9 @@ initSentry(env.SENTRY_DSN, env.NODE_ENV);
 
 const app = express();
 
+// Trust proxy — resolves real client IP from X-Forwarded-For header
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(pinoHttp({ logger }));
 app.use(express.json());
