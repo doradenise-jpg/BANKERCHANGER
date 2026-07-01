@@ -23,7 +23,7 @@
     "test:integration": "jest --passWithNoTests --testPathPatterns=tests/integration"
   },
   "dependencies": {
-    "@sentry/node": "8.55.0",
+    "@sentry/node": "10.62.0",
     "@types/bcrypt": "^6.0.0",
     "@types/nodemailer": "^8.0.0",
     "bcrypt": "^6.0.0",
