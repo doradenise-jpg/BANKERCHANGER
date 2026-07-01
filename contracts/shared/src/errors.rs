@@ -36,8 +36,12 @@ pub enum ContractError {
     InvalidTimeRange = 15,
     /// Provided market configuration is invalid
     InvalidMarketParameters = 16,
+    /// Market status does not allow this operation
+    InvalidMarketStatus = 17,
 
     // ── Bet Validation ─────────────────────────────────────
+    /// Betting is closed — current time is within the lock window before the fight
+    BettingClosed = 27,
     /// Bet amount is below minimum allowed
     BetTooLow = 20,
     /// Transfer amount is insufficient for the requested operation
@@ -52,6 +56,8 @@ pub enum ContractError {
     NoBetsFound = 25,
     /// Amount is below minimum allowed
     BelowMinimum = 26,
+    /// Bet amount exceeds maximum allowed
+    BetTooLarge = 28,
 
     // ── Oracle / Resolution ────────────────────────────────
     /// Oracle signature verification failed
@@ -78,6 +84,10 @@ pub enum ContractError {
     OracleAlreadyWhitelisted = 51,
     /// Too many markets were requested in one query
     TooManyMarkets = 52,
+    /// Oracle address is not in the whitelist
+    OracleNotWhitelisted = 53,
+    /// Admin has not yet set the market WASM hash
+    WasmHashNotSet = 54,
 
     // ── Reentrancy ─────────────────────────────────────────
     /// A claim or refund transfer is already in progress

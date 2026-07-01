@@ -737,7 +737,22 @@ impl Market {
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if admin != factory {
-              return Err(ContractError::NotAdmin);
+            return Err(ContractError::NotAdmin);
+        }
+
+        let mut state = Self::load_state(&env)?;
+        if state.status != MarketStatus::Disputed {
+            return Err(ContractError::InvalidMarketStatus);
+        }
+
+        // EFFECTS
+        state.outcome = OptionalOutcome::Some(final_outcome.clone());
+        state.status = MarketStatus::Resolved;
+        state.resolved_at = env.ledger().timestamp();
+        state.oracle_used = OptionalOracleRole::Some(OracleRole::Admin);
+        Self::save_state(&env, &state);
+
+        boxmeout_shared::emit_market_resolved(&env, state.market_id, final_outcome, admin);
         Ok(())
     }
 
