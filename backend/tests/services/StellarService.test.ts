@@ -6,10 +6,15 @@ import { Keypair, xdr } from '@stellar/stellar-sdk';
 // are NOT accessible inside the factory. We work around this by using a plain
 // object that is mutated per-test.
 const rpc = {
-  getAccount:          jest.fn<() => Promise<unknown>>(),
   simulateTransaction: jest.fn<() => Promise<unknown>>(),
   sendTransaction:     jest.fn<() => Promise<unknown>>(),
   getTransaction:      jest.fn<() => Promise<unknown>>(),
+};
+
+const horizon = {
+  loadAccount:   jest.fn<() => Promise<unknown>>(),
+  feeStats:      jest.fn<() => Promise<unknown>>(),
+  transactions:  jest.fn<() => Promise<unknown>>(),
 };
 
 jest.mock('@stellar/stellar-sdk', () => {
@@ -32,13 +37,19 @@ jest.mock('@stellar/stellar-sdk', () => {
       call: jest.fn().mockReturnValue('op'),
     })),
     TransactionBuilder: jest.fn().mockImplementation(() => mockBuilder),
+    Horizon: {
+      Server: jest.fn().mockImplementation(() => ({
+        loadAccount: (...a: unknown[]) => (global as any).__horizonMock.loadAccount(...a),
+        feeStats: (...a: unknown[]) => (global as any).__horizonMock.feeStats(...a),
+        transactions: (...a: unknown[]) => (global as any).__horizonMock.transactions(...a),
+      })),
+    },
     rpc: {
       // Server constructor returns the shared `rpc` object from outer scope.
       // Because jest.mock is hoisted, we can't reference `rpc` directly here —
       // instead we use a getter trick via a module-level variable accessed at
       // call time (not at factory-definition time).
       Server: jest.fn().mockImplementation(() => ({
-        getAccount: (...a: unknown[]) => (global as any).__rpcMock.getAccount(...a),
         simulateTransaction: (...a: unknown[]) => (global as any).__rpcMock.simulateTransaction(...a),
         sendTransaction: (...a: unknown[]) => (global as any).__rpcMock.sendTransaction(...a),
         getTransaction: (...a: unknown[]) => (global as any).__rpcMock.getTransaction(...a),
@@ -53,8 +64,9 @@ jest.mock('@stellar/stellar-sdk', () => {
   };
 });
 
-// Expose the shared mock object on global so the factory can reach it at call time
+// Expose the shared mock objects on global so the factory can reach them at call time
 (global as any).__rpcMock = rpc;
+(global as any).__horizonMock = horizon;
 
 import { invokeContract, StellarInvocationError } from '../../src/services/StellarService';
 
@@ -74,7 +86,9 @@ describe('invokeContract()', () => {
     process.env.STELLAR_RPC_URL = 'https://soroban-testnet.stellar.org';
     process.env.STELLAR_NETWORK = 'testnet';
 
-    rpc.getAccount.mockResolvedValue({ id: KEYPAIR.publicKey(), sequence: '0' });
+    // Horizon.Server mock (for loadAccount)
+    horizon.loadAccount.mockResolvedValue({ id: KEYPAIR.publicKey(), sequence: '0' });
+    // rpc.Server mocks (for Soroban operations)
     rpc.simulateTransaction.mockResolvedValue({ minResourceFee: '500', result: { retval: {} } });
     rpc.sendTransaction.mockResolvedValue({ status: 'PENDING', hash: TX_HASH });
     rpc.getTransaction.mockResolvedValue({ status: 'SUCCESS' });

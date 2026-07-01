@@ -5,7 +5,7 @@
 // Contributors: implement every function marked TODO.
 // ============================================================
 
-import { Account, Keypair, Networks, Operation, rpc, TransactionBuilder, xdr } from '@stellar/stellar-sdk';
+import { Account, Horizon, Keypair, Networks, Operation, rpc, TransactionBuilder, xdr } from '@stellar/stellar-sdk';
 
 /**
  * Builds, simulates, signs, and submits a Soroban contract invocation.
@@ -41,10 +41,12 @@ export async function invokeContract(
     source_keypair = Keypair.fromSecret(oracleSecret);
   }
 
-  const server = new rpc.Server(horizonUrl);
+  // Use Horizon.Server for account queries (getAccount)
+  const horizonServer = new Horizon.Server(horizonUrl);
+  // Use rpc.Server only for Soroban operations (simulateTransaction, sendTransaction, getTransaction)
   const sorobanServer = new rpc.Server(rpcUrl);
 
-  const sourceAccount = await server.getAccount(source_keypair.publicKey());
+  const sourceAccount = await horizonServer.loadAccount(source_keypair.publicKey());
 
   const invokeContractHostFunction = xdr.HostFunction.hostFunctionTypeInvokeContract(
     new xdr.InvokeContractArgs({
@@ -311,8 +313,8 @@ export function parseScVal(scval: xdr.ScVal): unknown {
  */
 export async function getCurrentBaseFee(): Promise<number> {
   const horizonUrl = process.env.HORIZON_URL ?? 'https://horizon-testnet.stellar.org';
-  const server = new Server(horizonUrl);
-  const feeStats = await server.feeStats();
+  const horizonServer = new Horizon.Server(horizonUrl);
+  const feeStats = await horizonServer.feeStats();
   return parseInt(feeStats.p70_accepted_fee, 10);
 }
 
@@ -338,7 +340,7 @@ export async function fetchHistoricalEvents(
   const factoryContract = process.env.FACTORY_CONTRACT_ADDRESS || '';
   const treasuryContract = process.env.TREASURY_CONTRACT_ADDRESS || '';
 
-  const server = new Server(horizonUrl);
+  const horizonServer = new Horizon.Server(horizonUrl);
   const events: Array<{
     contract_address: string;
     event_type: string;
@@ -365,7 +367,7 @@ export async function fetchHistoricalEvents(
         params.to_ledger = toLedger;
       }
 
-      const response = await (server as any).transactions()
+      const response = await (horizonServer as any).transactions()
         .forLedger(fromLedger)
         .call(params);
 
