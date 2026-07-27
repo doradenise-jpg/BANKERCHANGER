@@ -5,17 +5,13 @@ import type { TxStatus } from '../types';
 import type { CreateMarketParams } from '../services/wallet';
 import { buildContractTransaction, submitTransaction, NETWORK_PASSPHRASE } from '../../lib/stellar';
 import { getConnectedAddress } from '../services/wallet';
+import { xlmToStroops } from '../utils/xlmToStroops';
 
 export interface UseCreateMarketResult {
   createMarket: (params: CreateMarketParams) => Promise<void>;
   txStatus: TxStatus['status'];
   txHash: string | null;
   error: string | null;
-}
-
-function xlmToStroops(xlm: number): bigint {
-  const [whole, frac = ''] = xlm.toString().split('.');
-  return BigInt(whole) * BigInt(10_000_000) + BigInt(frac.slice(0, 7).padEnd(7, '0'));
 }
 
 function buildArgs(params: CreateMarketParams): xdr.ScVal[] {

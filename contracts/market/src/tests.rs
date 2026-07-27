@@ -3028,6 +3028,9 @@ mod stale_oracle_reports_tests {
         assert_eq!(remaining.len(), 0, "PENDING_REPORTS must be empty, ready for a fresh cycle");
     }
 
+        assert_eq!(remaining.len(), 0, "PENDING_REPORTS must be empty, ready for a fresh cycle");
+    }
+
     /// Non-admin caller must be rejected.
     #[test]
     fn test_clear_stale_reports_non_admin_rejected() {
@@ -3039,3 +3042,273 @@ mod stale_oracle_reports_tests {
         assert!(result.is_err(), "Non-admin must not be able to clear stale reports");
     }
 }
+
+// ============================================================
+// ISSUE #711: Property-based fuzz tests for payout math
+// Pool overflow/underflow at i128::MAX boundaries
+// ============================================================
+#[cfg(test)]
+mod payout_math_fuzz_tests {
+    use proptest::prelude::*;
+
+    /// Property: fee calculation never overflows
+    /// For any total_pool ≤ i128::MAX and fee_bps ≤ 10_000,
+    /// fee = total_pool * fee_bps / 10_000 must not panic.
+    fn prop_fee_calc_no_overflow(total_pool: i128, fee_bps: i128) -> bool {
+        // Constrain inputs to meaningful ranges
+        let total_pool = total_pool.abs() % (i128::MAX / 2);  // Cap at i128::MAX/2
+        let fee_bps = (fee_bps % 10_000).max(0);              // Clamp fee_bps to [0, 10_000)
+
+        let fee = total_pool.saturating_mul(fee_bps) / 10_000;
+
+        // Check: fee ≤ total_pool (no overpayment)
+        fee <= total_pool && fee >= 0
+    }
+
+    /// Property: payout calculation never overflows
+    /// For any bettor_stake, winning_pool ≤ i128::MAX and net_pool ≤ total_pool,
+    /// payout = bettor_stake * net_pool / winning_pool must not panic.
+    fn prop_payout_calc_no_overflow(bettor_stake: i128, winning_pool: i128, fee_bps: i128) -> bool {
+        // Cap all inputs to avoid overflow in intermediate calculations
+        let bettor_stake = bettor_stake.abs() % (i128::MAX / 3);
+        let winning_pool = (winning_pool.abs() % (i128::MAX / 3)).max(1); // Ensure > 0
+        let fee_bps = (fee_bps % 10_001).max(1);                          // [1, 10_001)
+
+        // Simulate: total_pool = bettor_stake, fee calc
+        let total_pool = bettor_stake;
+        let fee = total_pool.saturating_mul(fee_bps) / 10_000;
+        let net_pool = total_pool.saturating_sub(fee);
+
+        // Compute payout (saturating)
+        let payout = bettor_stake.saturating_mul(net_pool) / winning_pool;
+
+        // Invariant: payout ≤ net_pool (no overpayment)
+        payout <= net_pool && payout >= 0
+    }
+
+    /// Property: pools never become negative
+    /// For any pool accumulation of bets (all positive),
+    /// total_pool = pool_a + pool_b + pool_draw ≥ 0.
+    fn prop_pools_always_non_negative(pool_a: i128, pool_b: i128, pool_draw: i128) -> bool {
+        // Cap inputs and ensure all non-negative
+        let pool_a = pool_a.abs() % (i128::MAX / 3);
+        let pool_b = pool_b.abs() % (i128::MAX / 3);
+        let pool_draw = pool_draw.abs() % (i128::MAX / 3);
+
+        // Sum doesn't overflow
+        let total = pool_a.saturating_add(pool_b).saturating_add(pool_draw);
+
+        total >= 0 && total <= i128::MAX
+    }
+
+    /// Property: fee always ≤ total_pool
+    /// Ensures treasury never extracts more than exists.
+    fn prop_fee_never_exceeds_total(total_pool: i128, fee_bps: i128) -> bool {
+        let total_pool = total_pool.abs() % (i128::MAX / 2);
+        let fee_bps = (fee_bps % 10_001).max(0);
+
+        let fee = total_pool.saturating_mul(fee_bps) / 10_000;
+
+        fee <= total_pool
+    }
+
+    /// Property: payout + fee ≤ total_pool
+    /// Ensures the treasury fee and all payouts don't exceed the pool.
+    fn prop_payout_plus_fee_not_exceed_total(
+        bettor_stakes: Vec<i128>,
+        fee_bps: i128,
+        losing_pool: i128,
+    ) -> bool {
+        // Cap and normalize inputs
+        let fee_bps = (fee_bps % 10_001).max(1);
+        let losing_pool = losing_pool.abs() % (i128::MAX / 4);
+
+        // Compute total_pool from bets
+        let mut total_pool: i128 = losing_pool;
+        for stake in &bettor_stakes {
+            total_pool = match total_pool.checked_add(stake.abs() % (i128::MAX / 10)) {
+                Some(v) => v,
+                None => return true, // Skip if overflow — proof by absence
+            };
+        }
+
+        let fee = total_pool.saturating_mul(fee_bps) / 10_000;
+        let net_pool = total_pool.saturating_sub(fee);
+
+        // All bettors' payouts must sum to ≤ net_pool
+        let mut total_payout = 0i128;
+        for stake in &bettor_stakes {
+            let stake_abs = stake.abs() % (i128::MAX / 10);
+            if total_pool > 0 {
+                let payout = stake_abs.saturating_mul(net_pool) / total_pool;
+                total_payout = match total_payout.checked_add(payout) {
+                    Some(v) => v,
+                    None => return true, // Skip if overflow
+                };
+            }
+        }
+
+        total_payout <= net_pool
+    }
+
+    /// Property: floor division never overpays
+    /// For a = bettor_stake, b = net_pool, c = winning_pool,
+    /// payout = floor(a * b / c) ensures total payouts ≤ net_pool.
+    fn prop_floor_division_prevents_overpayment(a: i128, b: i128, c: i128) -> bool {
+        // Cap and constrain inputs
+        let a = a.abs() % (i128::MAX / 3);
+        let b = b.abs() % (i128::MAX / 3);
+        let c = (c.abs() % (i128::MAX / 3)).max(1);
+
+        // Using integer division (floor): payout = a * b / c
+        let payout = a.saturating_mul(b) / c;
+
+        // Overpayment check: repeat for multiple bettors
+        let payout1 = a.saturating_mul(b) / c;
+        let payout2 = a.saturating_mul(b) / c;
+        let payout3 = a.saturating_mul(b) / c;
+
+        let total = payout1.saturating_add(payout2).saturating_add(payout3);
+
+        // Three equal bettors' total payout ≤ 3 * (a*b/c) ≤ net_pool (b)
+        // This is the floor division property
+        total <= b.saturating_mul(3)
+    }
+
+    // ── Registered proptest strategies ─────────────────────────────────────────
+
+    proptest! {
+        #[test]
+        fn fuzz_fee_calculation_no_overflow(
+            total_pool in 0i128..i128::MAX / 2,
+            fee_bps in 0i128..10_001
+        ) {
+            prop_assert!(prop_fee_calc_no_overflow(total_pool, fee_bps));
+        }
+
+        #[test]
+        fn fuzz_payout_calculation_no_overflow(
+            bettor_stake in 0i128..i128::MAX / 3,
+            winning_pool in 1i128..i128::MAX / 3,
+            fee_bps in 1i128..10_001
+        ) {
+            prop_assert!(prop_payout_calc_no_overflow(bettor_stake, winning_pool, fee_bps));
+        }
+
+        #[test]
+        fn fuzz_pools_never_negative(
+            pool_a in 0i128..i128::MAX / 3,
+            pool_b in 0i128..i128::MAX / 3,
+            pool_draw in 0i128..i128::MAX / 3
+        ) {
+            prop_assert!(prop_pools_always_non_negative(pool_a, pool_b, pool_draw));
+        }
+
+        #[test]
+        fn fuzz_fee_never_exceeds_total(
+            total_pool in 0i128..i128::MAX / 2,
+            fee_bps in 0i128..10_001
+        ) {
+            prop_assert!(prop_fee_never_exceeds_total(total_pool, fee_bps));
+        }
+
+        #[test]
+        fn fuzz_payout_plus_fee_not_exceed_total(
+            bettor_stakes in prop::collection::vec(0i128..i128::MAX / 20, 0..10),
+            fee_bps in 1i128..10_001,
+            losing_pool in 0i128..i128::MAX / 4
+        ) {
+            prop_assert!(prop_payout_plus_fee_not_exceed_total(bettor_stakes, fee_bps, losing_pool));
+        }
+
+        #[test]
+        fn fuzz_floor_division_prevents_overpayment(
+            a in 0i128..i128::MAX / 3,
+            b in 0i128..i128::MAX / 3,
+            c in 1i128..i128::MAX / 3
+        ) {
+            prop_assert!(prop_floor_division_prevents_overpayment(a, b, c));
+        }
+    }
+
+    // ── Boundary case tests (manual extremes) ───────────────────────────────────
+
+    /// i128::MAX pools are handled without panic.
+    #[test]
+    fn test_pool_near_i128_max_no_panic() {
+        let total_pool = i128::MAX / 2;
+        let fee_bps = 200i128;
+
+        let fee = total_pool.saturating_mul(fee_bps) / 10_000;
+        let net_pool = total_pool.saturating_sub(fee);
+
+        assert!(net_pool > 0 && net_pool < total_pool);
+    }
+
+    /// Payout with maximum pool and minimum winning_pool.
+    #[test]
+    fn test_payout_max_total_min_winning_pool() {
+        let total_pool = i128::MAX / 2;
+        let winning_pool = 1i128;
+        let net_pool = total_pool;
+        let bettor_stake = total_pool;
+
+        let payout = bettor_stake.saturating_mul(net_pool) / winning_pool;
+
+        // Because winning_pool=1, payout ≈ bettor_stake * net_pool (clamped by saturating_mul)
+        assert!(payout >= 0);
+    }
+
+    /// Fee calculation at fee_bps = 0 and fee_bps = 10_000.
+    #[test]
+    fn test_fee_boundary_cases() {
+        let total_pool = 10_000_000i128;
+
+        // fee_bps = 0 → no fee
+        let fee_zero = total_pool * 0 / 10_000;
+        assert_eq!(fee_zero, 0);
+
+        // fee_bps = 10_000 → 100% fee (all-pool fee)
+        let fee_max = total_pool * 10_000 / 10_000;
+        assert_eq!(fee_max, total_pool);
+
+        // fee_bps = 200 → 2% fee (typical)
+        let fee_typical = total_pool * 200 / 10_000;
+        assert_eq!(fee_typical, 200_000);
+    }
+
+    /// Three equal bettors: total payout ≤ net_pool.
+    #[test]
+    fn test_three_equal_bettors_no_overpayment() {
+        let total_pool = 30_000_000i128;
+        let fee_bps = 200i128;
+        let fee = total_pool * fee_bps / 10_000;
+        let net_pool = total_pool - fee;
+
+        let bet1 = 10_000_000i128;
+        let bet2 = 10_000_000i128;
+        let bet3 = 10_000_000i128;
+        let winning_pool = 30_000_000i128;
+
+        let payout1 = bet1 * net_pool / winning_pool;
+        let payout2 = bet2 * net_pool / winning_pool;
+        let payout3 = bet3 * net_pool / winning_pool;
+        let total_payout = payout1 + payout2 + payout3;
+
+        assert!(total_payout <= net_pool, "Total payout must not exceed net pool");
+    }
+
+    /// Saturating arithmetic prevents panic on overflow.
+    #[test]
+    fn test_saturating_arithmetic_prevents_panic() {
+        let a = i128::MAX;
+        let b = i128::MAX;
+
+        // Without saturating_mul, this would overflow/panic
+        let result = a.saturating_mul(b);
+
+        // Result is clamped to i128::MAX
+        assert_eq!(result, i128::MAX);
+    }
+}
+

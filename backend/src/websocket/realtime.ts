@@ -8,6 +8,7 @@ import { logger } from '../utils/logger';
 // Constants
 // ---------------------------------------------------------------------------
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+const AUTH_TIMEOUT_MS = 5000; // 5 seconds to authenticate after connection
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -18,6 +19,17 @@ export type ActivityEvent =
   | { type: 'resolved'; marketId: string; winningOutcomeId: string };
 
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
+type AuthMsg = { type: 'auth'; token: string };
+type IncomingMsg = AuthMsg | SubscribeMsg | { type: string };
+
+// ---------------------------------------------------------------------------
+// Connection state tracking
+// ---------------------------------------------------------------------------
+interface ConnectionState {
+  authenticated: boolean;
+  authTimer?: NodeJS.Timeout;
+  requestId: string;
+}
 
 // ---------------------------------------------------------------------------
 // Rate limiter — token bucket, max 20 events/sec per market
@@ -49,53 +61,136 @@ export class ActivityFeed {
   // marketId → set of subscribed sockets
   private subscriptions = new Map<string, Set<WebSocket>>();
   private rateLimiter = new MarketRateLimiter();
-  // Track authenticated connections
-  private authenticated = new WeakSet<WebSocket>();
+  // Track connection state (authenticated, auth timer, request ID)
+  private connectionStates = new WeakMap<WebSocket, ConnectionState>();
 
   constructor(server: Server) {
     this.wss = new WebSocketServer({ server });
     this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-      // Verify JWT from query param
-      const url = new URL(req.url || '', `http://${req.headers.host}`);
-      const token = url.searchParams.get('token');
+      const requestId = this.generateRequestId();
+      const state: ConnectionState = {
+        authenticated: false,
+        requestId,
+      };
 
-      if (!token || !this.verifyToken(token)) {
-        ws.close(4001, 'Unauthorized');
-        return;
-      }
+      // Store connection state
+      this.connectionStates.set(ws, state);
 
-      this.authenticated.add(ws);
-      ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
-      ws.on('close', () => this.removeSocket(ws));
+      // Set auth timeout: if no auth message received within 5 seconds, close
+      state.authTimer = setTimeout(() => {
+        if (!state.authenticated) {
+          logger.warn(`[${requestId}] WebSocket connection closed: authentication timeout`);
+          ws.close(4001, 'Authentication timeout');
+          this.removeSocket(ws);
+        }
+      }, AUTH_TIMEOUT_MS);
+
+      // Attach message handler
+      ws.on('message', (raw) => this.handleMessage(ws, raw.toString(), state));
+      ws.on('close', () => this.handleClose(ws, state));
+      ws.on('error', (err) => {
+        logger.error(`[${requestId}] WebSocket error:`, err);
+        this.handleClose(ws, state);
+      });
+
+      logger.debug(`[${requestId}] WebSocket connection established, awaiting auth message`);
     });
     logger.info('ActivityFeed WebSocket server attached');
+  }
+
+  private generateRequestId(): string {
+    return `ws-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   }
 
   private verifyToken(token: string): boolean {
     try {
       jwt.verify(token, JWT_SECRET);
       return true;
-    } catch {
+    } catch (err) {
+      logger.debug(`Token verification failed: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
   }
 
-  private handleMessage(ws: WebSocket, raw: string): void {
-    if (!this.authenticated.has(ws)) {
-      ws.close(4001, 'Unauthorized');
+  private handleMessage(ws: WebSocket, raw: string, state: ConnectionState): void {
+    const { requestId } = state;
+
+    // Parse incoming message
+    let msg: unknown;
+    try {
+      msg = JSON.parse(raw);
+    } catch (err) {
+      logger.warn(`[${requestId}] Failed to parse message: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
 
-    let msg: unknown;
-    try { msg = JSON.parse(raw); } catch { return; }
+    const incomingMsg = msg as IncomingMsg;
 
-    const { type, marketId } = msg as SubscribeMsg;
-    if (type !== 'subscribe_activity' || typeof marketId !== 'string') return;
+    // UNAUTHENTICATED: Only accept 'auth' type
+    if (!state.authenticated) {
+      if (incomingMsg.type === 'auth') {
+        const authMsg = incomingMsg as AuthMsg;
+        if (!authMsg.token || typeof authMsg.token !== 'string') {
+          logger.warn(`[${requestId}] Auth message missing or invalid token field`);
+          ws.close(4002, 'Invalid auth message format');
+          this.removeSocket(ws);
+          return;
+        }
 
-    if (!this.subscriptions.has(marketId)) {
-      this.subscriptions.set(marketId, new Set());
+        if (!this.verifyToken(authMsg.token)) {
+          logger.warn(`[${requestId}] Authentication failed: invalid token`);
+          ws.close(4001, 'Authentication failed');
+          this.removeSocket(ws);
+          return;
+        }
+
+        // Mark as authenticated and cancel timeout
+        state.authenticated = true;
+        if (state.authTimer) {
+          clearTimeout(state.authTimer);
+          state.authTimer = undefined;
+        }
+        logger.info(`[${requestId}] WebSocket connection authenticated`);
+        return;
+      } else {
+        // Non-auth message before authentication
+        logger.warn(`[${requestId}] Received ${incomingMsg.type} before authentication`);
+        ws.close(4001, 'Authentication required');
+        this.removeSocket(ws);
+        return;
+      }
     }
-    this.subscriptions.get(marketId)!.add(ws);
+
+    // AUTHENTICATED: Handle subscription messages
+    if (incomingMsg.type === 'subscribe_activity') {
+      const subscribeMsg = incomingMsg as SubscribeMsg;
+      if (typeof subscribeMsg.marketId !== 'string') {
+        logger.warn(`[${requestId}] Subscribe message missing or invalid marketId`);
+        return;
+      }
+
+      if (!this.subscriptions.has(subscribeMsg.marketId)) {
+        this.subscriptions.set(subscribeMsg.marketId, new Set());
+      }
+      this.subscriptions.get(subscribeMsg.marketId)!.add(ws);
+      logger.debug(`[${requestId}] Subscribed to market ${subscribeMsg.marketId}`);
+      return;
+    }
+
+    // Unknown message type after authentication
+    logger.warn(`[${requestId}] Received unknown message type: ${incomingMsg.type}`);
+  }
+
+  private handleClose(ws: WebSocket, state: ConnectionState): void {
+    const { requestId, authTimer } = state;
+    
+    // Clear auth timer if still pending
+    if (authTimer) {
+      clearTimeout(authTimer);
+    }
+
+    logger.debug(`[${requestId}] WebSocket connection closed`);
+    this.removeSocket(ws);
   }
 
   private removeSocket(ws: WebSocket): void {

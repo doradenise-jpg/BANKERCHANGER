@@ -86,6 +86,7 @@ jest_cache/
 
 # ─── Docker ──────────────────────────────────────────────────
 .docker/
+docker-compose.override.yml
 
 # ─── Editor & OS ─────────────────────────────────────────────
 .DS_Store

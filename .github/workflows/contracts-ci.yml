@@ -59,4 +59,5 @@ jobs:
         working-directory: contracts
         run: |
           cargo install cargo-audit --locked
-          cargo audit --deny warnings
+          # Fail on any security advisories (including high-severity CVEs)
+          cargo audit --deny warnings --deny unsound --deny unmaintained

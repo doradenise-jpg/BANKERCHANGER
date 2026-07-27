@@ -5,12 +5,347 @@
 This runbook provides step-by-step procedures for responding to common production incidents in the BoxMeOut platform. Each incident type includes observable symptoms, diagnostic procedures, resolution steps, and escalation protocols.
 
 **Table of Contents:**
-1. [Oracle Failures & Unresolved Markets](#oracle-failures--unresolved-markets)
-2. [Treasury Withdrawal Limits Exceeded](#treasury-withdrawal-limits-exceeded)
-3. [Contract Pause Events](#contract-pause-events)
-4. [High Dispute Volumes](#high-dispute-volumes)
-5. [RPC Node Outages](#rpc-node-outages)
-6. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+1. [Oracle Resolution Failure](#oracle-resolution-failure)
+2. [Oracle Failures & Unresolved Markets](#oracle-failures--unresolved-markets)
+3. [Treasury Withdrawal Limits Exceeded](#treasury-withdrawal-limits-exceeded)
+4. [Contract Pause Events](#contract-pause-events)
+5. [High Dispute Volumes](#high-dispute-volumes)
+6. [RPC Node Outages](#rpc-node-outages)
+7. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+
+---
+
+## Oracle Resolution Failure
+
+### Critical: User funds locked if market cannot be resolved
+
+**IMPACT**: Markets stuck in "locked" state → Users cannot claim winnings → User funds inaccessible → Reputation damage and potential legal liability.
+
+### Detection
+
+**Alert Triggers (Configure in monitoring):**
+
+1. **Market locked beyond expected resolution time:**
+   ```bash
+   # Market scheduled_at has passed + 30 minutes, but still locked
+   curl -s http://localhost:3001/api/markets/{market_id} | jq '
+     select(.status == "locked" and (.scheduled_at < now - 1800))
+   '
+   ```
+
+2. **Oracle submission failures in logs:**
+   ```bash
+   # Monitor for repeated oracle submission failures
+   grep "oracle.*submit.*failed\|resolution.*attempt.*failed" backend.log | wc -l
+   
+   # If count > 3 in last hour, escalate
+   ```
+
+3. **Resolution window expiration:**
+   ```bash
+   # Markets past resolution_window without resolution
+   curl -s http://localhost:3001/api/markets | jq '.[] |
+     select(
+       .status == "locked" and 
+       (.scheduled_at + (.config.resolution_window_secs | tonumber)) < now
+     )
+   '
+   ```
+
+4. **Manual health check:**
+   ```bash
+   # Run daily at 00:00 UTC and 12:00 UTC
+   curl -s http://localhost:3001/api/health/market-resolution | jq '.stalled_markets'
+   
+   # Alert if stalled_markets > 0
+   ```
+
+**Dashboard Metrics to Monitor:**
+- Locked markets count (should decrease to 0 within 30 min of scheduled time)
+- Oracle submission success rate (should be >99%)
+- Average resolution time (should be <5 minutes after lock threshold)
+- Failed resolution attempts (should be 0 for stable operation)
+
+### Root Cause Analysis
+
+**Step 1: Identify which oracle failed**
+
+```bash
+# Get market details
+curl -s http://localhost:3001/api/markets/{market_id} | jq '{
+  market_id: .market_id,
+  status: .status,
+  scheduled_at: .scheduled_at,
+  lock_threshold: (.scheduled_at - (.config.lock_before_secs | tonumber)),
+  current_outcome: .outcome,
+  oracle_used: .oracle_used
+}'
+
+# Check if oracle submission exists in blockchain
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network testnet \
+    -- get_oracle_submissions \
+    --market-id {market_id} | jq '.submissions'
+```
+
+**Step 2: Check oracle service status**
+
+```bash
+# Query oracle health endpoint
+curl -s http://oracle-service-url/health | jq '.status, .last_submission_at, .failures_24h'
+
+# Check if oracle is responding to queries
+curl -s http://oracle-service-url/api/event/{event_id} | jq '.status, .outcome'
+
+# Contact oracle provider:
+# - Is service experiencing outage?
+# - Were credentials rotated/invalidated?
+# - Are API rate limits being hit?
+```
+
+**Step 3: Check blockchain state**
+
+```bash
+# Verify contract is not paused
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network testnet \
+    -- is_paused
+
+# Check RPC connectivity
+curl -s -X POST "$STELLAR_RPC_URL" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "getNetwork", "params": []}' | jq '.result'
+
+# Verify market exists in contract
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network testnet \
+    -- query_market \
+    --market-id {market_id} | jq '.status, .outcome'
+```
+
+**Step 4: Analyze backend submission attempts**
+
+```bash
+# Extract all resolution attempts for this market from logs
+grep "market_id.*{market_id}" backend.log | grep -E "submit.*resolution|resolution.*attempt" | tail -20
+
+# Look for error messages:
+# - "oracle_api_timeout" → Oracle service slow/unresponsive
+# - "invalid_outcome_format" → Oracle returned malformed data
+# - "network_error" → RPC/connectivity issue
+# - "insufficient_oracle_consensus" → Multiple oracles disagreed (consensus failed)
+# - "rpc_rate_limited" → Hit rate limit on RPC provider
+```
+
+### Manual Resolution Steps
+
+**BEFORE TAKING ACTION: Verify the outcome is correct**
+
+1. **Consult original event result** (boxing match)
+   - Official sporting body announcement
+   - Multiple independent sources (ESPN, official promoter, etc.)
+   - Video evidence if available
+
+2. **Check if dispute was filed** (if disputed, follow dispute resolution, not this path)
+   ```bash
+   curl -s http://localhost:3001/api/markets/{market_id}/disputes | jq '.'
+   ```
+
+### Resolution Path A: Oracle Service Recovered (Automatic Recovery Expected)
+
+If oracle service experienced temporary outage and is now healthy:
+
+```bash
+# Wait 5 minutes for automatic resubmission retry
+sleep 300
+
+# Check if market resolved
+curl -s http://localhost:3001/api/markets/{market_id} | jq '.status, .outcome'
+
+# If still locked, proceed to Path B
+```
+
+**Timeline**: Watch for resolution within 5-10 minutes after oracle recovery.
+
+### Resolution Path B: Manual Admin Resolution (Requires Authorization)
+
+**Prerequisites**:
+- Outcome has been verified against official sources
+- Decision documented with evidence links
+- Escalation approvals obtained (see escalation path below)
+
+**Step 1: Prepare resolution command**
+
+```bash
+# Determine correct outcome (fighter_a, fighter_b, or draw)
+OUTCOME="fighter_a"  # Based on verified event result
+
+# Get market details for logging
+MARKET_INFO=$(curl -s http://localhost:3001/api/markets/{market_id})
+echo "Resolving market: $MARKET_INFO" >> /var/log/manual-resolutions.log
+```
+
+**Step 2: Execute admin resolution**
+
+```bash
+# Force resolve market to correct outcome
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- admin_force_resolve \
+    --market-id {market_id} \
+    --outcome {OUTCOME}
+
+# Capture transaction hash for audit
+TX_HASH=$(stellar tx last | jq -r '.hash')
+echo "Resolution TX: $TX_HASH" >> /var/log/manual-resolutions.log
+```
+
+**Step 3: Verify resolution**
+
+```bash
+# Confirm market transitioned to resolved
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- query_market \
+    --market-id {market_id} | jq '{
+  status: .status,
+  outcome: .outcome,
+  resolved_at: .resolved_at,
+  oracle_used: .oracle_used
+}'
+
+# Expected: status = "resolved", outcome = fighter_a (or chosen outcome)
+```
+
+**Step 4: Verify payouts processed**
+
+```bash
+# Check if bettors can now claim winnings
+curl -s http://localhost:3001/api/markets/{market_id}/payouts | jq '{
+  total_winners: (.winners | length),
+  total_payout_xlm: (.winners | map(.payout_xlm | tonumber) | add),
+  treasury_fee_xlm: .treasury_fee_xlm
+}'
+
+# Verify treasury received fees
+stellar account info --source {TREASURY_ADDRESS} | jq '.balances[] | select(.asset_type == "native")'
+```
+
+**Step 5: Communicate resolution to users**
+
+- Post on all channels (platform notification, email, Discord)
+- Include: market ID, resolution outcome, reason for admin resolution
+- Provide link to documentation explaining the incident
+- Timeline for payout availability (usually within 1 block = ~5-10 seconds)
+
+### Resolution Path C: Market Cancellation (Event Cancelled/Impossible)
+
+Use if event was cancelled, postponed indefinitely, or outcome cannot be determined.
+
+```bash
+# Cancel market and trigger full refunds
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- admin_cancel_market \
+    --market-id {market_id} \
+    --reason "event_cancelled"  # or oracle_failure, technical_issue
+
+# Verify cancellation
+stellar contract invoke \
+    --id {MARKET_FACTORY_ADDRESS} \
+    --source {ADMIN_SECRET_KEY} \
+    --network mainnet \
+    -- query_market \
+    --market-id {market_id} | jq '.status'
+
+# Expected: "cancelled"
+```
+
+**Refunds are automatic:** All bettors receive their original stake back (no house fees deducted).
+
+### Prevention & Long-Term Fixes
+
+**Immediate (within 24 hours):**
+
+1. **Add redundant oracle** — Enable multiple oracle providers for consensus
+   ```bash
+   # Add secondary oracle to market factory
+   stellar contract invoke \
+       --id {MARKET_FACTORY_ADDRESS} \
+       --source {ADMIN_SECRET_KEY} \
+       --network mainnet \
+       -- add_oracle_provider \
+       --provider-address {NEW_ORACLE_ADDRESS}
+   ```
+
+2. **Adjust resolution timeout** — Extend lock-to-resolution window
+   ```bash
+   # Increase from 24h to 48h for more recovery time
+   stellar contract invoke \
+       --id {MARKET_FACTORY_ADDRESS} \
+       --source {ADMIN_SECRET_KEY} \
+       --network mainnet \
+       -- update_resolution_window \
+       --new-window-secs 172800  # 48 hours
+   ```
+
+3. **Set up alerts** — Deploy monitoring for stalled markets (see Detection section above)
+
+**Short-term (within 1 week):**
+
+1. Audit oracle service provider SLA — require 99.9% uptime guarantee
+2. Implement oracle fallback logic in backend — automatically retry with backup oracle
+3. Add circuit breaker — after 3 failures, trigger automatic market cancellation
+4. Create metrics dashboard — track oracle reliability per provider
+
+**Long-term (next quarter):**
+
+1. Integrate multiple independent oracles (minimum 2-of-3 consensus)
+2. Implement oracle fee pool — incentivize reliable submissions
+3. Build dispute escalation fund — cover manual resolution costs
+4. Consider trustless oracle (Chainlink/Band Protocol integration)
+
+### Escalation Path
+
+**Level 1 (0-15 minutes): First Response**
+- Duty engineer detects alert
+- **Action**: Verify market is truly stuck (not awaiting oracle resubmission)
+- **Outcome**: Either proceed to Level 2 or confirm oracle recovery in progress
+
+**Level 2 (15-30 minutes): Diagnosis**
+- Page on-call engineer (if not Level 1 responder)
+- **Action**: Complete root cause analysis (Steps 1-4 above)
+- **Outcomes**:
+  - If oracle recovering: Set timer, monitor for 10 min, Page Level 3 if unresolved
+  - If oracle outage confirmed: Contact oracle provider, escalate to Level 3
+  - If blockchain issue: Contact infrastructure team, escalate to Level 3
+
+**Level 3 (30+ minutes): Executive Decision**
+- Page engineering director + product lead + legal
+- **Action**: Decide on resolution approach:
+  - Wait for oracle recovery + timeline estimate
+  - Manual admin resolution (requires 2/3 majority vote of decision makers)
+  - Market cancellation + full refunds (lowest risk, highest cost)
+- **Outcome**: Execute chosen path + prepare user communication
+
+**Communications SLA:**
+- **Within 5 min**: Acknowledge incident to status page
+- **Within 15 min**: Root cause identified, timeline shared with affected users
+- **Within 30 min**: Resolution approach decided, users notified
+- **Within 1 hour**: Resolution executed, payouts processed
+- **+24 hours**: Post-mortem published with prevention measures
 
 ---
 

@@ -50,7 +50,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/Cargo.lock') }}
 
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --features opt
+        run: cargo install --locked stellar-cli --version 27.0.0 --features opt
 
       # ── Start local Soroban node ──────────────────────────────────────────
       - name: Start local Soroban standalone node

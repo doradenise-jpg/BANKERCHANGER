@@ -4,12 +4,14 @@ import type { Market } from '../../src/models/Market';
 import type { Bet } from '../../src/models/Bet';
 
 // ── Mock cache so tests never touch Redis ────────────────────────────────────
+// Module-level mocks are appropriate here as they don't change per-test
 jest.mock('../../src/services/cache.service', () => ({
   cacheGet: jest.fn().mockResolvedValue(null),
   cacheSet: jest.fn().mockResolvedValue(undefined),
 }));
 
 // ── Mock StellarService to avoid SDK compilation errors ──────────────────────
+// Module-level mocks are appropriate here as they don't change per-test
 jest.mock('../../src/services/StellarService', () => ({
   readContractState: jest.fn(),
   submitTransaction: jest.fn(),
@@ -48,18 +50,29 @@ function makeMarket(overrides: Partial<Market> = {}): Market {
 const MARKET_OPEN = makeMarket({ market_id: 'mkt-1', status: 'open' });
 const MARKET_RESOLVED = makeMarket({ market_id: 'mkt-2', status: 'resolved' });
 
+// ── Helper to setup default mock adapter ─────────────────────────────────────
+function setupDefaultAdapter() {
+  setDbAdapter({
+    findMarkets: jest.fn().mockResolvedValue([MARKET_OPEN, MARKET_RESOLVED]),
+    findMarketById: jest.fn().mockImplementation((id: string) =>
+      Promise.resolve([MARKET_OPEN, MARKET_RESOLVED].find(m => m.market_id === id) ?? null),
+    ),
+    findBetsByAddress: jest.fn().mockResolvedValue([]),
+    findBetsByMarket: jest.fn().mockResolvedValue([]),
+    updateMarketStatus: jest.fn(),
+  });
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 describe('MarketService', () => {
   beforeEach(() => {
-    setDbAdapter({
-      findMarkets: jest.fn().mockResolvedValue([MARKET_OPEN, MARKET_RESOLVED]),
-      findMarketById: jest.fn().mockImplementation((id: string) =>
-        Promise.resolve([MARKET_OPEN, MARKET_RESOLVED].find(m => m.market_id === id) ?? null),
-      ),
-      findBetsByAddress: jest.fn().mockResolvedValue([]),
-      findBetsByMarket: jest.fn().mockResolvedValue([]),
-      updateMarketStatus: jest.fn(),
-    });
+    // Reset and setup mock adapter for each test to prevent cross-test contamination
+    setupDefaultAdapter();
+  });
+
+  afterEach(() => {
+    // Clear all mocks after each test
+    jest.clearAllMocks();
   });
 
   // 1 ─────────────────────────────────────────────────────────────────────────

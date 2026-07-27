@@ -26,6 +26,63 @@ components:
         success: { type: boolean, example: false }
         message: { type: string }
 
+    BadRequest:
+      type: object
+      description: The request contains invalid parameters, malformed JSON, or validation errors
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string, example: "Invalid query parameters" }
+        error: { type: string, example: "VALIDATION_ERROR" }
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string, example: "email" }
+              message: { type: string, example: "Invalid email format" }
+          example:
+            - field: "email"
+              message: "Invalid email format"
+            - field: "password"
+              message: "Must be at least 8 characters"
+
+    Unauthorized:
+      type: object
+      description: Authentication failed or credentials missing/invalid
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string, example: "Invalid credentials" }
+        error: { type: string, example: "AUTHENTICATION_FAILED" }
+
+    Forbidden:
+      type: object
+      description: Authenticated but insufficient permissions
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string, example: "Admin access required" }
+        error: { type: string, example: "INSUFFICIENT_PERMISSIONS" }
+        requiredRole: { type: string, example: "ADMIN" }
+
+    TooManyRequests:
+      type: object
+      description: Rate limit exceeded
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string, example: "Rate limit exceeded" }
+        error: { type: string, example: "RATE_LIMIT_EXCEEDED" }
+        retryAfter: { type: integer, description: "Seconds until retry", example: 45 }
+        limit: { type: integer, example: 60 }
+        windowMs: { type: integer, example: 60000 }
+
+    InternalServerError:
+      type: object
+      description: Unexpected server error
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string, example: "An unexpected error occurred" }
+        error: { type: string, example: "INTERNAL_SERVER_ERROR" }
+        requestId: { type: string, description: "Unique error tracking ID", example: "req-12345-67890" }
+
     UserDTO:
       type: object
       properties:
@@ -252,17 +309,35 @@ paths:
                 properties:
                   userId:   { type: string }
                   message:  { type: string }
+        '400':
+          description: Invalid request body or validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '409':
           description: Email already registered
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TooManyRequests' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/login:
     post:
       summary: Login with email and password
       operationId: login
       tags: [Auth]
+      x-rateLimit-windowMs: 60000
+      x-rateLimit-max: 10
+      x-rateLimit-keyBy: ip
       requestBody:
         required: true
         content:
@@ -289,18 +364,31 @@ paths:
           description: Missing credentials
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Invalid credentials
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TooManyRequests' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/forgot-password:
     post:
       summary: Request a password-reset email
       operationId: forgotPassword
       tags: [Auth]
+      x-rateLimit-windowMs: 60000
+      x-rateLimit-max: 5
+      x-rateLimit-keyBy: ip
       requestBody:
         required: true
         content:
@@ -319,6 +407,21 @@ paths:
                 type: object
                 properties:
                   message: { type: string }
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TooManyRequests' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/reset-password:
     post:
@@ -348,7 +451,12 @@ paths:
           description: Invalid or expired token
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/2fa/setup:
     post:
@@ -371,7 +479,12 @@ paths:
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/2fa/enable:
     post:
@@ -392,11 +505,28 @@ paths:
       responses:
         '200':
           description: 2FA enabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+        '400':
+          description: Invalid OTP format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized or invalid OTP
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/2fa/disable:
     post:
@@ -417,11 +547,28 @@ paths:
       responses:
         '200':
           description: 2FA disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+        '400':
+          description: Invalid OTP format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized or invalid OTP
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /auth/2fa/verify:
     post:
@@ -448,11 +595,26 @@ paths:
                 properties:
                   accessToken:  { type: string }
                   refreshToken: { type: string }
+        '400':
+          description: Invalid OTP format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Invalid temp token or OTP
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TooManyRequests' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Users
@@ -478,7 +640,12 @@ paths:
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
     patch:
       summary: Update authenticated user's profile
       operationId: updateMyProfile
@@ -508,11 +675,26 @@ paths:
                 properties:
                   success: { type: boolean }
                   data:    { $ref: '#/components/schemas/UserDTO' }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
         '409':
           description: Username already taken
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/users/{id}:
     get:
@@ -539,6 +721,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/users:
     get:
@@ -585,11 +772,26 @@ paths:
                       total: { type: integer }
                       page:  { type: integer }
                       limit: { type: integer }
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
         '403':
           description: Admin access required
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/users/{id}/suspend:
     patch:
@@ -606,11 +808,33 @@ paths:
       responses:
         '200':
           description: User suspended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: User not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/users/{id}/role:
     patch:
@@ -653,12 +877,27 @@ paths:
           description: Invalid role
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: User not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Platform
@@ -674,6 +913,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PlatformStats' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Markets
@@ -719,7 +963,17 @@ paths:
           description: Invalid query parameters
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TooManyRequests' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/markets/{market_id}:
     get:
@@ -742,6 +996,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/markets/{market_id}/bets:
     get:
@@ -776,11 +1035,21 @@ paths:
                   total: { type: integer }
                   page:  { type: integer }
                   limit: { type: integer }
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/markets/{market_id}/odds:
     get:
@@ -803,6 +1072,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/markets/{market_id}/stats:
     get:
@@ -825,6 +1099,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/markets/{market_id}/simulate:
     get:
@@ -854,7 +1133,17 @@ paths:
           description: Invalid parameters
           content:
             application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '404':
+          description: Market not found
+          content:
+            application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/markets/{market_id}/resolve:
     post:
@@ -886,16 +1175,31 @@ paths:
                 type: object
                 properties:
                   tx_hash: { type: string }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Bets
@@ -934,7 +1238,12 @@ paths:
           description: Invalid Stellar address
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/bets/{bettor_address}/stats:
     get:
@@ -956,7 +1265,12 @@ paths:
           description: Invalid Stellar address
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/portfolio/{address}:
     get:
@@ -978,7 +1292,12 @@ paths:
           description: Invalid Stellar address
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/claims:
     post:
@@ -1005,10 +1324,20 @@ paths:
                 properties:
                   tx_hash: { type: string }
         '400':
-          description: No winnings to claim
+          description: No winnings to claim or invalid input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '404':
+          description: Market or bet not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/claims/refund:
     post:
@@ -1035,10 +1364,20 @@ paths:
                 properties:
                   tx_hash: { type: string }
         '400':
-          description: Market not cancelled or no bet found
+          description: Market not cancelled or invalid input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '404':
+          description: Market or bet not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Oracle
@@ -1078,12 +1417,22 @@ paths:
           description: Invalid request body
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Missing or invalid oracle API key
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TooManyRequests' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/oracle/reports/{match_id}:
     get:
@@ -1108,6 +1457,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Disputes
@@ -1141,20 +1495,25 @@ paths:
                   success: { type: boolean }
                   data:    { $ref: '#/components/schemas/Dispute' }
         '400':
-          description: Invalid market status
+          description: Invalid market status or request body
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
         '409':
           description: Dispute already exists for this market
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
     get:
       summary: List all disputes (admin only)
       operationId: listDisputesApi
@@ -1188,11 +1547,26 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/Dispute' }
                   pagination: { $ref: '#/components/schemas/Pagination' }
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
         '403':
           description: Admin access required
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/disputes/{disputeId}:
     get:
@@ -1219,6 +1593,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/disputes/{disputeId}/review:
     patch:
@@ -1251,16 +1630,31 @@ paths:
                 properties:
                   success: { type: boolean }
                   data:    { $ref: '#/components/schemas/Dispute' }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
         '403':
           description: Admin access required
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Dispute not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/disputes/{disputeId}/resolve:
     patch:
@@ -1302,17 +1696,27 @@ paths:
           description: Invalid action or missing fields
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unauthorized' }
         '403':
           description: Admin access required
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Dispute not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   # ---------------------------------------------------------------------------
   # Admin
@@ -1339,7 +1743,17 @@ paths:
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/dispute/{market_id}:
     post:
@@ -1371,16 +1785,31 @@ paths:
                 type: object
                 properties:
                   tx_hash: { type: string }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/dispute/{market_id}/investigate:
     post:
@@ -1397,16 +1826,33 @@ paths:
       responses:
         '200':
           description: Dispute under investigation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/resolve-dispute/{market_id}:
     post:
@@ -1441,16 +1887,31 @@ paths:
                 type: object
                 properties:
                   tx_hash: { type: string }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/cancel/{market_id}:
     post:
@@ -1482,16 +1943,31 @@ paths:
                 type: object
                 properties:
                   tx_hash: { type: string }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/cancel/{market_id}/refunds:
     post:
@@ -1508,16 +1984,33 @@ paths:
       responses:
         '200':
           description: Refunds processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  processed: { type: integer }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
         '404':
           description: Market not found
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/markets/bulk-pause:
     post:
@@ -1546,11 +2039,26 @@ paths:
                 type: object
                 properties:
                   paused: { type: integer }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/markets/bulk-cancel:
     post:
@@ -1579,11 +2087,26 @@ paths:
                 type: object
                 properties:
                   cancelled: { type: integer }
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/export/users:
     get:
@@ -1602,7 +2125,17 @@ paths:
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/export/trades:
     get:
@@ -1624,11 +2157,26 @@ paths:
           content:
             text/csv:
               schema: { type: string }
+        '400':
+          description: Invalid date format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/export/treasury:
     get:
@@ -1647,7 +2195,17 @@ paths:
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }
 
   /api/admin/export/request:
     post:
@@ -1681,9 +2239,19 @@ paths:
           description: Invalid request
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/BadRequest' }
         '401':
           description: Unauthorized
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+              schema: { $ref: '#/components/schemas/Unauthorized' }
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Forbidden' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InternalServerError' }

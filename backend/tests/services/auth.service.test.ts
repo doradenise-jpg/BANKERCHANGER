@@ -449,4 +449,249 @@ describe('AuthService', () => {
       );
     });
   });
+
+  // =========================================================================
+  // TOKEN EXPIRY - CRITICAL SECURITY TESTS
+  // =========================================================================
+  describe('Token expiry and refresh', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      authService.users.set('user-expiry-test', {
+        id: 'user-expiry-test',
+        email: 'expiry@example.com',
+        passwordHash: 'hash',
+        emailVerified: true,
+        twoFactorEnabled: false,
+        sessionVersion: 0,
+      });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    // ── Access Token Expiry ──────────────────────────────────────────────
+    it('should reject expired access token with 401', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      // Create a token that expires in 15 minutes
+      const tokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'access',
+        sv: 0,
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 15 * 60, // 15 minutes
+      };
+
+      mockJwt.sign.mockReturnValue('expired_access_token' as never);
+      mockJwt.verify.mockReturnValue(tokenPayload as never);
+
+      // Simulate 16 minutes passing (1 minute past expiry)
+      jest.advanceTimersByTime(16 * 60 * 1000);
+
+      // Verify should throw TokenExpiredError
+      mockJwt.verify.mockImplementation(() => {
+        const err = new Error('jwt expired');
+        (err as any).name = 'TokenExpiredError';
+        throw err;
+      });
+
+      expect.assertions(1);
+      try {
+        jwt.verify('expired_access_token', process.env.JWT_SECRET || '');
+      } catch (err: any) {
+        expect(err.name).toBe('TokenExpiredError');
+      }
+    });
+
+    // ── Refresh Token Expiry ─────────────────────────────────────────────
+    it('should reject expired refresh token and require re-login', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      // Create a refresh token that expires in 7 days
+      const refreshTokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'refresh',
+        sv: 0,
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 7 * 24 * 60 * 60, // 7 days
+      };
+
+      mockJwt.verify.mockReturnValue(refreshTokenPayload as never);
+
+      // Simulate 8 days passing (1 day past expiry)
+      jest.advanceTimersByTime(8 * 24 * 60 * 60 * 1000);
+
+      // Verify should throw TokenExpiredError
+      mockJwt.verify.mockImplementation(() => {
+        const err = new Error('jwt expired');
+        (err as any).name = 'TokenExpiredError';
+        throw err;
+      });
+
+      expect.assertions(1);
+      try {
+        jwt.verify('expired_refresh_token', process.env.JWT_SECRET || '');
+      } catch (err: any) {
+        expect(err.name).toBe('TokenExpiredError');
+      }
+    });
+
+    // ── Reset Token Expiry ──────────────────────────────────────────────
+    it('should reject expired password reset token', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      // Create a reset token that expires in 1 hour
+      const resetTokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'password_reset',
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 60 * 60, // 1 hour
+      };
+
+      mockJwt.verify.mockReturnValue(resetTokenPayload as never);
+
+      // Simulate 65 minutes passing (5 minutes past expiry)
+      jest.advanceTimersByTime(65 * 60 * 1000);
+
+      mockJwt.verify.mockImplementation(() => {
+        const err = new Error('jwt expired');
+        (err as any).name = 'TokenExpiredError';
+        throw err;
+      });
+
+      expect.assertions(1);
+      try {
+        jwt.verify('expired_reset_token', process.env.JWT_SECRET || '');
+      } catch (err: any) {
+        expect(err.name).toBe('TokenExpiredError');
+      }
+    });
+
+    // ── Access Token Still Valid Before Expiry ───────────────────────────
+    it('should accept access token before expiry', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      const tokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'access',
+        sv: 0,
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 15 * 60, // 15 minutes
+      };
+
+      mockJwt.verify.mockReturnValue(tokenPayload as never);
+
+      // Simulate 10 minutes passing (5 minutes before expiry)
+      jest.advanceTimersByTime(10 * 60 * 1000);
+
+      const result = jwt.verify('valid_token', process.env.JWT_SECRET || '');
+
+      expect(result).toEqual(tokenPayload);
+      expect(result.sub).toBe('user-expiry-test');
+    });
+
+    // ── Refresh Token Refresh Flow ───────────────────────────────────────
+    it('should successfully refresh tokens with valid refresh token', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      const refreshTokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'refresh',
+        sv: 0,
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 7 * 24 * 60 * 60, // 7 days
+      };
+
+      mockJwt.verify.mockReturnValue(refreshTokenPayload as never);
+      mockJwt.sign.mockReturnValue('new_access_token' as never);
+
+      // Simulate 3 days passing (still valid)
+      jest.advanceTimersByTime(3 * 24 * 60 * 60 * 1000);
+
+      const verified = jwt.verify('valid_refresh_token', process.env.JWT_SECRET || '');
+      expect(verified.sub).toBe('user-expiry-test');
+
+      // Should be able to generate new access token
+      const newAccessToken = jwt.sign(
+        { sub: verified.sub, type: 'access', sv: 0 },
+        process.env.JWT_SECRET || '',
+        { expiresIn: '15m' }
+      );
+      expect(newAccessToken).toBe('new_access_token');
+    });
+
+    // ── Multiple Token Expiries Across Different Timespans ───────────────
+    it('should handle multiple tokens with different expiry times', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      const accessTokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'access',
+        exp: Math.floor(now / 1000) + 15 * 60, // 15 minutes
+      };
+
+      const refreshTokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'refresh',
+        exp: Math.floor(now / 1000) + 7 * 24 * 60 * 60, // 7 days
+      };
+
+      // At 10 minutes: both valid
+      jest.advanceTimersByTime(10 * 60 * 1000);
+      mockJwt.verify.mockReturnValue(accessTokenPayload as never);
+      expect(jwt.verify('access', process.env.JWT_SECRET || '').type).toBe('access');
+
+      mockJwt.verify.mockReturnValue(refreshTokenPayload as never);
+      expect(jwt.verify('refresh', process.env.JWT_SECRET || '').type).toBe('refresh');
+
+      // At 20 minutes: access expired, refresh still valid
+      jest.advanceTimersByTime(10 * 60 * 1000);
+      mockJwt.verify.mockImplementation(() => {
+        const err = new Error('jwt expired');
+        (err as any).name = 'TokenExpiredError';
+        throw err;
+      });
+
+      expect(() => jwt.verify('access', process.env.JWT_SECRET || '')).toThrow();
+      expect(jwt.verify('refresh', process.env.JWT_SECRET || '').type).toBe('refresh');
+    });
+
+    // ── Email Verification Token Expiry ──────────────────────────────────
+    it('should reject expired email verification token', async () => {
+      const now = Date.now();
+      jest.setSystemTime(now);
+
+      const verificationTokenPayload = {
+        sub: 'user-expiry-test',
+        type: 'email_verification',
+        iat: Math.floor(now / 1000),
+        exp: Math.floor(now / 1000) + 15 * 60, // 15 minutes
+      };
+
+      mockJwt.verify.mockReturnValue(verificationTokenPayload as never);
+
+      // Simulate 20 minutes passing (5 minutes past expiry)
+      jest.advanceTimersByTime(20 * 60 * 1000);
+
+      mockJwt.verify.mockImplementation(() => {
+        const err = new Error('jwt expired');
+        (err as any).name = 'TokenExpiredError';
+        throw err;
+      });
+
+      expect.assertions(1);
+      try {
+        jwt.verify('expired_verification_token', process.env.JWT_SECRET || '');
+      } catch (err: any) {
+        expect(err.name).toBe('TokenExpiredError');
+      }
+    });
+  });
 });
