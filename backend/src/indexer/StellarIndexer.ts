@@ -622,12 +622,15 @@ export async function handleMarketLocked(event: RawStellarEvent): Promise<void> 
 
 export async function handleMarketResolved(event: RawStellarEvent): Promise<void> {
   const p = parsePayload(event.data);
+  // Declared outside the try block: cacheDeletePattern() below needs it
+  // after the try/catch/finally, and a `const` scoped to the try block
+  // would throw ReferenceError there on every call.
+  const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const outcome = typeof p.outcome === 'string' ? p.outcome : null;
-    const marketId = typeof p.market_id === 'string' ? p.market_id : null;
     const matchId = typeof p.match_id === 'string' ? p.match_id : null;
     const oracleAddress = typeof p.oracle_address === 'string' ? p.oracle_address : null;
     const signature = typeof p.signature === 'string' ? p.signature : null;
