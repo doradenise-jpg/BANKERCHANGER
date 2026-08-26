@@ -13,6 +13,7 @@ import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
 import { cacheDeletePattern } from '../services/cache.service';
+import { tryGetActivityFeed, ActivityEvent } from '../websocket/realtime';
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -464,6 +465,10 @@ export async function processEvent(event: RawStellarEvent): Promise<void> {
 
     if (handler) {
       await handler(event);
+      // Push the freshly-persisted event to any live WebSocket subscribers
+      // now that it's durable — never lets a broadcast failure affect
+      // indexing, and no-ops if the WebSocket layer isn't running.
+      broadcastIndexedEvent(event);
     } else {
       console.warn(
         `[Indexer] Unknown event type "${event.event_type}" on contract ${event.contract_address} ` +
@@ -481,6 +486,35 @@ export async function processEvent(event: RawStellarEvent): Promise<void> {
 
 function parsePayload(data: string): Record<string, unknown> {
   try { return JSON.parse(data); } catch { return {}; }
+}
+
+/** Maps an ingested contract event onto the WebSocket ActivityEvent shape and publishes it. */
+function broadcastIndexedEvent(event: RawStellarEvent): void {
+  const feed = tryGetActivityFeed();
+  if (!feed) return; // WebSocket layer not initialised in this process (e.g. tests, standalone worker)
+
+  const p = parsePayload(event.data);
+  const marketId = typeof p.market_id === 'string' ? p.market_id : '';
+  if (!marketId) return;
+
+  let activityEvent: ActivityEvent;
+  if (event.event_type === 'bet_placed') {
+    activityEvent = {
+      type: 'trade',
+      marketId,
+      outcomeId: String(p.side ?? ''),
+      side: String(p.side ?? ''),
+      sharesAmount: Number(p.amount ?? 0),
+      priceBps: 0,
+      timestamp: event.ledger_close_time,
+    };
+  } else if (event.event_type === 'market_resolved') {
+    activityEvent = { type: 'resolved', marketId, winningOutcomeId: String(p.outcome ?? '') };
+  } else {
+    activityEvent = { type: 'market_update', marketId, eventType: event.event_type, data: p };
+  }
+
+  feed.publish(activityEvent);
 }
 
 // ---------------------------------------------------------------------------
