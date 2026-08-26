@@ -109,10 +109,29 @@ export async function startIndexer(): Promise<void> {
 
   // Keep polling for new ledgers as fallback
   let consecutiveFailures = 0;
+  // Highest ledger sequence any RPC response has reported so far. Stellar's
+  // federated consensus gives closed ledgers instant finality, so a healthy
+  // node's "latest ledger" never goes backwards — if it does, we're either
+  // talking to a stale/lagging RPC node or (in the pathological case) a
+  // network re-org, and trusting it would rewind lastProcessed and cause the
+  // same ledgers to be reprocessed out of order.
+  let highestSeenLedger = lastProcessed;
   while (true) {
     try {
       const latestLedgerResponse = await server.getLatestLedger();
       const latestLedger = latestLedgerResponse.sequence;
+
+      if (latestLedger < highestSeenLedger) {
+        console.warn(
+          `[Indexer] RPC reported ledger ${latestLedger}, behind previously seen ledger ` +
+          `${highestSeenLedger}. Possible stale RPC node or re-org; skipping this poll ` +
+          `without advancing lastProcessed.`,
+        );
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        consecutiveFailures = 0;
+        continue;
+      }
+      highestSeenLedger = latestLedger;
 
       if (latestLedger > lastProcessed) {
         for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
