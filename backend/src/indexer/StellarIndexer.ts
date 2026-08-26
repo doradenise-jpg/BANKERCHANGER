@@ -168,16 +168,53 @@ export async function startIndexer(): Promise<void> {
 }
 
 /**
+ * True if `err` indicates the requested ledger has fallen outside the RPC
+ * node's retention window (already pruned) rather than a transient RPC
+ * failure. These ledgers will never become available, so they must be
+ * skipped instead of retried forever.
+ */
+function isLedgerRangeError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /start\s*ledger|ledger\s*range|oldest\s*ledger|out of range/i.test(msg);
+}
+
+/**
  * Runs a single fallback-polling iteration: advances from `lastProcessed`
  * up to the current chain tip, checkpointing after every ledger. Returns
  * the new last-processed ledger sequence.
+ *
+ * Handles two edge cases cleanly instead of looping forever or crashing:
+ *  - Re-org / RPC rewind: if the reported tip is behind `lastProcessed`,
+ *    never process backward — resume from the new tip.
+ *  - Missing/pruned ledgers: if a ledger has aged out of the RPC's
+ *    retention window it can never be fetched, so it is skipped (logged)
+ *    rather than blocking the indexer indefinitely.
  */
 export async function pollOnce(lastProcessed: number): Promise<number> {
   const latestLedgerResponse = await server.getLatestLedger();
   const latestLedger = latestLedgerResponse.sequence;
 
+  if (latestLedger < lastProcessed) {
+    console.warn(
+      `[Indexer] Re-org detected: latest ledger ${latestLedger} is behind ` +
+      `last processed ${lastProcessed}. Resuming from tip without replaying backward.`,
+    );
+    await saveCheckpoint(latestLedger);
+    return latestLedger;
+  }
+
   for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
-    await processLedger(seq);
+    try {
+      await processLedger(seq);
+    } catch (err) {
+      if (isLedgerRangeError(err)) {
+        console.warn(`[Indexer] Ledger ${seq} unavailable (pruned/out of range), skipping`, err);
+      } else {
+        // Real RPC failure — stop here without checkpointing so the
+        // caller's backoff-and-retry picks this ledger back up.
+        throw err;
+      }
+    }
     await saveCheckpoint(seq);
     lastProcessed = seq;
   }
