@@ -44,6 +44,20 @@ function calculatePollBackoff(consecutiveFailures: number): number {
   return Math.round(capped * (0.5 + Math.random() * 0.5));
 }
 
+// ── Re-org / missing-ledger handling ─────────────────────────────────────────
+// How far to rewind the checkpoint when the RPC node's head ledger is found
+// behind our last-processed checkpoint (see startIndexer's poll loop).
+const REORG_REWIND_LEDGERS = 5;
+
+// Public Soroban RPC nodes only retain a rolling window of recent ledgers;
+// requesting one outside that window fails permanently, never on retry.
+const LEDGER_UNAVAILABLE_PATTERN = /ledger.*(not found|out.?of.?range|outside the range|before the oldest|retention window)/i;
+
+function isLedgerUnavailableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return LEDGER_UNAVAILABLE_PATTERN.test(message);
+}
+
 export async function startIndexer(): Promise<void> {
   const pollInterval = Number(process.env.POLL_INTERVAL_MS ?? 5000);
   let lastProcessed = await getLastProcessedLedger();
@@ -114,6 +128,20 @@ export async function startIndexer(): Promise<void> {
     try {
       const latestLedgerResponse = await server.getLatestLedger();
       const latestLedger = latestLedgerResponse.sequence;
+
+      if (latestLedger < lastProcessed) {
+        // The RPC node's head receded below our checkpoint — either a chain
+        // re-org or the node was reset/re-synced from an earlier snapshot.
+        // Rewind past the affected range so events are re-derived from the
+        // canonical chain; the ON CONFLICT upserts in processLedger's
+        // handlers make re-processing that overlap idempotent.
+        const rewoundTo = Math.max(latestLedger - REORG_REWIND_LEDGERS, 0);
+        console.warn(
+          `[Indexer] Re-org detected: RPC latest ledger ${latestLedger} is behind checkpoint ${lastProcessed}. Rewinding checkpoint to ${rewoundTo}.`,
+        );
+        lastProcessed = rewoundTo;
+        await saveCheckpoint(lastProcessed);
+      }
 
       if (latestLedger > lastProcessed) {
         for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
@@ -354,7 +382,19 @@ export async function processLedger(ledger_sequence: number): Promise<void> {
       await processEvent(rawEvent);
     }
   } catch (err) {
+    if (isLedgerUnavailableError(err)) {
+      // The ledger sequence is missing from the RPC node (pruned by its
+      // retention window, or never existed on this fork) — retrying it will
+      // never succeed, so skip cleanly and let the caller move the
+      // checkpoint past it instead of getting stuck forever.
+      console.warn(
+        `[Indexer] Ledger ${ledger_sequence} unavailable on RPC node, skipping:`,
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
     console.error(`Error processing ledger ${ledger_sequence}:`, err);
+    throw err;
   }
 }
 
@@ -667,7 +707,16 @@ export async function backfillLedgerRange(
     const batchEnd = Math.min(batchStart + batch_size - 1, to_ledger);
 
     for (let seq = batchStart; seq <= batchEnd; seq++) {
-      await processLedger(seq);
+      try {
+        await processLedger(seq);
+      } catch (err) {
+        // Don't let one bad ledger abort a multi-thousand-ledger backfill —
+        // log it and move on; the checkpoint below tracks how far we got.
+        console.error(
+          `[Backfill] Failed to process ledger ${seq}, skipping:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
       processed++;
 
       if (processed % 1_000 === 0) {
