@@ -13,6 +13,19 @@ import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
 import { cacheDeletePattern } from '../services/cache.service';
+import { getActivityFeed } from '../websocket/realtime';
+
+/**
+ * Publish to the live ActivityFeed without letting a missing/uninitialised
+ * feed (e.g. in tests, or a backfill-only run) break event ingestion.
+ */
+function publishActivity(event: Parameters<ReturnType<typeof getActivityFeed>['publish']>[0]): void {
+  try {
+    getActivityFeed().publish(event);
+  } catch (err) {
+    console.warn('[Indexer] Could not publish to ActivityFeed:', err instanceof Error ? err.message : err);
+  }
+}
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -494,15 +507,28 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
       ],
     );
     const col = p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
-    await client.query(
+    const { rows: [pools] } = await client.query(
       `UPDATE markets
           SET ${col}      = ${col} + $1,
               total_pool  = total_pool + $1,
               updated_at  = NOW()
-        WHERE market_id   = $2`,
+        WHERE market_id   = $2
+        RETURNING ${col} AS side_pool, total_pool`,
       [p.amount, p.market_id],
     );
     await client.query('COMMIT');
+
+    const totalPool = Number(pools?.total_pool ?? 0);
+    const sidePool = Number(pools?.side_pool ?? 0);
+    publishActivity({
+      type: 'trade',
+      marketId: String(p.market_id),
+      outcomeId: String(p.side),
+      side: String(p.side),
+      sharesAmount: Number(p.amount),
+      priceBps: totalPool > 0 ? Math.round((sidePool / totalPool) * 10_000) : 0,
+      timestamp: new Date().toISOString(),
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -521,12 +547,12 @@ export async function handleMarketLocked(event: RawStellarEvent): Promise<void> 
 
 export async function handleMarketResolved(event: RawStellarEvent): Promise<void> {
   const p = parsePayload(event.data);
+  const outcome = typeof p.outcome === 'string' ? p.outcome : null;
+  const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    const outcome = typeof p.outcome === 'string' ? p.outcome : null;
-    const marketId = typeof p.market_id === 'string' ? p.market_id : null;
     const matchId = typeof p.match_id === 'string' ? p.match_id : null;
     const oracleAddress = typeof p.oracle_address === 'string' ? p.oracle_address : null;
     const signature = typeof p.signature === 'string' ? p.signature : null;
@@ -584,6 +610,10 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   // Invalidate all Redis cache keys for this market
   await cacheDeletePattern(`market:${marketId}*`);
   await cacheDeletePattern(`markets:*`);
+
+  if (marketId) {
+    publishActivity({ type: 'resolved', marketId, winningOutcomeId: outcome ?? '' });
+  }
 }
 
 export async function handleMarketCancelled(event: RawStellarEvent): Promise<void> {
@@ -619,6 +649,10 @@ export async function handleMarketCancelled(event: RawStellarEvent): Promise<voi
     throw err;
   } finally {
     client.release();
+  }
+
+  if (typeof p.market_id === 'string') {
+    publishActivity({ type: 'cancelled', marketId: p.market_id });
   }
 }
 

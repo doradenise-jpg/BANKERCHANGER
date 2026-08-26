@@ -16,7 +16,8 @@ const AUTH_TIMEOUT_MS = 5_000; // 5 seconds to send auth message
 export type ActivityEvent =
   | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
-  | { type: 'resolved'; marketId: string; winningOutcomeId: string };
+  | { type: 'resolved'; marketId: string; winningOutcomeId: string }
+  | { type: 'cancelled'; marketId: string };
 
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
