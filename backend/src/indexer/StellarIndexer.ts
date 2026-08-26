@@ -31,6 +31,18 @@ const TREASURY_CONTRACT = process.env.TREASURY_CONTRACT_ADDRESS || '';
 
 const server = new rpc.Server(RPC_URL);
 
+// ── Backoff for the fallback polling loop ───────────────────────────────────
+const POLL_MIN_BACKOFF_MS = 1_000;
+const POLL_MAX_BACKOFF_MS = 5 * 60 * 1000;
+const POLL_BACKOFF_MULTIPLIER = 2;
+
+/** Exponential backoff with jitter, capped at POLL_MAX_BACKOFF_MS. */
+function calculatePollBackoff(consecutiveFailures: number): number {
+  const backoff = POLL_MIN_BACKOFF_MS * Math.pow(POLL_BACKOFF_MULTIPLIER, consecutiveFailures - 1);
+  const capped = Math.min(backoff, POLL_MAX_BACKOFF_MS);
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
+
 export async function startIndexer(): Promise<void> {
   const pollInterval = Number(process.env.POLL_INTERVAL_MS ?? 5000);
   let lastProcessed = await getLastProcessedLedger();
@@ -96,6 +108,7 @@ export async function startIndexer(): Promise<void> {
   });
 
   // Keep polling for new ledgers as fallback
+  let consecutiveFailures = 0;
   while (true) {
     try {
       const latestLedgerResponse = await server.getLatestLedger();
@@ -110,9 +123,19 @@ export async function startIndexer(): Promise<void> {
       } else {
         await new Promise(resolve => setTimeout(resolve, pollInterval));
       }
+
+      consecutiveFailures = 0;
     } catch (err) {
-      console.error('[Indexer] Unrecoverable error:', err);
-      process.exit(1);
+      consecutiveFailures++;
+      const backoffMs = calculatePollBackoff(consecutiveFailures);
+      console.error(
+        `[Indexer] Poll failed (consecutiveFailures=${consecutiveFailures}), retrying in ${backoffMs}ms:`,
+        err,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+      // Loop continues — a transient RPC/DB error no longer kills the process.
+      // lastProcessed was not advanced past the failed ledger, so the same
+      // sequence is retried once the backoff elapses.
     }
   }
 }
