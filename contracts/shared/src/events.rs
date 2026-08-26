@@ -157,6 +157,40 @@ pub fn emit_contract_upgraded(env: &Env, new_wasm_hash: soroban_sdk::BytesN<32>)
     env.events().publish(topics, new_wasm_hash);
 }
 
+/// Emits a `withdrawals_paused` event when the admin pauses all withdrawals.
+///
+/// Topics: `(Symbol("withdrawals_paused"),)`
+/// Data:   `admin: Address`
+pub fn emit_withdrawals_paused(env: &Env, admin: Address) {
+    let topics = (Symbol::new(env, "withdrawals_paused"),);
+    env.events().publish(topics, admin);
+}
+
+/// Emits a `withdrawals_unpaused` event when the admin resumes withdrawals.
+///
+/// Topics: `(Symbol("withdrawals_unpaused"),)`
+/// Data:   `admin: Address`
+pub fn emit_withdrawals_unpaused(env: &Env, admin: Address) {
+    let topics = (Symbol::new(env, "withdrawals_unpaused"),);
+    env.events().publish(topics, admin);
+}
+
+/// Emits an `audit_entry` event for every write to the immutable audit log.
+///
+/// Topics: `(Symbol("audit_entry"),)`
+/// Data:   `(action, actor, token, amount, timestamp)`
+pub fn emit_audit_entry(
+    env: &Env,
+    action: Symbol,
+    actor: Address,
+    token: Address,
+    amount: i128,
+    timestamp: u64,
+) {
+    let topics = (Symbol::new(env, "audit_entry"),);
+    env.events().publish(topics, (action, actor, token, amount, timestamp));
+}
+
 /// Emits a `stale_reports_cleared` event when the admin removes expired pending
 /// oracle reports so a fresh resolution cycle can begin.
 ///
