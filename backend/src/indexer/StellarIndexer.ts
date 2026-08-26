@@ -266,71 +266,71 @@ function buildEventPayload(
 // ---------------------------------------------------------------------------
 
 export async function processLedger(ledger_sequence: number): Promise<void> {
-  try {
-    const request: rpc.Api.GetEventsRequest = {
-      startLedger: ledger_sequence,
-      filters: [
-        {
-          type: 'contract',
-          contractIds: [FACTORY_CONTRACT, TREASURY_CONTRACT].filter(id => id),
-          topics: [['*']]
-        }
-      ],
-      limit: 100
+  // Errors are intentionally left to propagate (not swallowed here): the
+  // caller in startIndexer/backfillLedgerRange must know a ledger failed so
+  // it does not advance the checkpoint past it. Advancing on a swallowed
+  // error would permanently skip that ledger's events on restart.
+  const request: rpc.Api.GetEventsRequest = {
+    startLedger: ledger_sequence,
+    filters: [
+      {
+        type: 'contract',
+        contractIds: [FACTORY_CONTRACT, TREASURY_CONTRACT].filter(id => id),
+        topics: [['*']]
+      }
+    ],
+    limit: 100
+  };
+
+  const response = await server.getEvents(request);
+
+  if (!response.events || response.events.length === 0) {
+    return;
+  }
+
+  for (const event of response.events) {
+    const contractId = typeof event.contractId === 'string' ? event.contractId : event.contractId?.toString() || '';
+
+    // Properly extract event type from ScVal Symbol topic
+    const eventType = (event.topic[0] as any)?.sym()?.toString() || 'unknown';
+
+    // Build a flat JSON record from ScVal topics + value
+    const payload = buildEventPayload(eventType, event.topic, event.value);
+    const data = JSON.stringify(payload);
+
+    const rawEvent: RawStellarEvent = {
+      contract_address: contractId,
+      event_type: eventType,
+      topics: event.topic.map((t: any) => scvToString(t)),
+      data,
+      ledger_sequence: event.ledger,
+      ledger_close_time: event.ledgerClosedAt,
+      tx_hash: event.txHash
     };
 
-    const response = await server.getEvents(request);
+    // Persist raw event to blockchain_events table — use DO UPDATE so
+    // re-indexing during a backfill refreshes stale rows instead of skipping.
+    await pool.query(
+      `INSERT INTO blockchain_events
+         (contract_address, event_type, payload, ledger_sequence, ledger_close_time, tx_hash)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (tx_hash) DO UPDATE
+         SET contract_address  = EXCLUDED.contract_address,
+             event_type        = EXCLUDED.event_type,
+             payload           = EXCLUDED.payload,
+             ledger_close_time = EXCLUDED.ledger_close_time`,
+      [
+        rawEvent.contract_address,
+        rawEvent.event_type,
+        rawEvent.data,
+        rawEvent.ledger_sequence,
+        rawEvent.ledger_close_time,
+        rawEvent.tx_hash
+      ]
+    );
 
-    if (!response.events || response.events.length === 0) {
-      return;
-    }
-
-    for (const event of response.events) {
-      const contractId = typeof event.contractId === 'string' ? event.contractId : event.contractId?.toString() || '';
-
-      // Properly extract event type from ScVal Symbol topic
-      const eventType = (event.topic[0] as any)?.sym()?.toString() || 'unknown';
-
-      // Build a flat JSON record from ScVal topics + value
-      const payload = buildEventPayload(eventType, event.topic, event.value);
-      const data = JSON.stringify(payload);
-
-      const rawEvent: RawStellarEvent = {
-        contract_address: contractId,
-        event_type: eventType,
-        topics: event.topic.map((t: any) => scvToString(t)),
-        data,
-        ledger_sequence: event.ledger,
-        ledger_close_time: event.ledgerClosedAt,
-        tx_hash: event.txHash
-      };
-
-      // Persist raw event to blockchain_events table — use DO UPDATE so
-      // re-indexing during a backfill refreshes stale rows instead of skipping.
-      await pool.query(
-        `INSERT INTO blockchain_events
-           (contract_address, event_type, payload, ledger_sequence, ledger_close_time, tx_hash)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (tx_hash) DO UPDATE
-           SET contract_address  = EXCLUDED.contract_address,
-               event_type        = EXCLUDED.event_type,
-               payload           = EXCLUDED.payload,
-               ledger_close_time = EXCLUDED.ledger_close_time`,
-        [
-          rawEvent.contract_address,
-          rawEvent.event_type,
-          rawEvent.data,
-          rawEvent.ledger_sequence,
-          rawEvent.ledger_close_time,
-          rawEvent.tx_hash
-        ]
-      );
-
-      // Process the event
-      await processEvent(rawEvent);
-    }
-  } catch (err) {
-    console.error(`Error processing ledger ${ledger_sequence}:`, err);
+    // Process the event
+    await processEvent(rawEvent);
   }
 }
 
