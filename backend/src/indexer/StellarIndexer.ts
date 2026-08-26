@@ -13,6 +13,20 @@ import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
 import { cacheDeletePattern } from '../services/cache.service';
+import { getActivityFeedIfInitialized, type ActivityEvent } from '../websocket/realtime';
+
+/**
+ * Publishes to the WebSocket activity feed, if one has been initialised.
+ * Ingestion must not fail just because no server has wired up a feed yet
+ * (e.g. standalone backfill scripts, tests).
+ */
+function publishActivity(event: ActivityEvent): void {
+  try {
+    getActivityFeedIfInitialized()?.publish(event);
+  } catch (err) {
+    console.error('[Indexer] Failed to publish activity event:', err instanceof Error ? err.message : err);
+  }
+}
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -531,6 +545,16 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
   } finally {
     client.release();
   }
+
+  publishActivity({
+    type: 'trade',
+    marketId: String(p.market_id ?? ''),
+    outcomeId: String(p.side ?? ''),
+    side: String(p.side ?? ''),
+    sharesAmount: Number(p.amount ?? 0),
+    priceBps: 0,
+    timestamp: (p.placed_at as string) ?? new Date().toISOString(),
+  });
 }
 
 export async function handleMarketLocked(event: RawStellarEvent): Promise<void> {
@@ -543,12 +567,12 @@ export async function handleMarketLocked(event: RawStellarEvent): Promise<void> 
 
 export async function handleMarketResolved(event: RawStellarEvent): Promise<void> {
   const p = parsePayload(event.data);
+  const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const outcome = typeof p.outcome === 'string' ? p.outcome : null;
-    const marketId = typeof p.market_id === 'string' ? p.market_id : null;
     const matchId = typeof p.match_id === 'string' ? p.match_id : null;
     const oracleAddress = typeof p.oracle_address === 'string' ? p.oracle_address : null;
     const signature = typeof p.signature === 'string' ? p.signature : null;
@@ -606,6 +630,12 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   // Invalidate all Redis cache keys for this market
   await cacheDeletePattern(`market:${marketId}*`);
   await cacheDeletePattern(`markets:*`);
+
+  publishActivity({
+    type: 'resolved',
+    marketId: marketId ?? '',
+    winningOutcomeId: typeof p.outcome === 'string' ? p.outcome : '',
+  });
 }
 
 export async function handleMarketCancelled(event: RawStellarEvent): Promise<void> {
@@ -642,6 +672,8 @@ export async function handleMarketCancelled(event: RawStellarEvent): Promise<voi
   } finally {
     client.release();
   }
+
+  publishActivity({ type: 'cancelled', marketId: String(p.market_id ?? '') });
 }
 
 export async function handleWinningsClaimed(event: RawStellarEvent): Promise<void> {

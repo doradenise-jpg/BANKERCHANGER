@@ -16,7 +16,8 @@ const AUTH_TIMEOUT_MS = 5_000; // 5 seconds to send auth message
 export type ActivityEvent =
   | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
-  | { type: 'resolved'; marketId: string; winningOutcomeId: string };
+  | { type: 'resolved'; marketId: string; winningOutcomeId: string }
+  | { type: 'cancelled'; marketId: string };
 
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
@@ -175,5 +176,15 @@ export function initActivityFeed(server: Server): ActivityFeed {
 
 export function getActivityFeed(): ActivityFeed {
   if (!_feed) throw new Error('ActivityFeed not initialised');
+  return _feed;
+}
+
+/**
+ * Same as getActivityFeed, but returns null instead of throwing when the
+ * feed hasn't been initialised (e.g. standalone scripts, tests) — for
+ * callers like the indexer that should degrade gracefully rather than fail
+ * event ingestion just because nothing is subscribed yet.
+ */
+export function getActivityFeedIfInitialized(): ActivityFeed | null {
   return _feed;
 }
