@@ -51,7 +51,7 @@ const server = new rpc.Server(RPC_URL);
 const POLL_MIN_BACKOFF_MS = 1_000;
 const POLL_MAX_BACKOFF_MS = 60_000;
 
-function calculatePollBackoff(consecutiveFailures: number): number {
+export function calculatePollBackoff(consecutiveFailures: number): number {
   const backoff = POLL_MIN_BACKOFF_MS * Math.pow(2, consecutiveFailures - 1);
   const capped = Math.min(backoff, POLL_MAX_BACKOFF_MS);
   // Jitter to avoid every replica retrying in lockstep: range [0.5x, 1x] of capped.
@@ -67,7 +67,7 @@ const REORG_REWIND_LEDGERS = 5;
 // requesting one outside that window fails permanently, never on retry.
 const LEDGER_UNAVAILABLE_PATTERN = /ledger.*(not found|out.?of.?range|outside the range|before the oldest|retention window)/i;
 
-function isLedgerUnavailableError(err: unknown): boolean {
+export function isLedgerUnavailableError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return LEDGER_UNAVAILABLE_PATTERN.test(message);
 }
