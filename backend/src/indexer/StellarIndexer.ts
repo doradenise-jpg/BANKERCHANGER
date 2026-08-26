@@ -31,6 +31,19 @@ const TREASURY_CONTRACT = process.env.TREASURY_CONTRACT_ADDRESS || '';
 
 const server = new rpc.Server(RPC_URL);
 
+// ── Exponential backoff for the ledger-polling fallback loop ────────────────
+// RPC errors (rate limits, transient 5xxs, connection drops) are common
+// against public Soroban RPC endpoints and must not crash the indexer.
+const POLL_MIN_BACKOFF_MS = 1_000;
+const POLL_MAX_BACKOFF_MS = 60_000;
+
+function calculatePollBackoff(consecutiveFailures: number): number {
+  const backoff = POLL_MIN_BACKOFF_MS * Math.pow(2, consecutiveFailures - 1);
+  const capped = Math.min(backoff, POLL_MAX_BACKOFF_MS);
+  // Jitter to avoid every replica retrying in lockstep: range [0.5x, 1x] of capped.
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
+
 export async function startIndexer(): Promise<void> {
   const pollInterval = Number(process.env.POLL_INTERVAL_MS ?? 5000);
   let lastProcessed = await getLastProcessedLedger();
@@ -96,6 +109,7 @@ export async function startIndexer(): Promise<void> {
   });
 
   // Keep polling for new ledgers as fallback
+  let consecutivePollFailures = 0;
   while (true) {
     try {
       const latestLedgerResponse = await server.getLatestLedger();
@@ -110,9 +124,19 @@ export async function startIndexer(): Promise<void> {
       } else {
         await new Promise(resolve => setTimeout(resolve, pollInterval));
       }
+
+      consecutivePollFailures = 0;
     } catch (err) {
-      console.error('[Indexer] Unrecoverable error:', err);
-      process.exit(1);
+      // Transient RPC errors (rate limits, timeouts, dropped connections) must
+      // not kill the process — back off and retry instead of exiting, since a
+      // crash loop against a public RPC endpoint only makes rate limiting worse.
+      consecutivePollFailures++;
+      const backoffMs = calculatePollBackoff(consecutivePollFailures);
+      console.error(
+        `[Indexer] Poll error (consecutive failures: ${consecutivePollFailures}), retrying in ${backoffMs}ms:`,
+        err instanceof Error ? err.message : err,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
   }
 }
