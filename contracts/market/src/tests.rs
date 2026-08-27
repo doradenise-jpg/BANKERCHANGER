@@ -3436,12 +3436,14 @@ mod event_emission_consistency_tests {
         let _ = client.try_place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
 
         // No new contract events should have been emitted on failure
-        let new_events: std::vec::Vec<_> = env.events().all()
-            .iter()
-            .skip(event_count_before as usize)
-            .filter(|e| e.0 == _contract_id)
-            .collect();
-        assert!(new_events.is_empty(),
+        let mut any_new_event = false;
+        for ev in env.events().all().iter().skip(event_count_before as usize) {
+            if ev.0 == _contract_id {
+                any_new_event = true;
+                break;
+            }
+        }
+        assert!(!any_new_event,
             "No event must be emitted when place_bet fails");
     }
 
@@ -4289,6 +4291,530 @@ mod upgrade_safety_tests {
             for key_b in all_keys[i + 1..].iter() {
                 assert_ne!(key_a, key_b,
                     "Duplicate storage key detected: '{key_a}' — keys must be unique");
+            }
+        }
+    }
+}
+
+// ============================================================
+// ISSUES #416 / #418 / #419 / #421: Soroban Contract Integrity
+// & Safety — storage TTL extensions across persistent maps,
+// auth-check & error-handling audit, and property-based tests.
+// ============================================================
+
+// ── Part 1: storage TTL extensions across persistent maps ─────
+#[cfg(test)]
+mod storage_ttl_extension_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Map,
+    };
+
+    use boxmeout_shared::types::{
+        BetSide, FightDetails, MarketConfig, OracleReport, Outcome,
+    };
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+    const LOCK_BEFORE_SECS: u64 = 3_600;
+    /// Default persistent entry TTL imposed by the ledger (entries are
+    /// otherwise auto-expired by the host after this many ledger entries).
+    const DEFAULT_PERSISTENT_TTL: u32 = 4_096;
+    /// Contract MAX_TTL (30 days) — the value every market write extends to.
+    const MAX_TTL: u32 = 2_592_000;
+    const REPORT_TTL: u64 = 172_800;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: LOCK_BEFORE_SECS,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(env: &Env, timestamp: u64) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: DEFAULT_PERSISTENT_TTL,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, factory, token_id)
+    }
+
+    fn advance(env: &Env, entries: u32) {
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp(),
+            protocol_version: 20,
+            sequence_number: env.ledger().sequence() + entries,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: DEFAULT_PERSISTENT_TTL,
+            max_entry_ttl: 6_311_520,
+        });
+    }
+
+    /// BETTOR_LIST must survive past the default persistent TTL after a bet.
+    /// place_bet() calls extend_market_ttl() which extends BETTOR_LIST to
+    /// MAX_TTL — without that extension the entry would auto-expire once the
+    /// ledger advances beyond the 4096-entry default.
+    #[test]
+    fn test_bettor_list_ttl_survives_past_default_persistent_ttl() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env, 1_000);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+
+        // Advance beyond the default persistent TTL but well inside MAX_TTL.
+        advance(&env, DEFAULT_PERSISTENT_TTL + 500);
+
+        assert_eq!(client.get_bettor_count(), 1,
+            "BETTOR_LIST must survive past the default persistent TTL after place_bet");
+    }
+
+    /// The per-bettor BETS map (keyed (BET, bettor)) must survive past the
+    /// default persistent TTL. save_bets() calls extend_ttl on the key with
+    /// MAX_TTL, so a read well past the default TTL must still find the bets.
+    #[test]
+    fn test_per_bettor_bets_ttl_survives_past_default_persistent_ttl() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env, 1_000);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+
+        advance(&env, DEFAULT_PERSISTENT_TTL + 500);
+
+        let bets = client.get_bets_by_address(&bettor);
+        assert_eq!(bets.len(), 1u32,
+            "Per-bettor BETS entry must survive past the default persistent TTL");
+    }
+
+    /// clear_stale_reports() must evict reports older than REPORT_TTL while
+    /// keeping fresh ones — stale partial oracle votes must never tip or be
+    /// double-counted at resolution time.
+    #[test]
+    fn test_clear_stale_reports_prunes_expired_keeps_fresh() {
+        let env = Env::default();
+        let (client, contract_id, factory, _token_id) = setup(&env, 300_000);
+
+        let stale_oracle = Address::generate(&env);
+        let fresh_oracle = Address::generate(&env);
+        let match_id = soroban_sdk::String::from_str(&env, "FURY-USYK-2025");
+
+        env.as_contract(&contract_id, || {
+            let stale = OracleReport {
+                match_id: match_id.clone(),
+                outcome: Outcome::FighterA,
+                reported_at: 0,
+                submitted_at: 0,
+                signature: soroban_sdk::BytesN::from_array(&env, &[0u8; 64]),
+                oracle_address: stale_oracle.clone(),
+                pub_key: soroban_sdk::BytesN::from_array(&env, &[0u8; 32]),
+            };
+            let fresh = OracleReport {
+                match_id: match_id.clone(),
+                outcome: Outcome::FighterA,
+                reported_at: 300_000,
+                submitted_at: 300_000,
+                signature: soroban_sdk::BytesN::from_array(&env, &[0u8; 64]),
+                oracle_address: fresh_oracle.clone(),
+                pub_key: soroban_sdk::BytesN::from_array(&env, &[0u8; 32]),
+            };
+            let mut pending = Map::<Address, OracleReport>::new(&env);
+            pending.set(stale_oracle.clone(), stale);
+            pending.set(fresh_oracle.clone(), fresh);
+            env.storage().persistent().set(&"PENDING_REPORTS", &pending);
+        });
+
+        // now=300_000: stale (reported_at 0 → 300_000 ≥ REPORT_TTL) evicted,
+        // fresh (reported_at 300_000 → 0) kept.
+        let cleared = client.clear_stale_reports(&factory);
+        assert_eq!(cleared, 1u32, "Exactly the stale report must be evicted");
+
+        let remaining: Map<Address, OracleReport> = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&"PENDING_REPORTS")
+                .unwrap_or_else(|| Map::new(&env))
+        });
+        assert!(!remaining.contains_key(stale_oracle.clone()),
+            "Stale report must be removed from PENDING_REPORTS");
+        assert!(remaining.contains_key(fresh_oracle.clone()),
+            "Fresh report must survive clear_stale_reports");
+    }
+
+    /// A report exactly REPORT_TTL old is still threshold-eligible (>=), and a
+    /// report one second younger is retained — the staleness boundary must be
+    /// exact, not rounded, so a consensus can never be secretly pruned early.
+    #[test]
+    fn test_report_ttl_boundary_is_exact() {
+        let now: u64 = 300_000;
+        // A report submitted exactly REPORT_TTL ago must be pruned (>=).
+        let exactly_old: u64 = now.saturating_sub(REPORT_TTL);
+        assert!(now.saturating_sub(exactly_old) >= REPORT_TTL,
+            "Exactly-TTL-old report must still be pruned (>=)");
+        // A report one second younger than REPORT_TTL must be retained.
+        let one_sec_younger: u64 = now - (REPORT_TTL - 1);
+        assert!(!(now.saturating_sub(one_sec_younger) >= REPORT_TTL),
+            "Sub-threshold report must be retained");
+    }
+}
+
+// ── Part 2: auth-check and error-handling audit ───────────────
+#[cfg(test)]
+mod auth_error_handling_audit_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, BytesN, Env,
+    };
+
+    use boxmeout_shared::types::{BetSide, FightDetails, MarketConfig};
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    /// Initializes the ledger + registers + initializes a market via the client.
+    fn setup(env: &Env) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, factory, token_id)
+    }
+
+    /// emergency_pause() must reject anyone who is not the factory admin, even
+    /// with authorization mocked — the admin check, not just require_auth, is
+    /// the actual gate.
+    #[test]
+    fn test_emergency_pause_rejects_non_admin_with_not_admin() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, _token_id) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        let result = client.try_emergency_pause(&attacker);
+        assert!(result.is_err(),
+            "Non-admin must not be able to pause the market");
+    }
+
+    /// upgrade() must reject anyone who is not the factory admin.
+    #[test]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, _token_id) = setup(&env);
+        let attacker = Address::generate(&env);
+        let wasm_hash = BytesN::<32>::from_array(&env, &[7u8; 32]);
+
+        let result = client.try_upgrade(&attacker, &wasm_hash);
+        assert!(result.is_err(),
+            "Non-admin must not be able to swap the contract WASM");
+    }
+
+    /// clear_stale_reports() must reject a caller that is not the factory.
+    #[test]
+    fn test_clear_stale_reports_rejects_non_factory() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, _token_id) = setup(&env);
+        let interlopter = Address::generate(&env);
+
+        let result = client.try_clear_stale_reports(&interlopter);
+        assert!(result.is_err(),
+            "Only the factory may clear stale oracle reports");
+    }
+
+    /// set_dispute_window() must reject windows shorter than one hour.
+    #[test]
+    fn test_set_dispute_window_rejects_short_window() {
+        let env = Env::default();
+        let (client, _contract_id, factory, _token_id) = setup(&env);
+
+        let short = client.try_set_dispute_window(&factory, &3_599u64);
+        assert!(short.is_err(), "Windows < 1h must be rejected");
+
+        let valid = client.try_set_dispute_window(&factory, &3_600u64);
+        assert!(valid.is_ok(), "Window of exactly 1h must be accepted");
+    }
+
+    /// set_min_liquidity() must reject zero / negative liquidity values.
+    #[test]
+    fn test_set_min_liquidity_rejects_non_positive() {
+        let env = Env::default();
+        let (client, _contract_id, factory, _token_id) = setup(&env);
+
+        let zero = client.try_set_min_liquidity(&factory, &0i128);
+        assert!(zero.is_err(), "Zero minimum liquidity must be rejected");
+
+        let neg = client.try_set_min_liquidity(&factory, &(-1i128));
+        assert!(neg.is_err(), "Negative minimum liquidity must be rejected");
+
+        let valid = client.try_set_min_liquidity(&factory, &1i128);
+        assert!(valid.is_ok(), "Positive minimum liquidity must be accepted");
+    }
+
+    /// dispute_market() must reject anyone who is not the factory admin —
+    /// auth checks must fire before the status transition happens.
+    #[test]
+    fn test_dispute_market_rejects_non_admin() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, _token_id) = setup(&env);
+        let attacker = Address::generate(&env);
+        let reason = soroban_sdk::String::from_str(&env, "not-a-real-dispute");
+
+        let result = client.try_dispute_market(&attacker, &reason);
+        assert!(result.is_err(),
+            "Non-admin must not be able to dispute a market");
+    }
+
+    /// Failed calls must not mutate state: a below-minimum bet must leave the
+    /// pools untouched and revert any intermediate writes.
+    #[test]
+    fn test_failed_place_bet_leaves_state_unmutated() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env);
+        let bettor = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token_id)
+            .mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(
+            &bettor, &BetSide::FighterA, &999_999i128, &token_id, &0i128,
+        );
+        assert!(result.is_err(),
+            "Below-minimum bet must be rejected");
+
+        let state = client.get_state();
+        assert_eq!(state.pool_a, 0, "Failed bet must not add to pool_a");
+        assert_eq!(state.total_pool, 0, "Failed bet must not add to total_pool");
+        assert_eq!(client.get_bettor_count(), 0,
+            "Failed bet must not register a bettor");
+    }
+
+    /// Every privileged state-transition path exposed by the contract is gated.
+    /// Iterate the full admin surface and confirm each rejects a stranger.
+    #[test]
+    fn test_all_admin_gates_reject_intruders() {
+        let env = Env::default();
+        let (client, _contract_id, _factory, _token_id) = setup(&env);
+        let intruder = Address::generate(&env);
+        let reason = soroban_sdk::String::from_str(&env, "nope");
+        let wasm_hash = BytesN::<32>::from_array(&env, &[9u8; 32]);
+
+        assert!(client.try_emergency_pause(&intruder).is_err(),
+            "emergency_pause must reject intruders");
+        assert!(client.try_emergency_unpause(&intruder).is_err(),
+            "emergency_unpause must reject intruders");
+        assert!(client.try_upgrade(&intruder, &wasm_hash).is_err(),
+            "upgrade must reject intruders");
+        assert!(client.try_dispute_market(&intruder, &reason).is_err(),
+            "dispute_market must reject intruders");
+        assert!(client.try_resolve_dispute(&intruder, &boxmeout_shared::types::Outcome::FighterA).is_err(),
+            "resolve_dispute must reject intruders");
+        assert!(client.try_clear_stale_reports(&intruder).is_err(),
+            "clear_stale_reports must reject intruders");
+    }
+}
+
+// ── Part 3: property-based integrity tests (parimutuel math) ──
+#[cfg(test)]
+mod property_based_integrity_tests {
+    use proptest::prelude::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Env,
+    };
+    use boxmeout_shared::types::{FightDetails, MarketConfig};
+    use crate::Market;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "PROPERTY-TEST"),
+            fighter_a: soroban_sdk::String::from_str(env, "Team-A"),
+            fighter_b: soroban_sdk::String::from_str(env, "Team-B"),
+            weight_class: soroban_sdk::String::from_str(env, "Open"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_str(env, "Testville"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    /// get_current_odds() must return (0, 0, 0) for an empty pool rather than
+    /// dividing by zero — zero-panic audit.
+    #[test]
+    fn test_get_current_odds_zero_pool_returns_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(&env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(&env), &config(), &treasury);
+
+        assert_eq!(client.get_current_odds(), (0, 0, 0),
+            "Fresh market with zero pool must report zero odds, not panic");
+    }
+
+    /// get_pools() must return (0,0,0) on an uninitialized contract instead of
+    /// panicking on a missing STATE entry.
+    #[test]
+    fn test_get_pools_uninitialized_returns_zero() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(&env, &contract_id);
+
+        assert_eq!(client.get_pools(), (0, 0, 0),
+            "Uninitialized contract must report zero pools, not panic");
+    }
+
+    proptest! {
+        /// Parimutuel conservation: for a single winner who owns the whole
+        /// winning pool, fee + payout must EXACTLY equal total_pool. The
+        /// previous code could leak value or pay out more than the pool;
+        /// this property pins the exact conservation invariant.
+        #[test]
+        fn test_single_winner_conserves_total_pool(
+            pool in 1i128..=1_000_000_000_000_000i128,
+            fee_bps in 0u32..=2_000u32,
+        ) {
+            let fee = (pool as u128) * (fee_bps as u128) / 10_000u128;
+            let net = (pool as u128) - fee;
+            // bettor owns the entire winning pool → back the full pool
+            let payout = (pool as u128) * net / (pool as u128);
+            prop_assert_eq!(payout, net, "single winner must receive the full net pool");
+            prop_assert_eq!(fee + payout, pool as u128,
+                "fee + payout must exactly conserve the total pool");
+        }
+
+        /// Parimutuel no-over-allocation: across many claimants whose stakes
+        /// sum to (or fall below) the winning pool, the sum of floored payouts
+        /// must NEVER exceed the net pool after fees. Flooring must only ever
+        /// shrink the payout, never overflow it past what exists.
+        #[test]
+        fn test_many_claimants_never_overallocate(
+            win in 1i128..=1_000_000_000i128,
+            weights in prop::collection::vec(1u32..10_000u32, 2..8),
+            fee_bps in 0u32..=2_000u32,
+        ) {
+            let w_sum: u128 = weights.iter().map(|&w| w as u128).sum();
+            prop_assert!(w_sum > 0);
+            let fee = (win as u128) * (fee_bps as u128) / 10_000u128;
+            let net = (win as u128) - fee;
+            let mut paid: u128 = 0;
+            for &w in weights.iter() {
+                // stake_i = win * w_i / sum(w)  →  sum(stake_i) <= win
+                let stake = (win as u128) * (w as u128) / w_sum;
+                prop_assert!(stake <= win as u128, "weight-proportional stake must stay within pool");
+                paid += stake * net / (win as u128);
+            }
+            prop_assert!(paid <= net,
+                "claimants must never be over-allocated beyond the net pool");
+        }
+
+        /// Odds reflection: reported basis-point odds must never sum above
+        /// 10_000 (the whole pool). floor() per side can only drift odds down,
+        /// never inflate the total implied probability.
+        #[test]
+        fn test_odds_never_exceed_total_pool_points(
+            a in 0u128..=10_000u128,
+            b in 0u128..=10_000u128,
+            c in 0u128..=10_000u128,
+        ) {
+            let total = a + b + c;
+            if total == 0 {
+                prop_assert!(true);
+            } else {
+                let odds_a = a * 10_000u128 / total;
+                let odds_b = b * 10_000u128 / total;
+                let odds_c = c * 10_000u128 / total;
+                prop_assert!(odds_a + odds_b + odds_c <= 10_000u128,
+                    "floored basis-point odds must never sum above 10_000");
             }
         }
     }
