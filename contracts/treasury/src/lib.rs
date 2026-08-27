@@ -915,4 +915,216 @@ mod treasury_lifecycle_tests {
         });
         assert!(daily_len <= 2, "DAILY_WITHDRAWN map length should be ≤ 2, got {daily_len}");
     }
+
+    // ============================================================
+    // TASK 15: Soroban Contract Integrity & Safety Tests (Issue #428)
+    // ============================================================
+
+    // ── 1. Storage TTL Extensions & Map Persistence ─────────────
+    #[test]
+    fn test_task15_storage_ttl_and_persistent_maps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        let limit = 50_000_000i128;
+        let token = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(&env);
+
+        client.initialize(&admin, &token, &factory, &limit);
+        client.approve_market(&admin, &market);
+
+        StellarAssetClient::new(&env, &token).mint(&market, &100_000_000i128);
+        client.deposit_fees(&market, &token, &100_000_000i128);
+
+        // Advance ledger past normal minimum persistent TTL
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            timestamp: 86400 * 10,
+            protocol_version: 20,
+            sequence_number: 10_000,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        // Verify storage maps persist correctly
+        assert_eq!(client.get_accumulated_fees(&token), 100_000_000i128);
+        assert!(client.is_market_approved(&market));
+        assert_eq!(client.get_withdrawal_limit(), limit);
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // ── 2. Comprehensive Auth & Error Handling Audit ────────────
+    #[test]
+    fn test_task15_unauthorized_admin_operations_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        let dest = Address::generate(&env);
+        let limit = 10_000_000i128;
+        let token = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(&env);
+
+        client.initialize(&admin, &token, &factory, &limit);
+
+        // Non-admin cannot approve market
+        let err_approve = client.try_approve_market(&non_admin, &market);
+        assert_eq!(err_approve.unwrap_err(), Ok(ContractError::Unauthorized));
+
+        // Non-admin cannot revoke market
+        client.approve_market(&admin, &market);
+        let err_revoke = client.try_revoke_market(&non_admin, &market);
+        assert_eq!(err_revoke.unwrap_err(), Ok(ContractError::Unauthorized));
+
+        // Non-admin cannot set withdrawal limit
+        let err_limit = client.try_set_withdrawal_limit(&non_admin, &20_000_000i128);
+        assert_eq!(err_limit.unwrap_err(), Ok(ContractError::Unauthorized));
+
+        // Non-admin cannot withdraw fees
+        StellarAssetClient::new(&env, &token).mint(&market, &50_000_000i128);
+        client.deposit_fees(&market, &token, &50_000_000i128);
+        let err_withdraw = client.try_withdraw_fees(&non_admin, &token, &10_000_000i128, &dest);
+        assert_eq!(err_withdraw.unwrap_err(), Ok(ContractError::Unauthorized));
+
+        // Non-admin cannot pause/unpause withdrawals
+        let err_pause = client.try_pause_withdrawals(&non_admin);
+        assert_eq!(err_pause.unwrap_err(), Ok(ContractError::Unauthorized));
+        let err_unpause = client.try_unpause_withdrawals(&non_admin);
+        assert_eq!(err_unpause.unwrap_err(), Ok(ContractError::Unauthorized));
+    }
+
+    #[test]
+    fn test_task15_deposit_and_withdrawal_edge_cases() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let unapproved_market = Address::generate(&env);
+        let dest = Address::generate(&env);
+        let limit = 20_000_000i128;
+        let token = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(&env);
+
+        client.initialize(&admin, &token, &factory, &limit);
+
+        // Unapproved market deposit rejected
+        let err_unapproved = client.try_deposit_fees(&unapproved_market, &token, &10_000_000i128);
+        assert_eq!(err_unapproved.unwrap_err(), Ok(ContractError::Unauthorized));
+
+        // Approve market and test zero/negative deposit
+        client.approve_market(&admin, &unapproved_market);
+        let err_zero_deposit = client.try_deposit_fees(&unapproved_market, &token, &0i128);
+        assert_eq!(err_zero_deposit.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+        let err_neg_deposit = client.try_deposit_fees(&unapproved_market, &token, &-100i128);
+        assert_eq!(err_neg_deposit.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+        // Deposit valid funds
+        StellarAssetClient::new(&env, &token).mint(&unapproved_market, &50_000_000i128);
+        client.deposit_fees(&unapproved_market, &token, &50_000_000i128);
+
+        // Zero / negative withdrawal rejected
+        let err_zero_w = client.try_withdraw_fees(&admin, &token, &0i128, &dest);
+        assert_eq!(err_zero_w.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+        let err_neg_w = client.try_withdraw_fees(&admin, &token, &-500i128, &dest);
+        assert_eq!(err_neg_w.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+        // Exceeding daily limit rejected
+        let err_exceed = client.try_withdraw_fees(&admin, &token, &25_000_000i128, &dest);
+        assert_eq!(err_exceed.unwrap_err(), Ok(ContractError::ExceedsLimit));
+
+        // Exceeding accumulated balance rejected
+        client.set_withdrawal_limit(&admin, &100_000_000i128);
+        let err_over_balance = client.try_withdraw_fees(&admin, &token, &60_000_000i128, &dest);
+        assert_eq!(err_over_balance.unwrap_err(), Ok(ContractError::InsufficientBalance));
+    }
+
+    // ── 3. Property-Based & Fee Conservation Invariants ─────────
+    #[test]
+    fn test_task15_fee_conservation_property() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let market1 = Address::generate(&env);
+        let market2 = Address::generate(&env);
+        let dest = Address::generate(&env);
+        let limit = 500_000_000i128;
+        let token = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(&env);
+
+        client.initialize(&admin, &token, &factory, &limit);
+        client.approve_market(&admin, &market1);
+        client.approve_market(&admin, &market2);
+
+        let deposit_amounts = [15_000_000i128, 25_000_000i128, 40_000_000i128, 70_000_000i128];
+        let mut total_deposited: i128 = 0;
+
+        for (i, &amt) in deposit_amounts.iter().enumerate() {
+            let m = if i % 2 == 0 { &market1 } else { &market2 };
+            StellarAssetClient::new(&env, &token).mint(m, &amt);
+            client.deposit_fees(m, &token, &amt);
+            total_deposited += amt;
+            assert_eq!(client.get_accumulated_fees(&token), total_deposited);
+        }
+
+        // Sequential withdrawals maintain invariant
+        let withdraw_amounts = [20_000_000i128, 30_000_000i128, 50_000_000i128];
+        let mut total_withdrawn: i128 = 0;
+
+        for &amt in withdraw_amounts.iter() {
+            client.withdraw_fees(&admin, &token, &amt, &dest);
+            total_withdrawn += amt;
+            let remaining = client.get_accumulated_fees(&token);
+            assert_eq!(remaining + total_withdrawn, total_deposited, "Fee conservation invariant violated");
+        }
+
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&dest),
+            total_withdrawn,
+            "Recipient balance must match total withdrawn"
+        );
+    }
+
+    #[test]
+    fn test_task15_multi_token_isolation_property() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        let dest = Address::generate(&env);
+        let limit = 100_000_000i128;
+        let token_a = env.register_stellar_asset_contract(admin.clone());
+        let token_b = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(&env);
+
+        client.initialize(&admin, &token_a, &factory, &limit);
+        client.approve_market(&admin, &market);
+
+        StellarAssetClient::new(&env, &token_a).mint(&market, &50_000_000i128);
+        StellarAssetClient::new(&env, &token_b).mint(&market, &80_000_000i128);
+
+        client.deposit_fees(&market, &token_a, &50_000_000i128);
+        client.deposit_fees(&market, &token_b, &80_000_000i128);
+
+        // Withdrawing Token A must not change Token B accumulated fees
+        client.withdraw_fees(&admin, &token_a, &20_000_000i128, &dest);
+
+        assert_eq!(client.get_accumulated_fees(&token_a), 30_000_000i128);
+        assert_eq!(client.get_accumulated_fees(&token_b), 80_000_000i128);
+    }
 }
+
