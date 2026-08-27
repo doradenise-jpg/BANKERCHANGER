@@ -193,8 +193,32 @@ export class StellarEventProcessor implements EventProcessor {
       client.release();
     }
 
+    // Gamification: credit prediction streaks to winning bettors and broadcast
+    // real-time leaderboard rank updates.
+    await this.creditEngagementStreaks(p.market_id, p.outcome);
+
     await cacheDeletePattern(`market:${p.market_id}*`);
     await cacheDeletePattern(`markets:*`);
+  }
+
+  /**
+   * After a market resolves, update the engagement streak for every bettor who
+   * backed the winning side and emit leaderboard rank updates over WebSocket.
+   */
+  private async creditEngagementStreaks(marketId: string, outcome: string | undefined): Promise<void> {
+    if (!outcome) return;
+    try {
+      const { rows: winners } = await pool.query(
+        `SELECT bettor_address FROM bets WHERE market_id = $1 AND side = $2`,
+        [marketId, outcome]
+      );
+      const { engagementService } = await import('../services/engagement.service');
+      for (const winner of winners) {
+        await engagementService.recordPredictionResult(winner.bettor_address, true);
+      }
+    } catch (err) {
+      console.error(`[Indexer] Error crediting engagement streaks for market ${marketId}:`, err);
+    }
   }
 
   private async handleMarketCancelled(event: RawStellarEvent): Promise<void> {

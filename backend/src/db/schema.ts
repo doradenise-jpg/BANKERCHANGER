@@ -289,3 +289,100 @@ export type Share = typeof shares.$inferSelect;
 export type NewShare = typeof shares.$inferInsert;
 export type Proposal = typeof proposals.$inferSelect;
 export type NewProposal = typeof proposals.$inferInsert;
+
+export const user_streaks = pgTable(
+  'user_streaks',
+  {
+    id: serial('id').primaryKey(),
+    user_id: text('user_id').notNull().references(() => users.id),
+    current_streak: integer('current_streak').default(0),
+    longest_streak: integer('longest_streak').default(0),
+    total_wins: integer('total_wins').default(0),
+    total_losses: integer('total_losses').default(0),
+    last_result: text('last_result'), // 'win' | 'loss'
+    last_resolved_at: timestamp('last_resolved_at', { withTimezone: true }),
+    updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    user_id_idx: uniqueIndex('user_streaks_user_id_idx').on(table.user_id),
+  }),
+);
+
+export const achievements = pgTable(
+  'achievements',
+  {
+    id: serial('id').primaryKey(),
+    code: text('code').notNull().unique(),
+    name: text('name').notNull(),
+    description: text('description').notNull(),
+    criteria: jsonb('criteria').default('{}'),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    code_idx: uniqueIndex('achievements_code_idx').on(table.code),
+  }),
+);
+
+export const user_achievements = pgTable(
+  'user_achievements',
+  {
+    id: serial('id').primaryKey(),
+    user_id: text('user_id').notNull().references(() => users.id),
+    achievement_code: text('achievement_code').notNull().references(() => achievements.code),
+    awarded_at: timestamp('awarded_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    user_id_idx: index('user_achievements_user_id_idx').on(table.user_id),
+    user_achievement_idx: uniqueIndex('user_achievements_user_achievement_idx').on(
+      table.user_id,
+      table.achievement_code,
+    ),
+  }),
+);
+
+export const referrals = pgTable(
+  'referrals',
+  {
+    id: serial('id').primaryKey(),
+    referrer_id: text('referrer_id').notNull().references(() => users.id),
+    referred_id: text('referred_id').notNull().references(() => users.id),
+    status: text('status').default('pending'), // 'pending' | 'active'
+    bonus_rate_bps: integer('bonus_rate_bps').default(500),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    referrer_id_idx: index('referrals_referrer_id_idx').on(table.referrer_id),
+    referred_id_idx: uniqueIndex('referrals_referred_id_idx').on(table.referred_id),
+  }),
+);
+
+export const referral_payouts = pgTable(
+  'referral_payouts',
+  {
+    id: serial('id').primaryKey(),
+    referrer_id: text('referrer_id').notNull().references(() => users.id),
+    referred_id: text('referred_id').notNull().references(() => users.id),
+    tier: integer('tier').notNull().default(1),
+    source_amount: numeric('source_amount').notNull(),
+    payout_amount: numeric('payout_amount').notNull(),
+    status: text('status').default('pending'), // 'pending' | 'paid'
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+    paid_at: timestamp('paid_at', { withTimezone: true }),
+  },
+  (table) => ({
+    referrer_id_idx: index('referral_payouts_referrer_id_idx').on(table.referrer_id),
+    referred_id_idx: index('referral_payouts_referred_id_idx').on(table.referred_id),
+    status_idx: index('referral_payouts_status_idx').on(table.status),
+  }),
+);
+
+export type UserStreak = typeof user_streaks.$inferSelect;
+export type NewUserStreak = typeof user_streaks.$inferInsert;
+export type Achievement = typeof achievements.$inferSelect;
+export type NewAchievement = typeof achievements.$inferInsert;
+export type UserAchievement = typeof user_achievements.$inferSelect;
+export type NewUserAchievement = typeof user_achievements.$inferInsert;
+export type Referral = typeof referrals.$inferSelect;
+export type NewReferral = typeof referrals.$inferInsert;
+export type ReferralPayout = typeof referral_payouts.$inferSelect;
+export type NewReferralPayout = typeof referral_payouts.$inferInsert;
