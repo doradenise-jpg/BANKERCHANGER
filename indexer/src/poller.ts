@@ -2,6 +2,7 @@ import { rpc, scValToNative } from '@stellar/stellar-sdk';
 import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice } from './db';
 import { updateLastLedger } from './health';
 import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
+import { calculateBackoff, loadBackoffConfigFromEnv } from './backoff';
 import { broadcast } from './ws';
 import dotenv from 'dotenv';
 
@@ -47,19 +48,8 @@ export function getPollerHealth(): PollerHealth {
   return { ...pollerHealth };
 }
 
-// ── Exponential backoff strategy ────────────────────────────────────────────
-const MIN_BACKOFF_MS = 1000;      // 1 second
-const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
-const BACKOFF_MULTIPLIER = 2;
-
-function calculateBackoff(failureCount: number): number {
-  const backoff = MIN_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, failureCount - 1);
-  const cappedBackoff = Math.min(backoff, MAX_BACKOFF_MS);
-  // Add jitter to prevent thundering herd: backoff * (0.5 + Math.random() * 0.5)
-  // This produces a range of [0.5 * backoff, backoff]
-  const jitter = cappedBackoff * (0.5 + Math.random() * 0.5);
-  return Math.round(jitter);
-}
+// ── Exponential backoff strategy (tunable via POLLER_*_BACKOFF_MS env vars) ─
+const BACKOFF_CONFIG = loadBackoffConfigFromEnv();
 
 // ── Structured logging ──────────────────────────────────────────────────────
 interface LogEntry {
@@ -194,6 +184,11 @@ export async function pollEvents() {
                   lastProcessedLedger: anomaly.fromLedger,
                   incomingEventLedger: anomaly.toLedger,
                 });
+                broadcast({
+                  type: 'poller.reorg_detected',
+                  timestamp: new Date().toISOString(),
+                  data: { lastProcessedLedger: anomaly.fromLedger, incomingEventLedger: anomaly.toLedger },
+                });
                 // Don't trust or process events from a superseded ledger view.
                 // Rewind and let the next poll iteration re-fetch canonical events.
                 pendingResyncLedger = computeResyncStartLedger(anomaly.fromLedger);
@@ -278,13 +273,19 @@ export async function pollEvents() {
       pollerHealth.lastError = err instanceof Error ? err.message : String(err);
       pollerHealth.lastErrorAt = new Date().toISOString();
 
-      const backoffMs = calculateBackoff(pollerHealth.consecutiveFailures);
+      const backoffMs = calculateBackoff(pollerHealth.consecutiveFailures, BACKOFF_CONFIG);
 
       log('error', 'Poll failed, scheduling retry', {
         error: pollerHealth.lastError,
         consecutiveFailures: pollerHealth.consecutiveFailures,
         backoffMs,
         cursor,
+      });
+
+      broadcast({
+        type: 'poller.retry_scheduled',
+        timestamp: new Date().toISOString(),
+        data: { consecutiveFailures: pollerHealth.consecutiveFailures, backoffMs },
       });
 
       // Wait with exponential backoff before retrying
