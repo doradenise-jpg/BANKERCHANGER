@@ -18,6 +18,34 @@ pub enum MarketStatus {
     Disputed,   // Outcome under admin review; claims frozen
 }
 
+/// Market tier classification for the AMM & Odds Calculation Pipeline.
+///
+/// Each tier defines different liquidity pool requirements and slippage
+/// tolerance thresholds suited to the expected bet volume and market depth.
+///
+/// | Tier | Min Liquidity (XLM) | Max Slippage (bps) | Description           |
+/// |------|---------------------|--------------------|-----------------------|
+/// | 8    | 80 XLM              | 3 000 bps (30 %)   | Entry-level market    |
+/// | 10   | 100 XLM             | 2 500 bps (25 %)   | Standard market       |
+/// | 12   | 120 XLM             | 2 000 bps (20 %)   | Established market    |
+/// | 14   | 140 XLM             | 1 500 bps (15 %)   | High-volume market    |
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarketTier {
+    /// Tier 8 — entry-level markets with 80 XLM minimum liquidity.
+    /// Max slippage: 3 000 bps (30 %). Suitable for debut fighters.
+    Tier8,
+    /// Tier 10 — standard markets with 100 XLM minimum liquidity.
+    /// Max slippage: 2 500 bps (25 %). Suitable for regional title fights.
+    Tier10,
+    /// Tier 12 — established markets with 120 XLM minimum liquidity.
+    /// Max slippage: 2 000 bps (20 %). Suitable for major title fights.
+    Tier12,
+    /// Tier 14 — high-volume markets with 140 XLM minimum liquidity.
+    /// Max slippage: 1 500 bps (15 %). Suitable for world championship bouts.
+    Tier14,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
@@ -142,6 +170,15 @@ pub enum OptionalOracleRole {
     Some(OracleRole),
 }
 
+/// Optional market tier — same workaround as OptionalOutcome.
+/// Present on markets that have been assigned a tier classification.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptionalMarketTier {
+    None,
+    Some(MarketTier),
+}
+
 /// Full runtime state of a market — stored inside the Market contract.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -164,6 +201,9 @@ pub struct MarketState {
     pub resolved_at: u64,
     /// None until resolved
     pub oracle_used: OptionalOracleRole,
+    /// AMM tier classification — determines liquidity requirements and slippage tolerance.
+    /// Set at initialization; None for markets created before the tier system was introduced.
+    pub tier: OptionalMarketTier,
 }
 
 /// Signed result report submitted by an oracle.

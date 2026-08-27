@@ -17,7 +17,8 @@ use boxmeout_shared::{
     errors::ContractError,
     types::{
         BetRecord, BetSide, ClaimReceipt, Config, FightDetails, MarketConfig,
-        MarketState, MarketStatus, OptionalOracleRole, OptionalOutcome, Outcome, OracleReport, OracleRole,
+        MarketState, MarketStatus, OptionalMarketTier, OptionalOracleRole, OptionalOutcome,
+        Outcome, OracleReport, OracleRole,
     },
 };
 
@@ -43,9 +44,9 @@ const REPORT_TTL: u64 = 172_800;
 /// Maximum TTL for market data (30 days in ledger entries)
 const MAX_TTL: u32 = 2_592_000;
 
-/// Maximum price impact (slippage) allowed per bet, in basis points.
-/// A bet that would move the AMM price by more than this is rejected.
-/// 3000 bps = 30% — protects bettors from placing inadvertently large
+/// Fallback maximum price impact (slippage) when no tier is set, in basis points.
+/// Used in `emit_slippage_checked` for legacy / no-tier markets.
+/// 3000 bps = 30 % — protects bettors from placing inadvertently large
 /// orders into thin pools that would give them very poor execution.
 const MAX_SLIPPAGE_BPS: i128 = 3_000;
 
@@ -144,6 +145,11 @@ impl Market {
     // =========================================================================
     /// Initializes this market immediately after deployment by the factory.
     ///
+    /// # Arguments
+    /// * `tier` - Optional AMM tier (8, 10, 12, or 14). Pass `0` for no tier.
+    ///           Tier controls the minimum liquidity and slippage tolerance for
+    ///           the AMM & Odds Calculation Pipeline (issues #473–#476).
+    ///
     /// # Errors
     /// - `AlreadyInitialized`: Market has already been initialized
     ///
@@ -157,12 +163,22 @@ impl Market {
         fight: FightDetails,
         config: MarketConfig,
         treasury: Address,
+        tier: u32,
     ) -> Result<(), ContractError> {
         // CHECKS
         factory.require_auth();
         if env.storage().persistent().has(&STATE) {
             return Err(ContractError::AlreadyInitialized);
         }
+
+        // Map the tier u32 to an OptionalMarketTier variant.
+        let market_tier = match tier {
+            8  => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier8),
+            10 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier10),
+            12 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier12),
+            14 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier14),
+            _  => OptionalMarketTier::None,
+        };
 
         // EFFECTS
         let state = MarketState {
@@ -177,6 +193,7 @@ impl Market {
             total_pool: 0,
             resolved_at: 0,
             oracle_used: OptionalOracleRole::None,
+            tier: market_tier,
         };
         env.storage().persistent().set(&STATE, &state);
         env.storage().persistent().set(&FACTORY, &factory);
@@ -240,10 +257,30 @@ impl Market {
 
         // Slippage / price-impact sanity check.
         // Compute the AMM price impact of this bet. If the pool is so thin that
-        // the bet would move the price by more than MAX_SLIPPAGE_BPS (30%), reject
+        // the bet would move the price by more than the tier-specific limit, reject
         // it to protect bettors from catastrophically bad execution.
         // The check only applies when all pools are initialised (> 0); when a pool
         // is still zero the AMM is not yet active and we skip the check.
+        //
+        // Tier-specific thresholds (AMM & Odds Calculation Pipeline, issues #473–#476):
+        //   Tier 8  → 3 000 bps max slippage (30 %)
+        //   Tier 10 → 2 500 bps max slippage (25 %)
+        //   Tier 12 → 2 000 bps max slippage (20 %)
+        //   Tier 14 → 1 500 bps max slippage (15 %)
+        //   No tier → 3 000 bps (legacy global cap)
+
+        // Derive the tier byte for AMM calculations.
+        let tier_byte: u8 = match &state.tier {
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier8)  => 8,
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier10) => 10,
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier12) => 12,
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier14) => 14,
+            OptionalMarketTier::None => 0,
+        };
+
+        // Determine whether this is the first bet that brings all pools > 0.
+        let pools_were_zero = state.pool_a == 0 || state.pool_b == 0 || state.pool_draw == 0;
+
         if state.pool_a > 0 && state.pool_b > 0 && state.pool_draw > 0 {
             let side_byte: u8 = match side {
                 BetSide::FighterA => 0,
@@ -257,8 +294,9 @@ impl Market {
                 amount,
                 side_byte,
             ) {
-                if impact_bps > MAX_SLIPPAGE_BPS {
-                    return Err(ContractError::BetTooLarge);
+                // Tier-aware slippage check.
+                if !boxmeout_shared::amm::check_tier_slippage(tier_byte, state.total_pool, impact_bps) {
+                    return Err(ContractError::SlippageExceeded);
                 }
                 if shares_out < min_shares_out {
                     return Err(ContractError::SlippageExceeded);
@@ -308,6 +346,81 @@ impl Market {
         token_client.transfer(&bettor, &env.current_contract_address(), &amount);
 
         boxmeout_shared::emit_bet_placed(&env, new_state.market_id, bet.clone());
+
+        // ── AMM PIPELINE EVENTS (issues #473–#476) ────────────────────────────
+        // Emit pool_initialized when all three pools are now non-zero for the
+        // first time (i.e., this bet completed the initial liquidity bootstrap).
+        if pools_were_zero
+            && new_state.pool_a > 0
+            && new_state.pool_b > 0
+            && new_state.pool_draw > 0
+        {
+            boxmeout_shared::emit_pool_initialized(
+                &env,
+                new_state.market_id,
+                tier_byte as u32,
+                new_state.pool_a,
+                new_state.pool_b,
+                new_state.pool_draw,
+            );
+        }
+
+        // Emit odds_updated after every bet so the frontend can refresh live odds.
+        // Re-compute impact_bps using the post-bet pools so the value matches the
+        // actual price movement caused by this bet.
+        let side_byte: u8 = match side {
+            BetSide::FighterA => 0,
+            BetSide::FighterB => 1,
+            BetSide::Draw     => 2,
+        };
+        let impact_bps_for_event: i128 =
+            if new_state.pool_a > 0 && new_state.pool_b > 0 && new_state.pool_draw > 0 {
+                // Use pre-bet pools to compute impact of this individual bet.
+                boxmeout_shared::amm::compute_odds(
+                    state.pool_a.max(1),
+                    state.pool_b.max(1),
+                    state.pool_draw.max(1),
+                    amount,
+                    side_byte,
+                )
+                .map(|(_, imp)| imp)
+                .unwrap_or(0)
+            } else {
+                0
+            };
+        boxmeout_shared::emit_odds_updated(
+            &env,
+            new_state.market_id,
+            tier_byte as u32,
+            new_state.pool_a,
+            new_state.pool_b,
+            new_state.pool_draw,
+            impact_bps_for_event,
+        );
+
+        // Emit slippage_checked when pools were active and the slippage check ran.
+        if !pools_were_zero {
+            let max_bps = boxmeout_shared::amm::tier_params(tier_byte)
+                .map(|p| p.max_slippage_bps)
+                .unwrap_or(MAX_SLIPPAGE_BPS);
+            boxmeout_shared::emit_slippage_checked(
+                &env,
+                new_state.market_id,
+                tier_byte as u32,
+                // shares_out: re-derive from pre-bet compute_odds result (0 if unavailable)
+                boxmeout_shared::amm::compute_odds(
+                    state.pool_a.max(1),
+                    state.pool_b.max(1),
+                    state.pool_draw.max(1),
+                    amount,
+                    side_byte,
+                )
+                .map(|(s, _)| s)
+                .unwrap_or(0),
+                impact_bps_for_event,
+                max_bps,
+            );
+        }
 
         Ok(bet)
     }
@@ -452,8 +565,34 @@ impl Market {
             }
         }
 
-        // Resolve if we have 2 matching reports
-        if matching_count >= 2 {
+        // Derive the tier byte for consensus events.
+        let tier_byte: u8 = match &state.tier {
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier8)  => 8,
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier10) => 10,
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier12) => 12,
+            OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier14) => 14,
+            OptionalMarketTier::None => 0,
+        };
+
+        let outcome_byte: u32 = match report.outcome {
+            Outcome::FighterA  => 0,
+            Outcome::FighterB  => 1,
+            Outcome::Draw      => 2,
+            Outcome::NoContest => 3,
+        };
+
+        // Emit oracle_report_received so frontends can track resolution progress.
+        boxmeout_shared::emit_oracle_report_received(
+            &env,
+            state.market_id,
+            oracle.clone(),
+            outcome_byte,
+            pending.len(),
+        );
+
+        // Resolve if we have 2 matching reports (2-of-3 consensus, issues #473–#476).
+        let consensus_threshold = boxmeout_shared::amm::tier_oracle_consensus_threshold(tier_byte);
+        if matching_count >= consensus_threshold {
             state.outcome = OptionalOutcome::Some(report.outcome.clone());
             state.status = MarketStatus::Resolved;
             state.resolved_at = env.ledger().timestamp();
@@ -463,6 +602,16 @@ impl Market {
             
             // Clear pending reports
             env.storage().persistent().set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
+
+            // Emit consensus_reached before market_resolved so subscribers
+            // can correlate the tier and report count with the resolution.
+            boxmeout_shared::emit_consensus_reached(
+                &env,
+                state.market_id,
+                tier_byte as u32,
+                matching_count,
+                outcome_byte,
+            );
             
             boxmeout_shared::emit_market_resolved(&env, state.market_id, report.outcome, oracle);
         } else if conflicting_count > 0 && matching_count == 1 {
@@ -968,9 +1117,52 @@ impl Market {
         }
     }
 
-    // =========================================================================
-    // ADMIN CONFIG FUNCTIONS
-    // =========================================================================
+    /// Returns the AMM tier byte for this market (8 / 10 / 12 / 14 / 0).
+    ///
+    /// Returns `0` if no tier was assigned at initialization.
+    /// Frontends can use this to display the correct slippage warning level.
+    pub fn get_tier(env: Env) -> u32 {
+        match Self::load_state(&env) {
+            Ok(s) => match s.tier {
+                OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier8)  => 8,
+                OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier10) => 10,
+                OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier12) => 12,
+                OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier14) => 14,
+                OptionalMarketTier::None => 0,
+            },
+            Err(_) => 0,
+        }
+    }
+
+    /// Returns the live AMM odds (shares_out, impact_bps) for a hypothetical bet.
+    ///
+    /// Useful for frontends to display real-time odds before the bettor confirms.
+    ///
+    /// # Arguments
+    /// * `side`   - 0 = FighterA, 1 = FighterB, 2 = Draw
+    /// * `amount` - Hypothetical bet amount in stroops
+    ///
+    /// # Returns
+    /// `(shares_out, impact_bps)` — or `(0, 0)` if the AMM is not yet active.
+    pub fn get_amm_odds(env: Env, side: u32, amount: i128) -> (i128, i128) {
+        let state = match Self::load_state(&env) {
+            Ok(s) => s,
+            Err(_) => return (0, 0),
+        };
+        if state.pool_a <= 0 || state.pool_b <= 0 || state.pool_draw <= 0 || amount <= 0 {
+            return (0, 0);
+        }
+        match boxmeout_shared::amm::compute_odds(
+            state.pool_a,
+            state.pool_b,
+            state.pool_draw,
+            amount,
+            side as u8,
+        ) {
+            Some((shares, impact)) => (shares, impact),
+            None => (0, 0),
+        }
+    }
 
     /// Sets the dispute window duration.
     ///

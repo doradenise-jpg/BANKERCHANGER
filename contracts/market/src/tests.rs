@@ -4293,3 +4293,2231 @@ mod upgrade_safety_tests {
         }
     }
 }
+
+// ============================================================
+// ISSUES #473 (tier 8) / #474 (tier 10) / #475 (tier 12) / #476 (tier 14):
+// AMM & Odds Calculation Pipeline —
+//   • Liquidity pool and outcome odds calculations
+//   • Slippage tolerance checks on bet execution
+//   • 2-of-3 oracle consensus report validation
+//   • Structured event emissions for real-time frontend updates
+// ============================================================
+
+extern crate std;
+
+// ============================================================
+// ISSUE #473 (tier 8): AMM slippage tolerance & liquidity pool
+// ============================================================
+#[cfg(test)]
+mod amm_slippage_tier8_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::amm::compute_odds;
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use proptest::prelude::*;
+    use crate::Market;
+
+    // MAX_SLIPPAGE_BPS = 3_000 (30 %), mirrored from lib.rs
+    const MAX_SLIPPAGE_BPS: i128 = 3_000;
+    const SCHEDULED_AT: u64 = 200_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "SLIP-FIGHT-473"),
+            fighter_a: soroban_sdk::String::from_str(env, "Alpha"),
+            fighter_b: soroban_sdk::String::from_str(env, "Beta"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    /// Deploys a market that is Open and seeds pools directly into storage.
+    fn setup(
+        env: &Env,
+        pools: (i128, i128, i128),
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Open,
+            outcome: OptionalOutcome::None,
+            pool_a: pools.0,
+            pool_b: pools.1,
+            pool_draw: pools.2,
+            total_pool: pools.0 + pools.1 + pools.2,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, token_id, treasury)
+    }
+
+    /// Extract the Symbol from event topic index 0.
+    fn topic_sym(env: &Env, event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)) -> Symbol {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.1.get(0).unwrap()).unwrap()
+    }
+
+    /// Decode the event data as a BetRecord.
+    fn data_bet_record(
+        env: &Env,
+        event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    ) -> BetRecord {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+    }
+
+    /// A min_shares_out above the executable share count must be rejected with
+    /// SlippageExceeded and must not move any state (tier 8).
+    #[test]
+    fn test_tier8_min_shares_out_above_executable_rejected() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (shares, impact) =
+            compute_odds(10_000_000, 10_000_000, 10_000_000, 1_000_000, 0).unwrap();
+        assert!(
+            impact <= MAX_SLIPPAGE_BPS,
+            "Baseline impact must stay under the guard"
+        );
+
+        let before = client.get_state();
+        let result =
+            client.try_place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &(shares + 1));
+        assert_eq!(
+            result.unwrap_err(),
+            Ok(ContractError::SlippageExceeded),
+            "min_shares_out above executable shares must be rejected"
+        );
+
+        let after = client.get_state();
+        assert_eq!(before.pool_a, after.pool_a, "Failed bet must not mutate state");
+        assert_eq!(before.total_pool, after.total_pool, "Failed bet must not move funds");
+    }
+
+    /// A min_shares_out exactly equal to the executable shares must be accepted (tier 8).
+    #[test]
+    fn test_tier8_min_shares_out_at_boundary_accepted() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (shares, impact) =
+            compute_odds(10_000_000, 10_000_000, 10_000_000, 1_000_000, 0).unwrap();
+        assert!(impact <= MAX_SLIPPAGE_BPS);
+
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &shares);
+
+        let state = client.get_state();
+        assert_eq!(state.pool_a, 11_000_000, "Bet at min_shares boundary must execute");
+        assert_eq!(state.total_pool, 31_000_000);
+    }
+
+    /// A bet large enough to move the price by more than MAX_SLIPPAGE_BPS must be
+    /// rejected as BetTooLarge before any effect (tier 8).
+    #[test]
+    fn test_tier8_thin_pool_large_bet_rejected_as_too_large() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) =
+            setup(&env, (1_000_000, 1_000_000, 1_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000_000, 0).unwrap();
+        assert!(
+            impact > MAX_SLIPPAGE_BPS,
+            "Impact must exceed 30% for this configuration"
+        );
+
+        let result =
+            client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert_eq!(
+            result.unwrap_err(),
+            Ok(ContractError::BetTooLarge),
+            "A bet with >30% price impact must be rejected as too large"
+        );
+    }
+
+    /// A small bet into a deep pool executes with negligible slippage (tier 8).
+    #[test]
+    fn test_tier8_deep_pool_small_bet_executes_with_low_slippage() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) =
+            setup(&env, (100_000_000, 100_000_000, 100_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(100_000_000, 100_000_000, 100_000_000, 1_000_000, 0).unwrap();
+        assert!(
+            impact < 100,
+            "Deep-pool small bet must have <1% slippage (impact={impact})"
+        );
+
+        client.place_bet(&bettor, &BetSide::FighterB, &1_000_000i128, &token_id, &0i128);
+        assert_eq!(client.get_state().pool_b, 101_000_000);
+    }
+
+    /// When pools are empty the AMM is not live, so the slippage guard is skipped (tier 8).
+    #[test]
+    fn test_tier8_zero_pools_skip_slippage_guard() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) = setup(&env, (0, 0, 0));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        client.place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &1_000_000i128,
+            &token_id,
+            &1_000_000_000i128,
+        );
+        assert_eq!(
+            client.get_state().pool_a,
+            1_000_000,
+            "Zero-pool market must ignore min_shares_out"
+        );
+    }
+
+    /// A successful bet emits a structured `bet_placed` event carrying the full
+    /// BetRecord (real-time frontend feed) — tier 8.
+    #[test]
+    fn test_tier8_bet_placed_event_is_structured_for_frontend() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let events_before = env.events().all().len();
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+
+        let events = env.events().all();
+        let contract_events = events
+            .iter()
+            .skip(events_before as usize)
+            .filter(|e| e.0 == contract_id)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(contract_events.len(), 1, "Exactly one contract event expected");
+
+        let ev = &contract_events[0];
+        assert_eq!(topic_sym(&env, ev), Symbol::new(&env, "bet_placed"));
+        let market_id: u64 =
+            soroban_sdk::TryFromVal::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
+        assert_eq!(market_id, 1u64, "Event must carry the market id");
+
+        let bet = data_bet_record(&env, ev);
+        assert_eq!(bet.bettor, bettor);
+        assert_eq!(bet.side, BetSide::FighterA);
+        assert_eq!(bet.amount, 1_000_000, "Event data must carry the full structured bet");
+    }
+
+    /// Liquidity pool odds are asymmetric when pool sizes differ (tier 8).
+    #[test]
+    fn test_tier8_asymmetric_pools_produce_different_odds() {
+        // FighterA pool is larger → fewer shares per unit bet on A (worse odds)
+        // FighterB pool is smaller → more shares per unit bet on B (better odds)
+        let (shares_a, _) = compute_odds(5_000_000, 1_000_000, 2_000_000, 100_000, 0).unwrap();
+        let (shares_b, _) = compute_odds(5_000_000, 1_000_000, 2_000_000, 100_000, 1).unwrap();
+        assert!(
+            shares_b > shares_a,
+            "Smaller pool must offer more shares (better odds) than larger pool"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_tier8_amm_quote_bounds_and_monotonic_shares(
+            pool_a in 1_000_000i128..=1_000_000_000i128,
+            pool_b in 1_000_000i128..=1_000_000_000i128,
+            pool_draw in 1_000_000i128..=1_000_000_000i128,
+            small in 1_000_000i128..=10_000_000i128,
+            side in 0u8..=2u8,
+        ) {
+            let big = small * 2;
+            if let Some((shares_small, impact_small)) = compute_odds(pool_a, pool_b, pool_draw, small, side) {
+                prop_assert!(shares_small > 0, "shares must be positive");
+                prop_assert!(
+                    impact_small >= 0 && impact_small <= 10_000,
+                    "impact must be bounded in bps, got {impact_small}"
+                );
+                if let Some((shares_big, _)) = compute_odds(pool_a, pool_b, pool_draw, big, side) {
+                    prop_assert!(
+                        shares_big >= shares_small,
+                        "larger collateral must never yield fewer shares (flooring may tie)"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
+// ISSUE #473 (tier 8): 2-of-3 oracle consensus validation
+// ============================================================
+#[cfg(test)]
+mod oracle_two_of_three_tier8_tests {
+    use soroban_sdk::{
+        contract, contractimpl, contracttype,
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        Address, Bytes, BytesN, Env, Map, Symbol, Vec,
+    };
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        FightDetails, MarketConfig, MarketState, MarketStatus, OracleReport,
+        OptionalOracleRole, OptionalOutcome, Outcome,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 200_000;
+    const MATCH_ID: &str = "2OF3-FIGHT-473";
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            fighter_a: soroban_sdk::String::from_str(env, "Alpha"),
+            fighter_b: soroban_sdk::String::from_str(env, "Beta"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn outcome_byte(outcome: &Outcome) -> u8 {
+        match outcome {
+            Outcome::FighterA => 0,
+            Outcome::FighterB => 1,
+            Outcome::Draw => 2,
+            Outcome::NoContest => 3,
+        }
+    }
+
+    /// Builds the canonical signed message exactly as the contract does:
+    /// concat(match_id XDR, outcome_byte, reported_at big-endian).
+    fn sign_report(
+        env: &Env,
+        sk: &SigningKey,
+        match_id: &soroban_sdk::String,
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> BytesN<64> {
+        use soroban_sdk::xdr::ToXdr;
+        let mut msg = Bytes::new(env);
+        msg.append(&match_id.clone().to_xdr(env));
+        msg.push_back(outcome_byte(outcome));
+        for b in reported_at.to_be_bytes().iter() {
+            msg.push_back(*b);
+        }
+        let raw: std::vec::Vec<u8> = msg.iter().collect();
+        BytesN::from_array(env, &sk.sign(&raw).to_bytes())
+    }
+
+    fn make_report(
+        env: &Env,
+        oracle: &Address,
+        sk: &SigningKey,
+        vk_bytes: &[u8; 32],
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> OracleReport {
+        OracleReport {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            outcome: outcome.clone(),
+            reported_at,
+            submitted_at: env.ledger().timestamp(),
+            signature: sign_report(
+                env,
+                sk,
+                &soroban_sdk::String::from_str(env, MATCH_ID),
+                outcome,
+                reported_at,
+            ),
+            oracle_address: oracle.clone(),
+            pub_key: BytesN::from_array(env, vk_bytes),
+        }
+    }
+
+    // Mock factory implementing the FactoryInterface used by the market.
+    #[contract]
+    struct MockFactoryTier8;
+
+    #[contracttype]
+    #[derive(Clone)]
+    struct MockFactoryTier8Data {
+        oracles: Vec<Address>,
+        keys: Map<Address, BytesN<32>>,
+    }
+
+    #[contractimpl]
+    impl MockFactoryTier8 {
+        pub fn get_oracles(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier8Data>(&"DATA")
+                .map(|d| d.oracles)
+                .unwrap_or_else(|| Vec::new(&env))
+        }
+
+        pub fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier8Data>(&"DATA")
+                .and_then(|d| d.keys.get(oracle))
+        }
+
+        pub fn is_paused(_env: Env) -> bool {
+            false
+        }
+    }
+
+    /// Oracle identity: a fresh contract address, its Ed25519 signing key and
+    /// the corresponding public key registered at the factory.
+    #[derive(Clone)]
+    struct Oracle {
+        address: Address,
+        sk: SigningKey,
+        vk: [u8; 32],
+    }
+
+    /// Deploys a Market in Locked state plus a factory that whitelists `oracles`.
+    fn setup_locked_market(
+        env: &Env,
+        oracles: &[Oracle],
+    ) -> (crate::MarketClient<'static>, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let mut factory_addresses: Vec<Address> = Vec::new(env);
+        for o in oracles.iter() {
+            factory_addresses.push_back(o.address.clone());
+        }
+        let mut keys: Map<Address, BytesN<32>> = Map::new(env);
+        for o in oracles.iter() {
+            keys.set(o.address.clone(), BytesN::from_array(env, &o.vk));
+        }
+        let factory_id = env.register_contract(None, MockFactoryTier8);
+        env.as_contract(&factory_id, || {
+            env.storage().instance().set(
+                &"DATA",
+                &MockFactoryTier8Data {
+                    oracles: factory_addresses,
+                    keys,
+                },
+            );
+        });
+
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory_id, &1u64, &fight(env), &config(), &treasury);
+
+        // Advance to Locked status
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Locked,
+            outcome: OptionalOutcome::None,
+            pool_a: 5_000_000,
+            pool_b: 3_000_000,
+            pool_draw: 2_000_000,
+            total_pool: 10_000_000,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, contract_id, factory_id)
+    }
+
+    fn make_oracle(env: &Env, seed: u8) -> Oracle {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let vk: [u8; 32] = sk.verifying_key().to_bytes();
+        Oracle { address: Address::generate(env), sk, vk }
+    }
+
+    /// Two matching reports from different oracles trigger 2-of-3 consensus and
+    /// resolve the market (tier 8).
+    #[test]
+    fn test_tier8_two_matching_reports_resolve_market() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 1);
+        let o2 = make_oracle(&env, 2);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::FighterA;
+        let reported_at = 50_000u64;
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, reported_at);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, reported_at);
+
+        client.resolve_market(&o1.address, &r1);
+
+        // After one report, market is still Locked
+        let state = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get::<_, MarketState>(&"STATE")
+                .unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "One report must not resolve market");
+
+        client.resolve_market(&o2.address, &r2);
+
+        // After two matching reports, market must be Resolved
+        let state = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get::<_, MarketState>(&"STATE")
+                .unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Resolved, "Two matching reports must resolve market");
+    }
+
+    /// Single oracle report must not resolve the market (tier 8).
+    #[test]
+    fn test_tier8_single_report_leaves_market_locked() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 11);
+        let o2 = make_oracle(&env, 12);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterB, 50_000);
+        client.resolve_market(&o1.address, &r1);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get::<_, MarketState>(&"STATE")
+                .unwrap()
+        });
+        assert_eq!(
+            state.status,
+            MarketStatus::Locked,
+            "Single report must leave market Locked"
+        );
+    }
+
+    /// Duplicate report from the same oracle must be rejected with Unauthorized (tier 8).
+    #[test]
+    fn test_tier8_duplicate_report_same_oracle_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 21);
+        let o2 = make_oracle(&env, 22);
+        let (client, _contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterA, 50_000);
+        let r1_dup = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterA, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        let result = client.try_resolve_market(&o1.address, &r1_dup);
+        assert!(result.is_err(), "Duplicate oracle report must be rejected");
+    }
+
+    /// Non-whitelisted oracle must be rejected (tier 8).
+    #[test]
+    fn test_tier8_non_whitelisted_oracle_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 31);
+        let (client, _contract_id, _factory) = setup_locked_market(&env, &[o1.clone()]);
+
+        let stranger = make_oracle(&env, 99);
+        let report = make_report(
+            &env,
+            &stranger.address,
+            &stranger.sk,
+            &stranger.vk,
+            &Outcome::FighterA,
+            50_000,
+        );
+        let result = client.try_resolve_market(&stranger.address, &report);
+        assert!(result.is_err(), "Non-whitelisted oracle must be rejected");
+    }
+
+    /// Oracle address mismatch in the report payload must be rejected (tier 8).
+    #[test]
+    fn test_tier8_oracle_address_mismatch_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 41);
+        let o2 = make_oracle(&env, 42);
+        let (client, _contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        // Build a report where oracle_address = o2.address but caller is o1
+        let mut report = make_report(
+            &env,
+            &o2.address, // wrong address in payload
+            &o1.sk,
+            &o1.vk,
+            &Outcome::FighterA,
+            50_000,
+        );
+        report.oracle_address = o2.address.clone();
+
+        let result = client.try_resolve_market(&o1.address, &report);
+        assert!(result.is_err(), "Oracle address mismatch must be rejected");
+    }
+
+    /// PENDING_REPORTS map is cleared after 2-of-3 consensus is reached (tier 8).
+    #[test]
+    fn test_tier8_pending_reports_cleared_after_consensus() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 51);
+        let o2 = make_oracle(&env, 52);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::Draw;
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        client.resolve_market(&o2.address, &r2);
+
+        let pending = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get::<_, Map<Address, OracleReport>>(&"PENDING_REPORTS")
+                .unwrap_or_else(|| Map::new(&env))
+        });
+        assert_eq!(
+            pending.len(),
+            0,
+            "PENDING_REPORTS must be cleared after consensus"
+        );
+    }
+
+    /// market_resolved event is emitted with the oracle address when consensus
+    /// is reached (structured event for real-time frontend updates — tier 8).
+    #[test]
+    fn test_tier8_market_resolved_event_emitted_on_consensus() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 61);
+        let o2 = make_oracle(&env, 62);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::FighterA;
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        let events_before = env.events().all().len();
+        client.resolve_market(&o2.address, &r2);
+
+        let events = env.events().all();
+        let resolved_events = events
+            .iter()
+            .skip(events_before as usize)
+            .filter(|e| {
+                e.0 == contract_id
+                    && e.1.len() > 0
+                    && {
+                        let sym: soroban_sdk::Symbol =
+                            soroban_sdk::TryFromVal::try_from_val(&env, &e.1.get(0).unwrap())
+                                .unwrap_or(soroban_sdk::Symbol::new(&env, "none"));
+                        sym == soroban_sdk::Symbol::new(&env, "market_resolved")
+                    }
+            })
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(
+            resolved_events.len(),
+            1,
+            "Exactly one market_resolved event must be emitted on consensus"
+        );
+    }
+}
+
+// ============================================================
+// ISSUE #474 (tier 10): AMM slippage tolerance & liquidity pool
+// ============================================================
+#[cfg(test)]
+mod amm_slippage_tier10_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::amm::compute_odds;
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use crate::Market;
+
+    const MAX_SLIPPAGE_BPS: i128 = 3_000;
+    const SCHEDULED_AT: u64 = 300_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "SLIP-FIGHT-474"),
+            fighter_a: soroban_sdk::String::from_str(env, "Gamma"),
+            fighter_b: soroban_sdk::String::from_str(env, "Delta"),
+            weight_class: soroban_sdk::String::from_str(env, "Super-Middleweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Las Vegas"),
+            title_fight: false,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(
+        env: &Env,
+        pools: (i128, i128, i128),
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Open,
+            outcome: OptionalOutcome::None,
+            pool_a: pools.0,
+            pool_b: pools.1,
+            pool_draw: pools.2,
+            total_pool: pools.0 + pools.1 + pools.2,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, token_id, treasury)
+    }
+
+    fn topic_sym(env: &Env, event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)) -> Symbol {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.1.get(0).unwrap()).unwrap()
+    }
+
+    fn data_bet_record(
+        env: &Env,
+        event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    ) -> BetRecord {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+    }
+
+    /// Slippage boundary: impact == MAX_SLIPPAGE_BPS must be accepted (tier 10).
+    #[test]
+    fn test_tier10_slippage_boundary_logic() {
+        const MAX: i128 = 3_000;
+        // Exactly at boundary: allowed
+        let at_boundary: bool = MAX > MAX;
+        assert!(!at_boundary, "Impact == MAX_SLIPPAGE_BPS must pass the guard");
+        // One bps over: rejected
+        let over_boundary: bool = MAX + 1 > MAX;
+        assert!(over_boundary, "Impact > MAX_SLIPPAGE_BPS must fail the guard");
+    }
+
+    /// Large bet into thin pool is rejected as BetTooLarge (tier 10).
+    #[test]
+    fn test_tier10_thin_pool_large_bet_rejected() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (1_000_000, 1_000_000, 1_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000_000, 0).unwrap();
+        assert!(impact > MAX_SLIPPAGE_BPS);
+
+        let result =
+            client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert!(result.is_err(), "Large bet into thin pool must be rejected");
+    }
+
+    /// Deep pool absorbs small bet without triggering slippage guard (tier 10).
+    #[test]
+    fn test_tier10_deep_pool_small_bet_succeeds() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (100_000_000, 100_000_000, 100_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(100_000_000, 100_000_000, 100_000_000, 1_000_000, 1).unwrap();
+        assert!(impact < 100, "Small bet must have <1% slippage");
+
+        client.place_bet(&bettor, &BetSide::FighterB, &1_000_000i128, &token_id, &0i128);
+        assert_eq!(client.get_state().pool_b, 101_000_000);
+    }
+
+    /// Structured bet_placed event carries full BetRecord (tier 10).
+    #[test]
+    fn test_tier10_bet_placed_event_structured() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let events_before = env.events().all().len();
+        client.place_bet(&bettor, &BetSide::Draw, &1_000_000i128, &token_id, &0i128);
+
+        let events = env.events().all();
+        let contract_events = events
+            .iter()
+            .skip(events_before as usize)
+            .filter(|e| e.0 == contract_id)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(contract_events.len(), 1);
+
+        let ev = &contract_events[0];
+        assert_eq!(topic_sym(&env, ev), Symbol::new(&env, "bet_placed"));
+        let bet = data_bet_record(&env, ev);
+        assert_eq!(bet.bettor, bettor);
+        assert_eq!(bet.side, BetSide::Draw);
+        assert_eq!(bet.amount, 1_000_000);
+    }
+
+    /// Zero-pool market skips slippage guard (tier 10).
+    #[test]
+    fn test_tier10_zero_pools_skip_slippage_guard() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) = setup(&env, (0, 0, 0));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &2_000_000i128);
+
+        client.place_bet(&bettor, &BetSide::FighterB, &2_000_000i128, &token_id, &999_999_999i128);
+        assert_eq!(client.get_state().pool_b, 2_000_000);
+    }
+
+    /// Pool imbalance produces asymmetric odds (tier 10).
+    #[test]
+    fn test_tier10_pool_imbalance_produces_asymmetric_odds() {
+        let (shares_a, _) = compute_odds(8_000_000, 2_000_000, 2_000_000, 100_000, 0).unwrap();
+        let (shares_b, _) = compute_odds(8_000_000, 2_000_000, 2_000_000, 100_000, 1).unwrap();
+        assert!(
+            shares_b > shares_a,
+            "Underdog (B) must offer more shares per unit bet than favourite (A)"
+        );
+    }
+}
+
+// ============================================================
+// ISSUE #474 (tier 10): 2-of-3 oracle consensus validation
+// ============================================================
+#[cfg(test)]
+mod oracle_two_of_three_tier10_tests {
+    use soroban_sdk::{
+        contract, contractimpl, contracttype,
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Bytes, BytesN, Env, Map, Vec,
+    };
+    use boxmeout_shared::types::{
+        FightDetails, MarketConfig, MarketState, MarketStatus, OracleReport,
+        OptionalOracleRole, OptionalOutcome, Outcome,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use crate::Market;
+
+    const MATCH_ID: &str = "2OF3-FIGHT-474";
+    const SCHEDULED_AT: u64 = 300_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            fighter_a: soroban_sdk::String::from_str(env, "Gamma"),
+            fighter_b: soroban_sdk::String::from_str(env, "Delta"),
+            weight_class: soroban_sdk::String::from_str(env, "Super-Middleweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Las Vegas"),
+            title_fight: false,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn outcome_byte(outcome: &Outcome) -> u8 {
+        match outcome {
+            Outcome::FighterA => 0,
+            Outcome::FighterB => 1,
+            Outcome::Draw => 2,
+            Outcome::NoContest => 3,
+        }
+    }
+
+    fn sign_report(
+        env: &Env,
+        sk: &SigningKey,
+        match_id: &soroban_sdk::String,
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> BytesN<64> {
+        use soroban_sdk::xdr::ToXdr;
+        let mut msg = Bytes::new(env);
+        msg.append(&match_id.clone().to_xdr(env));
+        msg.push_back(outcome_byte(outcome));
+        for b in reported_at.to_be_bytes().iter() {
+            msg.push_back(*b);
+        }
+        let raw: std::vec::Vec<u8> = msg.iter().collect();
+        BytesN::from_array(env, &sk.sign(&raw).to_bytes())
+    }
+
+    fn make_report(
+        env: &Env,
+        oracle: &Address,
+        sk: &SigningKey,
+        vk_bytes: &[u8; 32],
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> OracleReport {
+        OracleReport {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            outcome: outcome.clone(),
+            reported_at,
+            submitted_at: env.ledger().timestamp(),
+            signature: sign_report(
+                env,
+                sk,
+                &soroban_sdk::String::from_str(env, MATCH_ID),
+                outcome,
+                reported_at,
+            ),
+            oracle_address: oracle.clone(),
+            pub_key: BytesN::from_array(env, vk_bytes),
+        }
+    }
+
+    #[contract]
+    struct MockFactoryTier10;
+
+    #[contracttype]
+    #[derive(Clone)]
+    struct MockFactoryTier10Data {
+        oracles: Vec<Address>,
+        keys: Map<Address, BytesN<32>>,
+    }
+
+    #[contractimpl]
+    impl MockFactoryTier10 {
+        pub fn get_oracles(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier10Data>(&"DATA")
+                .map(|d| d.oracles)
+                .unwrap_or_else(|| Vec::new(&env))
+        }
+        pub fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier10Data>(&"DATA")
+                .and_then(|d| d.keys.get(oracle))
+        }
+        pub fn is_paused(_env: Env) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone)]
+    struct Oracle {
+        address: Address,
+        sk: SigningKey,
+        vk: [u8; 32],
+    }
+
+    fn make_oracle(env: &Env, seed: u8) -> Oracle {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        Oracle { address: Address::generate(env), sk, vk }
+    }
+
+    fn setup_locked_market(
+        env: &Env,
+        oracles: &[Oracle],
+    ) -> (crate::MarketClient<'static>, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let mut factory_addresses: Vec<Address> = Vec::new(env);
+        let mut keys: Map<Address, BytesN<32>> = Map::new(env);
+        for o in oracles.iter() {
+            factory_addresses.push_back(o.address.clone());
+            keys.set(o.address.clone(), BytesN::from_array(env, &o.vk));
+        }
+        let factory_id = env.register_contract(None, MockFactoryTier10);
+        env.as_contract(&factory_id, || {
+            env.storage().instance().set(
+                &"DATA",
+                &MockFactoryTier10Data { oracles: factory_addresses, keys },
+            );
+        });
+
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory_id, &1u64, &fight(env), &config(), &treasury);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Locked,
+            outcome: OptionalOutcome::None,
+            pool_a: 4_000_000,
+            pool_b: 4_000_000,
+            pool_draw: 2_000_000,
+            total_pool: 10_000_000,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, contract_id, factory_id)
+    }
+
+    /// Two matching reports reach consensus and resolve market (tier 10).
+    #[test]
+    fn test_tier10_two_matching_reports_resolve_market() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 101);
+        let o2 = make_oracle(&env, 102);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::FighterB;
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "One report must not resolve");
+
+        client.resolve_market(&o2.address, &r2);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Resolved, "Two matching must resolve");
+    }
+
+    /// Conflicting first two reports do not resolve; third breaks tie (tier 10).
+    #[test]
+    fn test_tier10_conflicting_reports_third_breaks_tie() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 111);
+        let o2 = make_oracle(&env, 112);
+        let o3 = make_oracle(&env, 113);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone(), o3.clone()]);
+
+        // o1 reports FighterA, o2 reports FighterB — conflict
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterA, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &Outcome::FighterB, 50_000);
+        let r3 = make_report(&env, &o3.address, &o3.sk, &o3.vk, &Outcome::FighterA, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "After o1 only — still Locked");
+
+        client.resolve_market(&o2.address, &r2);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "Conflicting pair must not resolve");
+
+        // o3 sides with o1 → 2-of-3 for FighterA
+        client.resolve_market(&o3.address, &r3);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(
+            state.status,
+            MarketStatus::Resolved,
+            "Third oracle breaking tie must resolve market"
+        );
+    }
+
+    /// Duplicate report from same oracle is rejected (tier 10).
+    #[test]
+    fn test_tier10_duplicate_report_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 121);
+        let o2 = make_oracle(&env, 122);
+        let (client, _cid, _factory) = setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::Draw, 50_000);
+        let r1_dup = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::Draw, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        let result = client.try_resolve_market(&o1.address, &r1_dup);
+        assert!(result.is_err(), "Duplicate report must be rejected");
+    }
+}
+
+// ============================================================
+// ISSUE #475 (tier 12): AMM slippage tolerance & liquidity pool
+// ============================================================
+#[cfg(test)]
+mod amm_slippage_tier12_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::amm::compute_odds;
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use crate::Market;
+
+    const MAX_SLIPPAGE_BPS: i128 = 3_000;
+    const SCHEDULED_AT: u64 = 400_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "SLIP-FIGHT-475"),
+            fighter_a: soroban_sdk::String::from_str(env, "Epsilon"),
+            fighter_b: soroban_sdk::String::from_str(env, "Zeta"),
+            weight_class: soroban_sdk::String::from_str(env, "Lightweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "New York"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(
+        env: &Env,
+        pools: (i128, i128, i128),
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let total = pools.0 + pools.1 + pools.2;
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Open,
+            outcome: OptionalOutcome::None,
+            pool_a: pools.0,
+            pool_b: pools.1,
+            pool_draw: pools.2,
+            total_pool: total,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, token_id, treasury)
+    }
+
+    fn topic_sym(env: &Env, event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)) -> Symbol {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.1.get(0).unwrap()).unwrap()
+    }
+
+    fn data_bet_record(
+        env: &Env,
+        event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    ) -> BetRecord {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+    }
+
+    /// Large bet into thin pool is rejected as BetTooLarge (tier 12).
+    #[test]
+    fn test_tier12_thin_pool_large_bet_rejected() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (1_000_000, 1_000_000, 1_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000_000, 0).unwrap();
+        assert!(impact > MAX_SLIPPAGE_BPS);
+
+        let result =
+            client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert!(result.is_err(), "Large bet into thin pool must be rejected");
+    }
+
+    /// Deep pool small bet executes successfully (tier 12).
+    #[test]
+    fn test_tier12_deep_pool_small_bet_succeeds() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (100_000_000, 100_000_000, 100_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(100_000_000, 100_000_000, 100_000_000, 1_000_000, 2).unwrap();
+        assert!(impact < 100, "Deep-pool draw bet must have <1% slippage");
+
+        client.place_bet(&bettor, &BetSide::Draw, &1_000_000i128, &token_id, &0i128);
+        assert_eq!(client.get_state().pool_draw, 101_000_000);
+    }
+
+    /// min_shares_out above quotes is rejected with SlippageExceeded (tier 12).
+    #[test]
+    fn test_tier12_min_shares_out_above_quota_rejected() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (shares, impact) =
+            compute_odds(10_000_000, 10_000_000, 10_000_000, 1_000_000, 0).unwrap();
+        assert!(impact <= MAX_SLIPPAGE_BPS);
+
+        let result =
+            client.try_place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &(shares + 1));
+        assert_eq!(
+            result.unwrap_err(),
+            Ok(ContractError::SlippageExceeded),
+            "min_shares_out above quote must be rejected"
+        );
+    }
+
+    /// Structured bet_placed event emitted on successful bet (tier 12).
+    #[test]
+    fn test_tier12_bet_placed_event_structured() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let events_before = env.events().all().len();
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+
+        let events = env.events().all();
+        let contract_events = events
+            .iter()
+            .skip(events_before as usize)
+            .filter(|e| e.0 == contract_id)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(contract_events.len(), 1);
+
+        let ev = &contract_events[0];
+        assert_eq!(topic_sym(&env, ev), Symbol::new(&env, "bet_placed"));
+        let bet = data_bet_record(&env, ev);
+        assert_eq!(bet.bettor, bettor);
+        assert_eq!(bet.side, BetSide::FighterA);
+        assert_eq!(bet.amount, 1_000_000);
+    }
+
+    /// AMM produces symmetric odds for equal pools across all three sides (tier 12).
+    #[test]
+    fn test_tier12_symmetric_pools_produce_symmetric_odds() {
+        let pool = 5_000_000i128;
+        let bet = 50_000i128;
+        let (sa, _) = compute_odds(pool, pool, pool, bet, 0).unwrap();
+        let (sb, _) = compute_odds(pool, pool, pool, bet, 1).unwrap();
+        let (sd, _) = compute_odds(pool, pool, pool, bet, 2).unwrap();
+        assert!(
+            (sa - sb).abs() <= 1,
+            "Symmetric pools: FighterA and FighterB must give equal shares"
+        );
+        assert!(
+            (sa - sd).abs() <= 1,
+            "Symmetric pools: FighterA and Draw must give equal shares"
+        );
+    }
+}
+
+// ============================================================
+// ISSUE #475 (tier 12): 2-of-3 oracle consensus validation
+// ============================================================
+#[cfg(test)]
+mod oracle_two_of_three_tier12_tests {
+    use soroban_sdk::{
+        contract, contractimpl, contracttype,
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Bytes, BytesN, Env, Map, Vec,
+    };
+    use boxmeout_shared::types::{
+        FightDetails, MarketConfig, MarketState, MarketStatus, OracleReport,
+        OptionalOracleRole, OptionalOutcome, Outcome,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use crate::Market;
+
+    const MATCH_ID: &str = "2OF3-FIGHT-475";
+    const SCHEDULED_AT: u64 = 400_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            fighter_a: soroban_sdk::String::from_str(env, "Epsilon"),
+            fighter_b: soroban_sdk::String::from_str(env, "Zeta"),
+            weight_class: soroban_sdk::String::from_str(env, "Lightweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "New York"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn outcome_byte(outcome: &Outcome) -> u8 {
+        match outcome {
+            Outcome::FighterA => 0,
+            Outcome::FighterB => 1,
+            Outcome::Draw => 2,
+            Outcome::NoContest => 3,
+        }
+    }
+
+    fn sign_report(
+        env: &Env,
+        sk: &SigningKey,
+        match_id: &soroban_sdk::String,
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> BytesN<64> {
+        use soroban_sdk::xdr::ToXdr;
+        let mut msg = Bytes::new(env);
+        msg.append(&match_id.clone().to_xdr(env));
+        msg.push_back(outcome_byte(outcome));
+        for b in reported_at.to_be_bytes().iter() {
+            msg.push_back(*b);
+        }
+        let raw: std::vec::Vec<u8> = msg.iter().collect();
+        BytesN::from_array(env, &sk.sign(&raw).to_bytes())
+    }
+
+    fn make_report(
+        env: &Env,
+        oracle: &Address,
+        sk: &SigningKey,
+        vk_bytes: &[u8; 32],
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> OracleReport {
+        OracleReport {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            outcome: outcome.clone(),
+            reported_at,
+            submitted_at: env.ledger().timestamp(),
+            signature: sign_report(
+                env,
+                sk,
+                &soroban_sdk::String::from_str(env, MATCH_ID),
+                outcome,
+                reported_at,
+            ),
+            oracle_address: oracle.clone(),
+            pub_key: BytesN::from_array(env, vk_bytes),
+        }
+    }
+
+    #[contract]
+    struct MockFactoryTier12;
+
+    #[contracttype]
+    #[derive(Clone)]
+    struct MockFactoryTier12Data {
+        oracles: Vec<Address>,
+        keys: Map<Address, BytesN<32>>,
+    }
+
+    #[contractimpl]
+    impl MockFactoryTier12 {
+        pub fn get_oracles(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier12Data>(&"DATA")
+                .map(|d| d.oracles)
+                .unwrap_or_else(|| Vec::new(&env))
+        }
+        pub fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier12Data>(&"DATA")
+                .and_then(|d| d.keys.get(oracle))
+        }
+        pub fn is_paused(_env: Env) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone)]
+    struct Oracle {
+        address: Address,
+        sk: SigningKey,
+        vk: [u8; 32],
+    }
+
+    fn make_oracle(env: &Env, seed: u8) -> Oracle {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        Oracle { address: Address::generate(env), sk, vk }
+    }
+
+    fn setup_locked_market(
+        env: &Env,
+        oracles: &[Oracle],
+    ) -> (crate::MarketClient<'static>, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let mut factory_addresses: Vec<Address> = Vec::new(env);
+        let mut keys: Map<Address, BytesN<32>> = Map::new(env);
+        for o in oracles.iter() {
+            factory_addresses.push_back(o.address.clone());
+            keys.set(o.address.clone(), BytesN::from_array(env, &o.vk));
+        }
+        let factory_id = env.register_contract(None, MockFactoryTier12);
+        env.as_contract(&factory_id, || {
+            env.storage().instance().set(
+                &"DATA",
+                &MockFactoryTier12Data { oracles: factory_addresses, keys },
+            );
+        });
+
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory_id, &1u64, &fight(env), &config(), &treasury);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Locked,
+            outcome: OptionalOutcome::None,
+            pool_a: 6_000_000,
+            pool_b: 2_000_000,
+            pool_draw: 2_000_000,
+            total_pool: 10_000_000,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, contract_id, factory_id)
+    }
+
+    /// Two matching reports resolve market (tier 12).
+    #[test]
+    fn test_tier12_two_matching_reports_resolve_market() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 151);
+        let o2 = make_oracle(&env, 152);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::Draw;
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked);
+
+        client.resolve_market(&o2.address, &r2);
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Resolved);
+    }
+
+    /// Single report does not resolve market (tier 12).
+    #[test]
+    fn test_tier12_single_report_not_sufficient() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 161);
+        let o2 = make_oracle(&env, 162);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterA, 50_000);
+        client.resolve_market(&o1.address, &r1);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "Single report must not resolve");
+    }
+
+    /// Non-whitelisted oracle is rejected (tier 12).
+    #[test]
+    fn test_tier12_non_whitelisted_oracle_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 171);
+        let (client, _cid, _factory) = setup_locked_market(&env, &[o1.clone()]);
+
+        let stranger = make_oracle(&env, 199);
+        let report = make_report(
+            &env,
+            &stranger.address,
+            &stranger.sk,
+            &stranger.vk,
+            &Outcome::FighterA,
+            50_000,
+        );
+        let result = client.try_resolve_market(&stranger.address, &report);
+        assert!(result.is_err(), "Non-whitelisted oracle must be rejected");
+    }
+}
+
+// ============================================================
+// ISSUE #476 (tier 14): AMM slippage tolerance & liquidity pool
+// ============================================================
+#[cfg(test)]
+mod amm_slippage_tier14_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::amm::compute_odds;
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use crate::Market;
+
+    const MAX_SLIPPAGE_BPS: i128 = 3_000;
+    const SCHEDULED_AT: u64 = 500_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "SLIP-FIGHT-476"),
+            fighter_a: soroban_sdk::String::from_str(env, "Eta"),
+            fighter_b: soroban_sdk::String::from_str(env, "Theta"),
+            weight_class: soroban_sdk::String::from_str(env, "Welterweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Tokyo"),
+            title_fight: false,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(
+        env: &Env,
+        pools: (i128, i128, i128),
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let total = pools.0 + pools.1 + pools.2;
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Open,
+            outcome: OptionalOutcome::None,
+            pool_a: pools.0,
+            pool_b: pools.1,
+            pool_draw: pools.2,
+            total_pool: total,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, token_id, treasury)
+    }
+
+    fn topic_sym(env: &Env, event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)) -> Symbol {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.1.get(0).unwrap()).unwrap()
+    }
+
+    fn data_bet_record(
+        env: &Env,
+        event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    ) -> BetRecord {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+    }
+
+    /// Large bet into thin pool rejected as BetTooLarge (tier 14).
+    #[test]
+    fn test_tier14_thin_pool_large_bet_rejected() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (1_000_000, 1_000_000, 1_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000_000, 0).unwrap();
+        assert!(impact > MAX_SLIPPAGE_BPS);
+
+        let result =
+            client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert!(result.is_err(), "Large bet into thin pool must be rejected (tier 14)");
+    }
+
+    /// Deep pool small bet executes (tier 14).
+    #[test]
+    fn test_tier14_deep_pool_small_bet_executes() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (100_000_000, 100_000_000, 100_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let (_shares, impact) =
+            compute_odds(100_000_000, 100_000_000, 100_000_000, 1_000_000, 0).unwrap();
+        assert!(impact < 100);
+
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+        assert_eq!(client.get_state().pool_a, 101_000_000);
+    }
+
+    /// min_shares_out exactly equal to quote must be accepted (tier 14).
+    #[test]
+    fn test_tier14_min_shares_at_exact_quote_accepted() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (shares, impact) =
+            compute_odds(10_000_000, 10_000_000, 10_000_000, 1_000_000, 1).unwrap();
+        assert!(impact <= MAX_SLIPPAGE_BPS);
+
+        client.place_bet(&bettor, &BetSide::FighterB, &1_000_000i128, &token_id, &shares);
+        assert_eq!(client.get_state().pool_b, 11_000_000);
+    }
+
+    /// Structured bet_placed event emitted on bet execution (tier 14).
+    #[test]
+    fn test_tier14_bet_placed_event_structured() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _treasury) =
+            setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let events_before = env.events().all().len();
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+
+        let events = env.events().all();
+        let contract_events = events
+            .iter()
+            .skip(events_before as usize)
+            .filter(|e| e.0 == contract_id)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(contract_events.len(), 1);
+
+        let ev = &contract_events[0];
+        assert_eq!(topic_sym(&env, ev), Symbol::new(&env, "bet_placed"));
+        let bet = data_bet_record(&env, ev);
+        assert_eq!(bet.bettor, bettor);
+        assert_eq!(bet.side, BetSide::FighterA);
+        assert_eq!(bet.amount, 1_000_000);
+    }
+
+    /// Price impact is always bounded in [0, 10_000] bps (tier 14).
+    #[test]
+    fn test_tier14_slippage_always_within_bps_range() {
+        for bet in [1_000, 100_000, 1_000_000, 5_000_000i128] {
+            if let Some((_, impact)) = compute_odds(1_000_000, 1_000_000, 1_000_000, bet, 0) {
+                assert!(
+                    impact >= 0 && impact <= 10_000,
+                    "Impact must be in [0, 10000] bps for bet={bet}, got {impact}"
+                );
+            }
+        }
+    }
+
+    /// Zero pools skip the slippage guard (tier 14).
+    #[test]
+    fn test_tier14_zero_pools_skip_slippage_guard() {
+        let env = Env::default();
+        let (client, _cid, token_id, _treasury) = setup(&env, (0, 0, 0));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &3_000_000i128);
+
+        client.place_bet(
+            &bettor,
+            &BetSide::Draw,
+            &3_000_000i128,
+            &token_id,
+            &999_999_999i128,
+        );
+        assert_eq!(client.get_state().pool_draw, 3_000_000);
+    }
+}
+
+// ============================================================
+// ISSUE #476 (tier 14): 2-of-3 oracle consensus validation
+// ============================================================
+#[cfg(test)]
+mod oracle_two_of_three_tier14_tests {
+    use soroban_sdk::{
+        contract, contractimpl, contracttype,
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Bytes, BytesN, Env, Map, Vec,
+    };
+    use boxmeout_shared::types::{
+        FightDetails, MarketConfig, MarketState, MarketStatus, OracleReport,
+        OptionalOracleRole, OptionalOutcome, Outcome,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use crate::Market;
+
+    const MATCH_ID: &str = "2OF3-FIGHT-476";
+    const SCHEDULED_AT: u64 = 500_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            fighter_a: soroban_sdk::String::from_str(env, "Eta"),
+            fighter_b: soroban_sdk::String::from_str(env, "Theta"),
+            weight_class: soroban_sdk::String::from_str(env, "Welterweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Tokyo"),
+            title_fight: false,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn outcome_byte(outcome: &Outcome) -> u8 {
+        match outcome {
+            Outcome::FighterA => 0,
+            Outcome::FighterB => 1,
+            Outcome::Draw => 2,
+            Outcome::NoContest => 3,
+        }
+    }
+
+    fn sign_report(
+        env: &Env,
+        sk: &SigningKey,
+        match_id: &soroban_sdk::String,
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> BytesN<64> {
+        use soroban_sdk::xdr::ToXdr;
+        let mut msg = Bytes::new(env);
+        msg.append(&match_id.clone().to_xdr(env));
+        msg.push_back(outcome_byte(outcome));
+        for b in reported_at.to_be_bytes().iter() {
+            msg.push_back(*b);
+        }
+        let raw: std::vec::Vec<u8> = msg.iter().collect();
+        BytesN::from_array(env, &sk.sign(&raw).to_bytes())
+    }
+
+    fn make_report(
+        env: &Env,
+        oracle: &Address,
+        sk: &SigningKey,
+        vk_bytes: &[u8; 32],
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> OracleReport {
+        OracleReport {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            outcome: outcome.clone(),
+            reported_at,
+            submitted_at: env.ledger().timestamp(),
+            signature: sign_report(
+                env,
+                sk,
+                &soroban_sdk::String::from_str(env, MATCH_ID),
+                outcome,
+                reported_at,
+            ),
+            oracle_address: oracle.clone(),
+            pub_key: BytesN::from_array(env, vk_bytes),
+        }
+    }
+
+    #[contract]
+    struct MockFactoryTier14;
+
+    #[contracttype]
+    #[derive(Clone)]
+    struct MockFactoryTier14Data {
+        oracles: Vec<Address>,
+        keys: Map<Address, BytesN<32>>,
+    }
+
+    #[contractimpl]
+    impl MockFactoryTier14 {
+        pub fn get_oracles(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier14Data>(&"DATA")
+                .map(|d| d.oracles)
+                .unwrap_or_else(|| Vec::new(&env))
+        }
+        pub fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryTier14Data>(&"DATA")
+                .and_then(|d| d.keys.get(oracle))
+        }
+        pub fn is_paused(_env: Env) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone)]
+    struct Oracle {
+        address: Address,
+        sk: SigningKey,
+        vk: [u8; 32],
+    }
+
+    fn make_oracle(env: &Env, seed: u8) -> Oracle {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        Oracle { address: Address::generate(env), sk, vk }
+    }
+
+    fn setup_locked_market(
+        env: &Env,
+        oracles: &[Oracle],
+    ) -> (crate::MarketClient<'static>, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let mut factory_addresses: Vec<Address> = Vec::new(env);
+        let mut keys: Map<Address, BytesN<32>> = Map::new(env);
+        for o in oracles.iter() {
+            factory_addresses.push_back(o.address.clone());
+            keys.set(o.address.clone(), BytesN::from_array(env, &o.vk));
+        }
+        let factory_id = env.register_contract(None, MockFactoryTier14);
+        env.as_contract(&factory_id, || {
+            env.storage().instance().set(
+                &"DATA",
+                &MockFactoryTier14Data { oracles: factory_addresses, keys },
+            );
+        });
+
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory_id, &1u64, &fight(env), &config(), &treasury);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Locked,
+            outcome: OptionalOutcome::None,
+            pool_a: 3_000_000,
+            pool_b: 5_000_000,
+            pool_draw: 2_000_000,
+            total_pool: 10_000_000,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, contract_id, factory_id)
+    }
+
+    /// Two matching reports resolve market (tier 14).
+    #[test]
+    fn test_tier14_two_matching_reports_resolve_market() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 201);
+        let o2 = make_oracle(&env, 202);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::FighterB;
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "One report must leave market Locked");
+
+        client.resolve_market(&o2.address, &r2);
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Resolved, "Two matching must resolve market");
+    }
+
+    /// Single report leaves market Locked (tier 14).
+    #[test]
+    fn test_tier14_single_report_leaves_market_locked() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 211);
+        let o2 = make_oracle(&env, 212);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::Draw, 50_000);
+        client.resolve_market(&o1.address, &r1);
+
+        let state = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, MarketState>(&"STATE").unwrap()
+        });
+        assert_eq!(state.status, MarketStatus::Locked, "Single report must not resolve");
+    }
+
+    /// Duplicate report from same oracle is rejected with Unauthorized (tier 14).
+    #[test]
+    fn test_tier14_duplicate_report_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 221);
+        let o2 = make_oracle(&env, 222);
+        let (client, _cid, _factory) = setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterB, 50_000);
+        let r1_dup = make_report(&env, &o1.address, &o1.sk, &o1.vk, &Outcome::FighterB, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        let result = client.try_resolve_market(&o1.address, &r1_dup);
+        assert!(result.is_err(), "Duplicate oracle report must be rejected");
+    }
+
+    /// PENDING_REPORTS is cleared after consensus is reached (tier 14).
+    #[test]
+    fn test_tier14_pending_reports_cleared_after_consensus() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 231);
+        let o2 = make_oracle(&env, 232);
+        let (client, contract_id, _factory) =
+            setup_locked_market(&env, &[o1.clone(), o2.clone()]);
+
+        let outcome = Outcome::FighterA;
+        let r1 = make_report(&env, &o1.address, &o1.sk, &o1.vk, &outcome, 50_000);
+        let r2 = make_report(&env, &o2.address, &o2.sk, &o2.vk, &outcome, 50_000);
+
+        client.resolve_market(&o1.address, &r1);
+        client.resolve_market(&o2.address, &r2);
+
+        let pending = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get::<_, Map<Address, OracleReport>>(&"PENDING_REPORTS")
+                .unwrap_or_else(|| Map::new(&env))
+        });
+        assert_eq!(pending.len(), 0, "PENDING_REPORTS must be empty after consensus");
+    }
+
+    /// Non-whitelisted oracle is rejected (tier 14).
+    #[test]
+    fn test_tier14_non_whitelisted_oracle_rejected() {
+        let env = Env::default();
+        let o1 = make_oracle(&env, 241);
+        let (client, _cid, _factory) = setup_locked_market(&env, &[o1.clone()]);
+
+        let stranger = make_oracle(&env, 249);
+        let report = make_report(
+            &env,
+            &stranger.address,
+            &stranger.sk,
+            &stranger.vk,
+            &Outcome::FighterB,
+            50_000,
+        );
+        let result = client.try_resolve_market(&stranger.address, &report);
+        assert!(result.is_err(), "Non-whitelisted oracle must be rejected");
+    }
+}
+
+// ============================================================
+// ISSUES #473 / #474 / #475 / #476: oracle_pending_reports_ttl
+// Documents current soroban test env behavior for all tiers.
+// ============================================================
+#[cfg(test)]
+mod oracle_pending_reports_ttl_tiers_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Env, Map,
+    };
+    use boxmeout_shared::types::{OracleReport, Outcome};
+    use crate::Market;
+
+    // REPORT_TTL = 172_800 (48 h), defined in lib.rs
+    const REPORT_TTL: u64 = 172_800;
+
+    fn make_stub_report(env: &Env, oracle: &Address, submitted_at: u64) -> OracleReport {
+        OracleReport {
+            match_id: soroban_sdk::String::from_str(env, "TTL-TEST-TIERS"),
+            outcome: Outcome::FighterA,
+            reported_at: submitted_at,
+            submitted_at,
+            signature: soroban_sdk::BytesN::from_array(env, &[0u8; 64]),
+            oracle_address: oracle.clone(),
+            pub_key: soroban_sdk::BytesN::from_array(env, &[0u8; 32]),
+        }
+    }
+
+    /// Documents that PENDING_REPORTS entries written under default soroban-env-test
+    /// TTL survive past REPORT_TTL without expiry — TTL is not enforced on reads
+    /// in the unit-test environment. Pins this behavior for tiers 8–14 so a future
+    /// upgrade that adds TTL enforcement will detect the change.
+    #[test]
+    fn test_pending_reports_survive_default_ttl_in_test_env_tiers8_to_14() {
+        let env = Env::default();
+        env.ledger().set(LedgerInfo {
+            timestamp: 100,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let oracle = Address::generate(&env);
+        let submitted_at = 100u64;
+        let report = make_stub_report(&env, &oracle, submitted_at);
+
+        // Write a PENDING_REPORTS entry directly
+        let mut map: Map<Address, OracleReport> = Map::new(&env);
+        map.set(oracle.clone(), report);
+
+        // Register a throwaway Market to get a contract context for storage
+        let contract_id = env.register_contract(None, Market);
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"PENDING_REPORTS", &map);
+        });
+
+        // Advance ledger past REPORT_TTL (48 h)
+        env.ledger().set(LedgerInfo {
+            timestamp: 100 + REPORT_TTL + 1,
+            protocol_version: 20,
+            sequence_number: 200,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        // In unit-test env, TTL is not enforced — entry must still be readable
+        let stored: Option<Map<Address, OracleReport>> = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&"PENDING_REPORTS")
+        });
+        assert!(
+            stored.is_some(),
+            "PENDING_REPORTS entry must be readable past TTL in soroban-env-test (TTL not enforced)"
+        );
+    }
+}

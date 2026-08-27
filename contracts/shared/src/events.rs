@@ -167,6 +167,115 @@ pub fn emit_stale_reports_cleared(env: &Env, market_id: u64, cleared_count: u32)
     env.events().publish(topics, cleared_count);
 }
 
+// ─── AMM & Odds Calculation Pipeline — Tier Events ───────────────────────────
+// The following events support issues #473 (tier 8), #474 (tier 10),
+// #475 (tier 12), and #476 (tier 14).
+
+/// Emits an `odds_updated` event after each bet that changes the pool ratios.
+///
+/// Subscribing frontends use this event to refresh live displayed odds without
+/// polling the contract state.
+///
+/// Topics: `(Symbol("odds_updated"), market_id)`
+/// Data:   `(tier, pool_a, pool_b, pool_draw, impact_bps)`
+///
+/// * `tier`       — Market tier byte (8 / 10 / 12 / 14; 0 = no tier)
+/// * `pool_a`     — New pool size for FighterA in stroops
+/// * `pool_b`     — New pool size for FighterB in stroops
+/// * `pool_draw`  — New pool size for Draw in stroops
+/// * `impact_bps` — Price impact of the triggering bet in basis points
+pub fn emit_odds_updated(
+    env: &Env,
+    market_id: u64,
+    tier: u32,
+    pool_a: i128,
+    pool_b: i128,
+    pool_draw: i128,
+    impact_bps: i128,
+) {
+    let topics = (Symbol::new(env, "odds_updated"), market_id);
+    env.events().publish(topics, (tier, pool_a, pool_b, pool_draw, impact_bps));
+}
+
+/// Emits a `slippage_checked` event when a bet passes the AMM slippage guard.
+///
+/// Provides an audit trail for every bet that was evaluated against the
+/// tier-specific slippage tolerance.  Only emitted when the check succeeds;
+/// failed bets are rejected before reaching the event layer.
+///
+/// Topics: `(Symbol("slippage_checked"), market_id)`
+/// Data:   `(tier, shares_out, impact_bps, max_slippage_bps)`
+pub fn emit_slippage_checked(
+    env: &Env,
+    market_id: u64,
+    tier: u32,
+    shares_out: i128,
+    impact_bps: i128,
+    max_slippage_bps: i128,
+) {
+    let topics = (Symbol::new(env, "slippage_checked"), market_id);
+    env.events().publish(topics, (tier, shares_out, impact_bps, max_slippage_bps));
+}
+
+/// Emits an `oracle_report_received` event when a valid oracle report is stored
+/// during 2-of-3 consensus accumulation.
+///
+/// Allows frontends to display live resolution progress (e.g. "1 / 2 oracles
+/// confirmed") without polling PENDING_REPORTS storage.
+///
+/// Topics: `(Symbol("oracle_report_received"), market_id)`
+/// Data:   `(oracle_address, outcome_byte, report_count)`
+///
+/// * `oracle_address` — The reporting oracle's Stellar address
+/// * `outcome_byte`   — 0 = FighterA, 1 = FighterB, 2 = Draw, 3 = NoContest
+/// * `report_count`   — Total reports received so far (including this one)
+pub fn emit_oracle_report_received(
+    env: &Env,
+    market_id: u64,
+    oracle_address: Address,
+    outcome_byte: u32,
+    report_count: u32,
+) {
+    let topics = (Symbol::new(env, "oracle_report_received"), market_id);
+    env.events().publish(topics, (oracle_address, outcome_byte, report_count));
+}
+
+/// Emits a `consensus_reached` event when 2-of-3 oracle reports agree and the
+/// market transitions to `Resolved`.
+///
+/// Distinct from `market_resolved` — this event carries the consensus details
+/// (report count and tier) that frontends need for resolution UX.
+///
+/// Topics: `(Symbol("consensus_reached"), market_id)`
+/// Data:   `(tier, matching_reports, outcome_byte)`
+pub fn emit_consensus_reached(
+    env: &Env,
+    market_id: u64,
+    tier: u32,
+    matching_reports: u32,
+    outcome_byte: u32,
+) {
+    let topics = (Symbol::new(env, "consensus_reached"), market_id);
+    env.events().publish(topics, (tier, matching_reports, outcome_byte));
+}
+
+/// Emits a `pool_initialized` event when a market's liquidity pools are first
+/// seeded with funds, unlocking the AMM slippage checks for that market.
+///
+/// Topics: `(Symbol("pool_initialized"), market_id)`
+/// Data:   `(tier, pool_a, pool_b, pool_draw)`
+pub fn emit_pool_initialized(
+    env: &Env,
+    market_id: u64,
+    tier: u32,
+    pool_a: i128,
+    pool_b: i128,
+    pool_draw: i128,
+) {
+    let topics = (Symbol::new(env, "pool_initialized"), market_id);
+    env.events().publish(topics, (tier, pool_a, pool_b, pool_draw));
+}
+
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{

@@ -18,6 +18,95 @@
 /// - Draw pool grows (to maintain the invariant)
 /// - Effective price = pool_draw / pool_a after trade (with price impact)
 
+/// AMM tier parameters controlling per-tier liquidity requirements and slippage limits.
+///
+/// Each tier in the AMM & Odds Calculation Pipeline enforces different constraints
+/// to match the expected market depth and bet volume:
+///
+/// | Tier | min_liquidity_stroops | max_slippage_bps | Description             |
+/// |------|-----------------------|------------------|-------------------------|
+/// | 8    | 800_000_000           | 3_000            | Entry-level markets     |
+/// | 10   | 1_000_000_000         | 2_500            | Standard markets        |
+/// | 12   | 1_200_000_000         | 2_000            | Established markets     |
+/// | 14   | 1_400_000_000         | 1_500            | High-volume markets     |
+pub struct TierParams {
+    /// Minimum total pool size (in stroops) required before slippage checks apply.
+    /// Below this threshold the AMM is considered bootstrapping and checks are lenient.
+    pub min_liquidity_stroops: i128,
+    /// Maximum price impact per bet in basis points (1 bps = 0.01%).
+    /// Bets that would exceed this impact are rejected with SlippageExceeded.
+    pub max_slippage_bps: i128,
+}
+
+/// Returns the [`TierParams`] for a given market tier byte.
+///
+/// # Arguments
+/// * `tier` - Tier identifier: 8, 10, 12, or 14
+///
+/// # Returns
+/// `Some(TierParams)` for known tiers, `None` for unknown values.
+pub fn tier_params(tier: u8) -> Option<TierParams> {
+    match tier {
+        8 => Some(TierParams {
+            min_liquidity_stroops: 800_000_000,   // 80 XLM
+            max_slippage_bps: 3_000,
+        }),
+        10 => Some(TierParams {
+            min_liquidity_stroops: 1_000_000_000, // 100 XLM
+            max_slippage_bps: 2_500,
+        }),
+        12 => Some(TierParams {
+            min_liquidity_stroops: 1_200_000_000, // 120 XLM
+            max_slippage_bps: 2_000,
+        }),
+        14 => Some(TierParams {
+            min_liquidity_stroops: 1_400_000_000, // 140 XLM
+            max_slippage_bps: 1_500,
+        }),
+        _ => None,
+    }
+}
+
+/// Checks whether a bet's slippage is within the tier's allowed tolerance.
+///
+/// Returns `true` (bet is acceptable) when:
+/// 1. No tier params exist for the given tier (unknown tier — permissive default)
+/// 2. Total pool is below `min_liquidity_stroops` (bootstrapping phase)
+/// 3. `impact_bps` ≤ `max_slippage_bps` for the tier
+///
+/// Returns `false` when the impact exceeds the tier limit.
+///
+/// # Arguments
+/// * `tier`       - Tier byte (8, 10, 12, or 14)
+/// * `total_pool` - Current total pool size in stroops
+/// * `impact_bps` - Price impact of the bet in basis points (from `compute_odds`)
+pub fn check_tier_slippage(tier: u8, total_pool: i128, impact_bps: i128) -> bool {
+    match tier_params(tier) {
+        None => true, // Unknown tier — fall back to permissive behaviour
+        Some(params) => {
+            // During bootstrapping (pool below min liquidity) the strict tier
+            // limit does not apply; we use the global 30 % cap instead.
+            if total_pool < params.min_liquidity_stroops {
+                return impact_bps <= 3_000;
+            }
+            impact_bps <= params.max_slippage_bps
+        }
+    }
+}
+
+/// Computes the oracle consensus requirement for a given tier.
+///
+/// All tiers use the standard 2-of-3 oracle consensus model.  The function
+/// is provided so callers can query the threshold without hard-coding it, and
+/// to make future per-tier changes (e.g. 3-of-5 for Tier 14) purely additive.
+///
+/// # Returns
+/// Minimum number of matching oracle reports required to resolve the market.
+pub const fn tier_oracle_consensus_threshold(_tier: u8) -> u32 {
+    // All current tiers use 2-of-3 consensus.
+    2
+}
+
 /// Computes integer square root for fixed-point math.
 /// Used in constant product calculations to solve x² equations.
 ///
@@ -414,6 +503,102 @@ mod tests {
         assert_eq!(compute_odds(-1, 1_000_000, 1_000_000, 10_000, 0), None);
         assert_eq!(compute_odds(1_000_000, -1, 1_000_000, 10_000, 0), None);
         assert_eq!(compute_odds(1_000_000, 1_000_000, -1, 10_000, 0), None);
+    }
+
+    // ── tier_params tests ───────────────────────────────────────────────────────
+
+    /// Tier 8 params: 80 XLM min liquidity, 30 % max slippage.
+    #[test]
+    fn test_tier_params_tier8() {
+        let p = tier_params(8).expect("tier 8 must exist");
+        assert_eq!(p.min_liquidity_stroops, 800_000_000);
+        assert_eq!(p.max_slippage_bps, 3_000);
+    }
+
+    /// Tier 10 params: 100 XLM min liquidity, 25 % max slippage.
+    #[test]
+    fn test_tier_params_tier10() {
+        let p = tier_params(10).expect("tier 10 must exist");
+        assert_eq!(p.min_liquidity_stroops, 1_000_000_000);
+        assert_eq!(p.max_slippage_bps, 2_500);
+    }
+
+    /// Tier 12 params: 120 XLM min liquidity, 20 % max slippage.
+    #[test]
+    fn test_tier_params_tier12() {
+        let p = tier_params(12).expect("tier 12 must exist");
+        assert_eq!(p.min_liquidity_stroops, 1_200_000_000);
+        assert_eq!(p.max_slippage_bps, 2_000);
+    }
+
+    /// Tier 14 params: 140 XLM min liquidity, 15 % max slippage.
+    #[test]
+    fn test_tier_params_tier14() {
+        let p = tier_params(14).expect("tier 14 must exist");
+        assert_eq!(p.min_liquidity_stroops, 1_400_000_000);
+        assert_eq!(p.max_slippage_bps, 1_500);
+    }
+
+    /// Unknown tier returns None — permissive fallback.
+    #[test]
+    fn test_tier_params_unknown() {
+        assert!(tier_params(0).is_none());
+        assert!(tier_params(7).is_none());
+        assert!(tier_params(9).is_none());
+        assert!(tier_params(255).is_none());
+    }
+
+    // ── check_tier_slippage tests ───────────────────────────────────────────────
+
+    /// Below the min-liquidity bootstrap threshold, a 30 % impact is still accepted.
+    #[test]
+    fn test_check_tier_slippage_bootstrapping_phase_accepts_high_impact() {
+        // Pool below 80 XLM → bootstrapping
+        assert!(check_tier_slippage(8, 100_000, 3_000));
+        assert!(check_tier_slippage(10, 100_000, 3_000));
+        assert!(check_tier_slippage(12, 100_000, 3_000));
+        assert!(check_tier_slippage(14, 100_000, 3_000));
+    }
+
+    /// Above the min-liquidity threshold, tier-specific limits apply.
+    #[test]
+    fn test_check_tier_slippage_above_min_liquidity_enforces_tier_limit() {
+        // Tier 8 (30 %): 3000 bps is exactly the limit — accept.
+        assert!(check_tier_slippage(8, 2_000_000_000, 3_000));
+        // Tier 8: 3001 bps exceeds the limit — reject.
+        assert!(!check_tier_slippage(8, 2_000_000_000, 3_001));
+
+        // Tier 10 (25 %): 2500 bps is exactly the limit — accept.
+        assert!(check_tier_slippage(10, 2_000_000_000, 2_500));
+        // Tier 10: 2501 bps exceeds the limit — reject.
+        assert!(!check_tier_slippage(10, 2_000_000_000, 2_501));
+
+        // Tier 12 (20 %): 2000 bps is exactly the limit — accept.
+        assert!(check_tier_slippage(12, 2_000_000_000, 2_000));
+        // Tier 12: 2001 bps exceeds the limit — reject.
+        assert!(!check_tier_slippage(12, 2_000_000_000, 2_001));
+
+        // Tier 14 (15 %): 1500 bps is exactly the limit — accept.
+        assert!(check_tier_slippage(14, 2_000_000_000, 1_500));
+        // Tier 14: 1501 bps exceeds the limit — reject.
+        assert!(!check_tier_slippage(14, 2_000_000_000, 1_501));
+    }
+
+    /// Unknown tier falls back to permissive behaviour (always true).
+    #[test]
+    fn test_check_tier_slippage_unknown_tier_is_permissive() {
+        assert!(check_tier_slippage(0, 2_000_000_000, 10_000));
+        assert!(check_tier_slippage(7, 2_000_000_000, 10_000));
+    }
+
+    // ── tier_oracle_consensus_threshold tests ────────────────────────────────────
+
+    #[test]
+    fn test_tier_oracle_consensus_threshold_all_tiers() {
+        for tier in [0u8, 8, 10, 12, 14, 255] {
+            assert_eq!(tier_oracle_consensus_threshold(tier), 2,
+                "all tiers must require 2-of-3 consensus");
+        }
     }
 }
 
