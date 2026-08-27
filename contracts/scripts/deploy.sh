@@ -159,6 +159,11 @@ MARKET_WASM_HASH=$(SOROBAN_RPC_URL="$STELLAR_RPC_URL" stellar contract install \
 [[ -z "$MARKET_WASM_HASH" ]] && { echo "ERROR: Market wasm upload failed" >&2; exit 1; }
 echo "  Market wasm hash: $MARKET_WASM_HASH"
 
+stellar_invoke "$MARKET_FACTORY_ADDRESS" update_market_wasm \
+    --admin "$ADMIN_ADDRESS" \
+    --new-wasm-hash "$MARKET_WASM_HASH"
+echo "  Market wasm hash registered with factory"
+
 # ── 5. Save deployments.json ──────────────────────────────────────────────────
 echo "[5/5] Writing deployments.json..."
 DEPLOYED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")

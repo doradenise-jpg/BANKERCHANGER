@@ -70,6 +70,8 @@ pub enum ContractError {
     ResolutionWindowExpired = 31,
     /// Two or more conflicting oracle reports were submitted
     ConflictingOracleReport = 32,
+    /// Resolution was attempted before the scheduled fight start
+    MarketNotStarted = 33,
 
     // ── Treasury ───────────────────────────────────────────
     /// Fee withdrawals are temporarily paused
