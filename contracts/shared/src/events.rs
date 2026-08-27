@@ -5,7 +5,7 @@
 
 use soroban_sdk::{Address, Env, String, Symbol};
 
-use crate::types::{BetRecord, ClaimReceipt, Outcome};
+use crate::types::{AuditEntry, BetRecord, ClaimReceipt, Outcome};
 
 /// Emits a `market_created` event when a new market is deployed.
 ///
@@ -165,6 +165,18 @@ pub fn emit_contract_upgraded(env: &Env, new_wasm_hash: soroban_sdk::BytesN<32>)
 pub fn emit_stale_reports_cleared(env: &Env, market_id: u64, cleared_count: u32) {
     let topics = (Symbol::new(env, "stale_reports_cleared"), market_id);
     env.events().publish(topics, cleared_count);
+}
+
+/// Emits an `audit_log_entry` event each time fees are successfully withdrawn.
+/// This event forms the basis of the immutable off-chain audit trail; every
+/// withdrawal that passes all guards is guaranteed to produce exactly one entry.
+///
+/// Topics: `(Symbol("audit_log_entry"), seq)`
+/// Data:   `AuditEntry`
+pub fn emit_audit_log_entry(env: &Env, entry: AuditEntry) {
+    let seq = entry.seq;
+    let topics = (Symbol::new(env, "audit_log_entry"), seq);
+    env.events().publish(topics, entry);
 }
 
 #[cfg(test)]

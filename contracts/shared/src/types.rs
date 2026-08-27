@@ -207,3 +207,31 @@ pub struct ClaimReceipt {
     pub fee_deducted: i128,
     pub claimed_at: u64,
 }
+
+// ─── Treasury Audit ───────────────────────────────────────────────────────────
+
+/// Immutable audit-log entry written to ledger storage every time fees are
+/// withdrawn.  Entries are keyed by a monotonically-increasing sequence number
+/// (`AUDIT_LOG_SEQ`) so they can never be overwritten.
+///
+/// The entry is stored in TEMPORARY storage (survives for `min_temp_entry_ttl`
+/// ledgers) and simultaneously emitted as an `audit_log_entry` event so
+/// off-chain indexers can capture it durably.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AuditEntry {
+    /// Monotonically-increasing sequence number (1-based).
+    pub seq: u64,
+    /// Stellar address of the admin who initiated the withdrawal.
+    pub admin: Address,
+    /// Token that was withdrawn.
+    pub token: Address,
+    /// Amount withdrawn in stroops.
+    pub amount: i128,
+    /// Destination address that received the tokens.
+    pub destination: Address,
+    /// Ledger timestamp when the withdrawal executed.
+    pub timestamp: u64,
+    /// Day bucket (timestamp / 86400) — matches the DAILY_WITHDRAWN key.
+    pub day_bucket: u64,
+}
