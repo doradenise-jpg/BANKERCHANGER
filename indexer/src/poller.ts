@@ -2,6 +2,7 @@ import { rpc, scValToNative } from '@stellar/stellar-sdk';
 import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice } from './db';
 import { updateLastLedger } from './health';
 import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
+import { broadcast } from './ws';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -335,36 +336,44 @@ export function processEvent(event: rpc.Api.EventResponse) {
     // and just { id } for status changes. This is dependent on contract implementation.
     
     if (eventType === 'submitted') {
+      const invoiceId = data.id;
       upsertInvoice({
-        id: data.id,
+        id: invoiceId,
         freelancer: data.freelancer || '',
         payer: data.payer || '',
         amount: data.amount || 0,
         due_date: data.dueDate || new Date().toISOString(),
         status: 'Pending'
       });
-      log('info', 'Processed event: submitted', { invoiceId: data.id });
+      log('info', 'Processed event: submitted', { invoiceId });
+      broadcast({ type: 'invoice.submitted', timestamp: new Date().toISOString(), data: { invoiceId } });
     } else if (eventType === 'funded') {
+      const invoiceId = data.id || data;
       upsertInvoice({
-        id: data.id || data,
+        id: invoiceId,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Funded'
       });
-      log('info', 'Processed event: funded', { invoiceId: data.id || data });
+      log('info', 'Processed event: funded', { invoiceId });
+      broadcast({ type: 'invoice.funded', timestamp: new Date().toISOString(), data: { invoiceId } });
     } else if (eventType === 'paid') {
+      const invoiceId = data.id || data;
       upsertInvoice({
-        id: data.id || data,
+        id: invoiceId,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Paid'
       });
-      log('info', 'Processed event: paid', { invoiceId: data.id || data });
+      log('info', 'Processed event: paid', { invoiceId });
+      broadcast({ type: 'invoice.paid', timestamp: new Date().toISOString(), data: { invoiceId } });
     } else if (eventType === 'defaulted') {
+      const invoiceId = data.id || data;
       upsertInvoice({
-        id: data.id || data,
+        id: invoiceId,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Defaulted'
       });
-      log('info', 'Processed event: defaulted', { invoiceId: data.id || data });
+      log('info', 'Processed event: defaulted', { invoiceId });
+      broadcast({ type: 'invoice.defaulted', timestamp: new Date().toISOString(), data: { invoiceId } });
     }
   } catch (err) {
     log('error', 'Failed to process event', {
