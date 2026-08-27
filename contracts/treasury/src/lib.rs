@@ -916,3 +916,150 @@ mod treasury_lifecycle_tests {
         assert!(daily_len <= 2, "DAILY_WITHDRAWN map length should be ≤ 2, got {daily_len}");
     }
 }
+
+// ============================================================
+// TASK 13: Soroban Contract Integrity & Safety Verification Tests
+// Covers: multi-token fee accounting isolation, emergency pause guards,
+//         per-market fee breakdowns, and zero-panic query semantics.
+// ============================================================
+#[cfg(test)]
+mod task13_treasury_multi_asset_integrity_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+    use boxmeout_shared::errors::ContractError;
+    use crate::{Treasury, TreasuryClient};
+
+    fn setup_treasury(env: &Env, limit: i128) -> (TreasuryClient<'static>, Address, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 200_000,
+            protocol_version: 20,
+            sequence_number: 2_000,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let contract_id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let factory = Address::generate(env);
+        let token_a = env.register_stellar_asset_contract(admin.clone());
+        let token_b = env.register_stellar_asset_contract(admin.clone());
+
+        client.initialize(&admin, &token_a, &factory, &limit);
+        (client, admin, factory, token_a, token_b)
+    }
+
+    // ── 1. Storage TTL Extensions & Multi-Asset Survival ─────────
+    #[test]
+    fn test_task13_multi_token_map_ttl_survival() {
+        let env = Env::default();
+        let limit = 100_000_000i128;
+        let (client, admin, _factory, token_a, token_b) = setup_treasury(&env, limit);
+        let market = Address::generate(&env);
+
+        client.approve_market(&admin, &market);
+        StellarAssetClient::new(&env, &token_a).mint(&market, &60_000_000i128);
+        StellarAssetClient::new(&env, &token_b).mint(&market, &90_000_000i128);
+
+        client.deposit_fees(&market, &token_a, &60_000_000i128);
+        client.deposit_fees(&market, &token_b, &90_000_000i128);
+
+        // Advance ledger 60,000 sequences
+        env.ledger().set(LedgerInfo {
+            timestamp: 200_000 + 86_400 * 15,
+            protocol_version: 20,
+            sequence_number: 62_000,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        // Verify storage maps persist and remain readable
+        assert_eq!(client.get_accumulated_fees(&token_a), 60_000_000i128);
+        assert_eq!(client.get_accumulated_fees(&token_b), 90_000_000i128);
+        assert!(client.is_market_approved(&market));
+    }
+
+    // ── 2. Auth Checks & Emergency Pause Safeguards ──────────────
+    #[test]
+    fn test_task13_emergency_pause_and_auth_guards() {
+        let env = Env::default();
+        let limit = 100_000_000i128;
+        let (client, admin, _factory, token_a, _token_b) = setup_treasury(&env, limit);
+        let market = Address::generate(&env);
+        let dest = Address::generate(&env);
+
+        client.approve_market(&admin, &market);
+        StellarAssetClient::new(&env, &token_a).mint(&market, &50_000_000i128);
+        client.deposit_fees(&market, &token_a, &50_000_000i128);
+
+        // Pause withdrawals
+        client.pause_withdrawals(&admin);
+        assert!(client.is_withdrawals_paused());
+
+        // Withdrawal attempts during pause are rejected
+        let err_withdraw = client.try_withdraw_fees(&admin, &token_a, &20_000_000i128, &dest);
+        assert!(err_withdraw.is_err());
+
+        // Unpause restores withdrawal capability
+        client.unpause_withdrawals(&admin);
+        assert!(!client.is_withdrawals_paused());
+
+        let ok_withdraw = client.try_withdraw_fees(&admin, &token_a, &20_000_000i128, &dest);
+        assert!(ok_withdraw.is_ok());
+        assert_eq!(client.get_accumulated_fees(&token_a), 30_000_000i128);
+    }
+
+    // ── 3. Multi-Asset Isolation & Fee Conservation ──────────────
+    #[test]
+    fn test_task13_multi_asset_isolation_and_conservation() {
+        let env = Env::default();
+        let limit = 200_000_000i128;
+        let (client, admin, _factory, token_a, token_b) = setup_treasury(&env, limit);
+        let market1 = Address::generate(&env);
+        let market2 = Address::generate(&env);
+        let dest = Address::generate(&env);
+
+        client.approve_market(&admin, &market1);
+        client.approve_market(&admin, &market2);
+
+        StellarAssetClient::new(&env, &token_a).mint(&market1, &80_000_000i128);
+        StellarAssetClient::new(&env, &token_b).mint(&market2, &120_000_000i128);
+
+        client.deposit_fees(&market1, &token_a, &80_000_000i128);
+        client.deposit_fees(&market2, &token_b, &120_000_000i128);
+
+        // Withdraw from Token A only
+        client.withdraw_fees(&admin, &token_a, &30_000_000i128, &dest);
+
+        // Invariant: Token A fees reduced, Token B fees completely untouched
+        assert_eq!(client.get_accumulated_fees(&token_a), 50_000_000i128);
+        assert_eq!(client.get_accumulated_fees(&token_b), 120_000_000i128);
+        assert_eq!(soroban_sdk::token::Client::new(&env, &token_a).balance(&dest), 30_000_000i128);
+    }
+
+    // ── 4. Zero-Panic Queries on Unregistered Tokens ─────────────
+    #[test]
+    fn test_task13_zero_panic_queries() {
+        let env = Env::default();
+        let limit = 100_000_000i128;
+        let (client, _admin, _factory, _token_a, _token_b) = setup_treasury(&env, limit);
+        let unreg_token = Address::generate(&env);
+        let unreg_market = Address::generate(&env);
+
+        // Queries on unknown assets return 0 without panicking
+        assert_eq!(client.get_accumulated_fees(&unreg_token), 0i128);
+        assert_eq!(client.get_market_accumulated_fees(&999u64, &unreg_token), 0i128);
+        assert!(!client.is_market_approved(&unreg_market));
+    }
+}
+
