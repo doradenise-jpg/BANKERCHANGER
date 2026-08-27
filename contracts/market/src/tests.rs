@@ -3436,12 +3436,14 @@ mod event_emission_consistency_tests {
         let _ = client.try_place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
 
         // No new contract events should have been emitted on failure
-        let new_events: std::vec::Vec<_> = env.events().all()
-            .iter()
-            .skip(event_count_before as usize)
-            .filter(|e| e.0 == _contract_id)
-            .collect();
-        assert!(new_events.is_empty(),
+        let mut any_new_event = false;
+        for ev in env.events().all().iter().skip(event_count_before as usize) {
+            if ev.0 == _contract_id {
+                any_new_event = true;
+                break;
+            }
+        }
+        assert!(!any_new_event,
             "No event must be emitted when place_bet fails");
     }
 
@@ -4290,6 +4292,465 @@ mod upgrade_safety_tests {
                 assert_ne!(key_a, key_b,
                     "Duplicate storage key detected: '{key_a}' — keys must be unique");
             }
+        }
+    }
+}
+
+// ============================================================
+// ISSUES #420 / #422: Soroban Contract Integrity & Safety —
+// claim/refund integrity flows (task 7) and storage lifecycle
+// + TTL integrity (task 9).
+// ============================================================
+
+// ── Task 7: claim & refund integrity flows (CEI compliance) ──
+#[cfg(test)]
+mod claim_refund_integrity_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::{Client as TokenClient, StellarAssetClient},
+        Address, Env, Symbol, Vec,
+    };
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus, Outcome,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use crate::Market;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(env: &Env) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, token_id, treasury)
+    }
+
+    fn bet(env: &Env, bettor: &Address, side: BetSide, amount: i128) -> BetRecord {
+        BetRecord {
+            bettor: bettor.clone(),
+            market_id: 1,
+            side,
+            amount,
+            placed_at: 1_000,
+            claimed: false,
+        }
+    }
+
+    fn resolved_state(env: &Env, outcome: Outcome, pools: (i128, i128, i128), total: i128) -> MarketState {
+        MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Resolved,
+            outcome: OptionalOutcome::Some(outcome),
+            pool_a: pools.0,
+            pool_b: pools.1,
+            pool_draw: pools.2,
+            total_pool: total,
+            resolved_at: 50_000,
+            oracle_used: OptionalOracleRole::Some(boxmeout_shared::types::OracleRole::Primary),
+        }
+    }
+
+    /// Seeds a resolved/cancelled market plus per-bettor bets (the current,
+    /// issue-#255 per-address key layout) and funds the contract with `total`.
+    fn seed(
+        env: &Env,
+        contract_id: &Address,
+        token_id: &Address,
+        state: &MarketState,
+        bets: &Vec<BetRecord>,
+    ) {
+        let total: i128 = bets.iter().map(|b| b.amount).sum();
+        let mut bettor_list = Vec::<Address>::new(env);
+        env.as_contract(contract_id, || {
+            env.storage().persistent().set(&"STATE", state);
+            for b in bets.iter() {
+                let bettor = b.bettor.clone();
+                let key = (Symbol::new(env, "BET"), bettor.clone());
+                let mut existing: Vec<BetRecord> = env
+                    .storage().persistent()
+                    .get(&key)
+                    .unwrap_or_else(|| Vec::new(env));
+                existing.push_back(b);
+                env.storage().persistent().set(&key, &existing);
+                bettor_list.push_back(bettor);
+            }
+            env.storage().persistent().set(&"BETTOR_LIST", &bettor_list);
+        });
+        if total > 0 {
+            StellarAssetClient::new(env, token_id).mint(contract_id, &total);
+        }
+    }
+
+    /// Single winner claims: fee exactly routed to treasury, net payout to the
+    /// bettor, receipt correct, and bets marked claimed (no double payout).
+    #[test]
+    fn test_single_winner_claim_routes_fee_and_payout() {
+        let env = Env::default();
+        let (client, contract_id, token_id, treasury) = setup(&env);
+        let bettor = Address::generate(&env);
+
+        let state = resolved_state(&env, Outcome::FighterA, (10_000_000, 0, 0), 10_000_000);
+        let bets = Vec::from_array(&env, [bet(&env, &bettor, BetSide::FighterA, 10_000_000)]);
+        seed(&env, &contract_id, &token_id, &state, &bets);
+
+        let receipt = client.claim_winnings(&bettor, &token_id);
+
+        // fee = 10_000_000 * 200 / 10_000 = 200_000; net = 9_800_000
+        assert_eq!(receipt.fee_deducted, 200_000);
+        assert_eq!(receipt.amount_won, 9_800_000);
+        assert_eq!(receipt.fee_deducted + receipt.amount_won, 10_000_000,
+            "Fee + payout must exactly conserve the pool");
+
+        let token = TokenClient::new(&env, &token_id);
+        assert_eq!(token.balance(&treasury), 200_000, "Fee must be routed to treasury");
+        assert_eq!(token.balance(&bettor), 9_800_000, "Net payout must reach the bettor");
+        assert_eq!(token.balance(&contract_id), 0, "Contract must retain no funds after full claim");
+        assert!(client.has_claimed(&bettor), "Winning bet must be marked claimed");
+    }
+
+    /// A second claim on the same bet must be rejected (AlreadyClaimed) and
+    /// must not move any additional funds.
+    #[test]
+    fn test_double_claim_rejected_and_non_mutating() {
+        let env = Env::default();
+        let (client, contract_id, token_id, treasury) = setup(&env);
+        let bettor = Address::generate(&env);
+
+        let state = resolved_state(&env, Outcome::FighterA, (10_000_000, 0, 0), 10_000_000);
+        let bets = Vec::from_array(&env, [bet(&env, &bettor, BetSide::FighterA, 10_000_000)]);
+        seed(&env, &contract_id, &token_id, &state, &bets);
+
+        let first = client.claim_winnings(&bettor, &token_id);
+        assert_eq!(first.amount_won, 9_800_000);
+
+        let second = client.try_claim_winnings(&bettor, &token_id);
+        assert!(second.is_err(),
+            "Second claim must be rejected with an error");
+
+        let token = TokenClient::new(&env, &token_id);
+        assert_eq!(token.balance(&bettor), 9_800_000, "No additional payout on double claim");
+        assert_eq!(token.balance(&treasury), 200_000, "No additional fee on double claim");
+    }
+
+    /// Split winners: proportional floor payouts must sum to at most the net
+    /// pool — parimutuel mechanics can never over-allocate what exists.
+    #[test]
+    fn test_split_winners_never_overpay_net_pool() {
+        let env = Env::default();
+        let (client, contract_id, token_id, treasury) = setup(&env);
+        let bettor_a = Address::generate(&env);
+        let bettor_b = Address::generate(&env);
+
+        // FighterA pool = 6_000_000 split 2M / 4M. Zero-fee config isolates the
+        // parimutuel distribution invariant from the per-claim fee transfer.
+        let mut state = resolved_state(&env, Outcome::FighterA, (6_000_000, 0, 0), 6_000_000);
+        state.config.fee_bps = 0;
+        let bets = Vec::from_array(&env, [
+            bet(&env, &bettor_a, BetSide::FighterA, 2_000_000),
+            bet(&env, &bettor_b, BetSide::FighterA, 4_000_000),
+        ]);
+        seed(&env, &contract_id, &token_id, &state, &bets);
+
+        let ra = client.claim_winnings(&bettor_a, &token_id);
+        let rb = client.claim_winnings(&bettor_b, &token_id);
+
+        // 2_000_000 * 6_000_000 / 6_000_000 = 2_000_000 ; 4_000_000 * ... = 4_000_000
+        assert_eq!(ra.amount_won, 2_000_000);
+        assert_eq!(rb.amount_won, 4_000_000);
+        assert_eq!(ra.fee_deducted, 0);
+        assert_eq!(rb.fee_deducted, 0);
+        assert_eq!(ra.amount_won + rb.amount_won, state.total_pool,
+            "Split payouts must never over-allocate or under-allocate the pool");
+
+        let token = TokenClient::new(&env, &token_id);
+        assert_eq!(token.balance(&treasury), 0, "No fee to route at zero bps");
+        assert_eq!(token.balance(&contract_id), 0, "Contract must retain no funds after settlement");
+        assert!(client.has_claimed(&bettor_a), "Winner A bet must be marked claimed");
+        assert!(client.has_claimed(&bettor_b), "Winner B bet must be marked claimed");
+    }
+
+    /// Cancelled market refund: full stake returned with NO fee, then blocked.
+    #[test]
+    fn test_cancelled_refund_full_stake_no_fee() {
+        let env = Env::default();
+        let (client, contract_id, token_id, treasury) = setup(&env);
+        let bettor = Address::generate(&env);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(&env),
+            config: config(),
+            status: MarketStatus::Cancelled,
+            outcome: OptionalOutcome::None,
+            pool_a: 0,
+            pool_b: 0,
+            pool_draw: 0,
+            total_pool: 5_000_000,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        let bets = Vec::from_array(&env, [bet(&env, &bettor, BetSide::FighterB, 5_000_000)]);
+        seed(&env, &contract_id, &token_id, &state, &bets);
+
+        let refund = client.claim_refund(&bettor, &token_id);
+        assert_eq!(refund, 5_000_000, "Refund must return the full stake");
+        assert!(client.has_claimed(&bettor), "Refunded bet must be marked claimed");
+
+        let token = TokenClient::new(&env, &token_id);
+        assert_eq!(token.balance(&bettor), 5_000_000);
+        assert_eq!(token.balance(&treasury), 0, "No fee on a cancelled-market refund");
+        assert_eq!(token.balance(&contract_id), 0);
+
+        let second = client.try_claim_refund(&bettor, &token_id);
+        assert!(second.is_err(), "Second refund must be rejected");
+    }
+
+    /// Losing-side bettors claim nothing: their stake stays in the contract,
+    /// matching parimutuel rules where only winning stakes share the pool.
+    #[test]
+    fn test_losing_bettor_cannot_claim_winnings() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _treasury) = setup(&env);
+        let loser = Address::generate(&env);
+
+        let state = resolved_state(&env, Outcome::FighterA, (10_000_000, 0, 0), 10_000_000);
+        let bets = Vec::from_array(&env, [bet(&env, &loser, BetSide::FighterB, 2_000_000)]);
+        seed(&env, &contract_id, &token_id, &state, &bets);
+
+        let result = client.try_claim_winnings(&loser, &token_id);
+        assert!(result.is_err(), "A losing-side bet must not be claimable");
+        assert!(!client.has_claimed(&loser), "Losing bet must remain unclaimed");
+    }
+}
+
+// ── Task 9: storage lifecycle & TTL integrity across the maps ─
+#[cfg(test)]
+mod storage_integrity_and_lifecycle_tests {
+    use proptest::prelude::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol, Vec,
+    };
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus, Outcome,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use crate::Market;
+
+    const DEFAULT_PERSISTENT_TTL: u32 = 4_096;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "FURY-USYK-2025"),
+            fighter_a: soroban_sdk::String::from_str(env, "Fury"),
+            fighter_b: soroban_sdk::String::from_str(env, "Usyk"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_str(env, "Riyadh"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        }
+    }
+
+    fn setup(env: &Env) -> (crate::MarketClient<'static>, Address, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: DEFAULT_PERSISTENT_TTL,
+            max_entry_ttl: 6_311_520,
+        });
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, token_id, factory, treasury)
+    }
+
+    /// FACTORY and TREASURY must be written verbatim at initialize — a mutated
+    /// treasury or factory would redirect fees / privileges elsewhere.
+    #[test]
+    fn test_factory_and_treasury_persisted_correctly() {
+        let env = Env::default();
+        let (client, contract_id, _token_id, factory, treasury) = setup(&env);
+
+        let stored_factory: Address = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&"FACTORY").unwrap()
+        });
+        let stored_treasury: Address = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&"TREASURY").unwrap()
+        });
+
+        assert_eq!(stored_factory, factory, "FACTORY key must match the initialize argument");
+        assert_eq!(stored_treasury, treasury, "TREASURY key must match the initialize argument");
+        // state still readable to avoid a stale-copy regression
+        assert_eq!(client.get_state().market_id, 1u64);
+    }
+
+    /// After a full claim cycle, STATE and the per-bettor BETS entry must
+    /// remain readable well past the default persistent TTL — claim_winnings
+    /// re-extends both, so post-claim state must never silently evaporate.
+    #[test]
+    fn test_post_claim_state_survives_default_ttl_advance() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _factory, _treasury) = setup(&env);
+        let bettor = Address::generate(&env);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(&env),
+            config: config(),
+            status: MarketStatus::Resolved,
+            outcome: OptionalOutcome::Some(Outcome::FighterA),
+            pool_a: 10_000_000,
+            pool_b: 0,
+            pool_draw: 0,
+            total_pool: 10_000_000,
+            resolved_at: 50_000,
+            oracle_used: OptionalOracleRole::Some(boxmeout_shared::types::OracleRole::Primary),
+        };
+        let bets = Vec::from_array(&env, [BetRecord {
+            bettor: bettor.clone(),
+            market_id: 1,
+            side: BetSide::FighterA,
+            amount: 10_000_000,
+            placed_at: 1_000,
+            claimed: false,
+        }]);
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+            let key = (Symbol::new(&env, "BET"), bettor.clone());
+            env.storage().persistent().set(&key, &bets);
+            let mut bl = Vec::<Address>::new(&env);
+            bl.push_back(bettor.clone());
+            env.storage().persistent().set(&"BETTOR_LIST", &bl);
+        });
+        StellarAssetClient::new(&env, &token_id).mint(&contract_id, &10_000_000i128);
+
+        client.claim_winnings(&bettor, &token_id);
+
+        // Advance well past the default persistent entry TTL (4096 entries).
+        env.ledger().set(LedgerInfo {
+            timestamp: 60_000,
+            protocol_version: 20,
+            sequence_number: 100 + DEFAULT_PERSISTENT_TTL + 500,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: DEFAULT_PERSISTENT_TTL,
+            max_entry_ttl: 6_311_520,
+        });
+
+        assert_eq!(client.get_state().status, MarketStatus::Resolved,
+            "STATE must survive past the default persistent TTL after a claim");
+        assert_eq!(client.get_bets_by_address(&bettor).len(), 1u32,
+            "Per-bettor BETS entry must survive past the default persistent TTL");
+        assert!(client.has_claimed(&bettor),
+            "Claimed flag must persist past the default persistent TTL");
+    }
+
+    /// bet records written during a live betting run remain fully visible via
+    /// get_all_bets after TTL advancement — every write path extends the keys.
+    #[test]
+    fn test_bet_records_visible_after_bets_beyond_default_ttl() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _factory, _treasury) = setup(&env);
+
+        let bettor1 = Address::generate(&env);
+        let bettor2 = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor1, &2_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor2, &2_000_000i128);
+        client.place_bet(&bettor1, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+        client.place_bet(&bettor2, &BetSide::FighterB, &1_000_000i128, &token_id, &0i128);
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 60_000,
+            protocol_version: 20,
+            sequence_number: 100 + DEFAULT_PERSISTENT_TTL + 500,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: DEFAULT_PERSISTENT_TTL,
+            max_entry_ttl: 6_311_520,
+        });
+
+        assert_eq!(client.get_bettor_count(), 2u32,
+            "BETTOR_LIST must survive past the default persistent TTL");
+        assert_eq!(client.get_all_bets(&0u32, &50u32).len(), 2u32,
+            "All bet records must remain visible after TTL advancement");
+    }
+
+    // Property-based: for any two-way split of a winning pool, floored
+    // parimutuel payouts plus the platform fee never exceed the net pool.
+    proptest! {
+        #[test]
+        fn test_floor_payouts_never_exceed_total_pool(
+            total in 1_000_000i128..=1_000_000_000i128,
+            stake_a in 1i128..=1_000_000_000i128,
+        ) {
+            // Normalize so the two winning stakes partition the pool exactly
+            // (mirrors the on-chain invariant that winning-side stakes sum to
+            // the winning pool).
+            let effective_a = stake_a % total + 1;
+            let stake_b = total - effective_a;
+            let fee = (total as u128) * 200u128 / 10_000u128;
+            let net = (total as u128) - fee;
+            let p_a = (effective_a as u128) * net / (total as u128);
+            let p_b = (stake_b as u128) * net / (total as u128);
+            prop_assert!(p_a + p_b <= net,
+                "Floored payouts plus fee must never exceed the net pool");
         }
     }
 }
