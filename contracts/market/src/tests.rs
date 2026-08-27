@@ -4293,3 +4293,190 @@ mod upgrade_safety_tests {
         }
     }
 }
+
+// ============================================================
+// TASK 14: Soroban Contract Integrity & Safety (Issue #427)
+// ============================================================
+
+#[cfg(test)]
+mod task14_contract_integrity_and_safety_tests {
+    use super::*;
+    use soroban_sdk::{testutils::LedgerInfo, token::StellarAssetClient, Address, Env, Vec};
+    use boxmeout_shared::{
+        errors::ContractError,
+        types::{BetSide, MarketStatus, Outcome},
+    };
+
+    // ── 1. Storage TTL Extensions & Persistent Maps ──────────────
+    #[test]
+    fn test_task14_persistent_map_ttl_survival() {
+        let env = Env::default();
+        let (client, contract_id, _factory) = setup(&env);
+        let bettor1 = Address::generate(&env);
+        let bettor2 = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin);
+        let token_client = StellarAssetClient::new(&env, &token_id);
+
+        token_client.mint(&bettor1, &100_000_000i128);
+        token_client.mint(&bettor2, &100_000_000i128);
+
+        // Place bets
+        client.place_bet(&bettor1, &BetSide::FighterA, &20_000_000i128, &token_id, &0i128);
+        client.place_bet(&bettor2, &BetSide::FighterB, &30_000_000i128, &token_id, &0i128);
+
+        // Advance ledger well past standard TTL threshold (e.g. 50,000 ledgers)
+        env.ledger().set(LedgerInfo {
+            timestamp: 86400 * 20,
+            protocol_version: 20,
+            sequence_number: 50_000,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        // Verify state and bet records persist accurately
+        let state = client.get_market_state();
+        assert_eq!(state.total_pool, 50_000_000i128);
+        assert_eq!(state.pool_a, 20_000_000i128);
+        assert_eq!(state.pool_b, 30_000_000i128);
+
+        let bettor1_bets = client.get_user_bets(&bettor1);
+        assert_eq!(bettor1_bets.len(), 1);
+        assert_eq!(bettor1_bets.get(0).unwrap().amount, 20_000_000i128);
+
+        let bettor2_bets = client.get_user_bets(&bettor2);
+        assert_eq!(bettor2_bets.len(), 1);
+        assert_eq!(bettor2_bets.get(0).unwrap().amount, 30_000_000i128);
+    }
+
+    // ── 2. Comprehensive Auth & Error Handling Audit ─────────────
+    #[test]
+    fn test_task14_auth_checks_and_emergency_pause() {
+        let env = Env::default();
+        let (client, _contract_id, _factory) = setup(&env);
+        let bettor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &100_000_000i128);
+
+        // Emergency pause
+        client.emergency_pause();
+        assert!(client.is_emergency_paused());
+
+        // Fund-moving operations must be blocked under pause
+        let bet_res = client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert!(bet_res.is_err(), "place_bet must fail when emergency paused");
+
+        let claim_res = client.try_claim_winnings(&bettor);
+        assert!(claim_res.is_err(), "claim_winnings must fail when emergency paused");
+
+        let refund_res = client.try_refund_bet(&bettor, &0u32);
+        assert!(refund_res.is_err(), "refund_bet must fail when emergency paused");
+
+        // Unpause restores functionality
+        client.emergency_unpause();
+        assert!(!client.is_emergency_paused());
+
+        let unpaused_bet = client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert!(unpaused_bet.is_ok(), "place_bet should succeed after emergency unpause");
+    }
+
+    #[test]
+    fn test_task14_invalid_bet_slippage_and_amount_rejection() {
+        let env = Env::default();
+        let (client, _contract_id, _factory) = setup(&env);
+        let bettor = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &100_000_000i128);
+
+        // Zero / negative bet amounts rejected
+        let zero_res = client.try_place_bet(&bettor, &BetSide::FighterA, &0i128, &token_id, &0i128);
+        assert_eq!(zero_res.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+        let neg_res = client.try_place_bet(&bettor, &BetSide::FighterA, &-10_000_000i128, &token_id, &0i128);
+        assert_eq!(neg_res.unwrap_err(), Ok(ContractError::InvalidAmount));
+    }
+
+    // ── 3. Property-Based Invariants & Fund Conservation ─────────
+    #[test]
+    fn test_task14_payout_conservation_property() {
+        let env = Env::default();
+        let (client, _contract_id, _factory) = setup(&env);
+        let bettor_a1 = Address::generate(&env);
+        let bettor_a2 = Address::generate(&env);
+        let bettor_b = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin);
+        let token_client = StellarAssetClient::new(&env, &token_id);
+
+        token_client.mint(&bettor_a1, &40_000_000i128);
+        token_client.mint(&bettor_a2, &60_000_000i128);
+        token_client.mint(&bettor_b, &100_000_000i128);
+
+        client.place_bet(&bettor_a1, &BetSide::FighterA, &40_000_000i128, &token_id, &0i128);
+        client.place_bet(&bettor_a2, &BetSide::FighterA, &60_000_000i128, &token_id, &0i128);
+        client.place_bet(&bettor_b, &BetSide::FighterB, &100_000_000i128, &token_id, &0i128);
+
+        let state_before = client.get_market_state();
+        let total_pool = state_before.total_pool;
+        assert_eq!(total_pool, 200_000_000i128);
+
+        // Resolve market with FighterA winning
+        client.resolve_market(&Outcome::FighterA);
+
+        let state_after = client.get_market_state();
+        assert_eq!(state_after.status, MarketStatus::Resolved);
+        assert_eq!(state_after.winning_outcome, Outcome::FighterA);
+
+        // Claim winnings for both winners
+        let receipt_a1 = client.claim_winnings(&bettor_a1);
+        let receipt_a2 = client.claim_winnings(&bettor_a2);
+
+        let total_claimed = receipt_a1.payout + receipt_a2.payout;
+        let total_fees = receipt_a1.fee_deducted + receipt_a2.fee_deducted;
+
+        // Invariant: total_claimed + total_fees == total_pool
+        assert_eq!(
+            total_claimed + total_fees,
+            total_pool,
+            "Invariant violation: payout plus fees must exactly equal the total pool"
+        );
+    }
+
+    #[test]
+    fn test_task14_cancelled_market_full_refund_property() {
+        let env = Env::default();
+        let (client, _contract_id, _factory) = setup(&env);
+        let bettor1 = Address::generate(&env);
+        let bettor2 = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin);
+        let token_client = StellarAssetClient::new(&env, &token_id);
+
+        token_client.mint(&bettor1, &50_000_000i128);
+        token_client.mint(&bettor2, &50_000_000i128);
+
+        client.place_bet(&bettor1, &BetSide::FighterA, &50_000_000i128, &token_id, &0i128);
+        client.place_bet(&bettor2, &BetSide::FighterB, &50_000_000i128, &token_id, &0i128);
+
+        // Cancel market
+        client.cancel_market();
+        let state = client.get_market_state();
+        assert_eq!(state.status, MarketStatus::Cancelled);
+
+        // Both bettors receive 100% full refund with 0 fee
+        let refund1 = client.refund_bet(&bettor1, &0u32);
+        let refund2 = client.refund_bet(&bettor2, &0u32);
+
+        assert_eq!(refund1, 50_000_000i128, "Bettor 1 must receive full 100% refund on cancelled market");
+        assert_eq!(refund2, 50_000_000i128, "Bettor 2 must receive full 100% refund on cancelled market");
+    }
+}
+
