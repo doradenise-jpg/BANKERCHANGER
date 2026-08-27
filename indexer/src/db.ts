@@ -81,13 +81,39 @@ export async function getCursor(): Promise<string | null> {
   }
 }
 
-export async function saveCursor(pagingToken: string): Promise<void> {
+export async function saveCursor(pagingToken: string, lastLedger?: number): Promise<void> {
   try {
-    const cursorData = { paging_token: pagingToken, updated_at: new Date().toISOString() };
+    // Preserve lastLedger from a prior save when the caller doesn't supply one,
+    // so cursor and ledger-continuity tracking never drift apart on partial writes.
+    let existingLedger: number | undefined;
+    if (lastLedger === undefined) {
+      existingLedger = (await getLastKnownLedger()) ?? undefined;
+    }
+
+    const cursorData = {
+      paging_token: pagingToken,
+      last_ledger: lastLedger ?? existingLedger ?? null,
+      updated_at: new Date().toISOString(),
+    };
     await fs.writeFile(cursorFilePath, JSON.stringify(cursorData, null, 2), 'utf-8');
   } catch (err) {
     console.error('Error saving cursor to file:', err);
     throw err;
+  }
+}
+
+/** Last ledger sequence that was successfully processed and persisted, used to detect re-orgs and gaps across restarts. */
+export async function getLastKnownLedger(): Promise<number | null> {
+  try {
+    const data = await fs.readFile(cursorFilePath, 'utf-8');
+    const parsed = JSON.parse(data);
+    return typeof parsed.last_ledger === 'number' ? parsed.last_ledger : null;
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return null;
+    }
+    console.error('Error reading last known ledger from file:', err);
+    return null;
   }
 }
 

@@ -1,6 +1,7 @@
 import { rpc, scValToNative } from '@stellar/stellar-sdk';
-import { getCursor, saveCursor, upsertInvoice } from './db';
+import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice } from './db';
 import { updateLastLedger } from './health';
+import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,6 +23,10 @@ interface PollerHealth {
   lastErrorAt: string | null;
   lastSuccessfulPollAt: string | null;
   eventsProcessed: number;
+  reorgsDetected: number;
+  lastReorgAt: string | null;
+  ledgerGapsDetected: number;
+  lastLedgerGapAt: string | null;
 }
 
 let pollerHealth: PollerHealth = {
@@ -31,6 +36,10 @@ let pollerHealth: PollerHealth = {
   lastErrorAt: null,
   lastSuccessfulPollAt: null,
   eventsProcessed: 0,
+  reorgsDetected: 0,
+  lastReorgAt: null,
+  ledgerGapsDetected: 0,
+  lastLedgerGapAt: null,
 };
 
 export function getPollerHealth(): PollerHealth {
@@ -74,6 +83,12 @@ export async function pollEvents() {
   pollerHealth.isRunning = true;
 
   let cursor = (await getCursor()) || '';
+  // Last ledger sequence we successfully processed, used to detect re-orgs
+  // (ledger sequence moving backward) and gaps (skipped sequences) across polls.
+  let lastProcessedLedger: number | null = await getLastKnownLedger();
+  // Set when a re-org is detected; forces the next request to resync from a
+  // safe ledger instead of trusting the (possibly now-invalid) cursor.
+  let pendingResyncLedger: number | null = null;
 
   // ── Graceful shutdown handlers ──────────────────────────────────────────
   // Save cursor before exit to avoid re-processing events on restart
@@ -98,8 +113,17 @@ export async function pollEvents() {
   // Recursive async loop with exponential backoff
   async function pollLoop(): Promise<void> {
     try {
+      // A pending resync (set after a re-org) always takes priority over the
+      // persisted cursor, since the cursor may point past ledgers that no
+      // longer exist on the canonical chain.
+      const resyncLedger = pendingResyncLedger;
+      pendingResyncLedger = null;
+      if (resyncLedger !== null) {
+        cursor = '';
+      }
+
       // Build request with proper typing (use any to bypass strict filter type checking)
-      const request: any = cursor
+      const request: any = (cursor && resyncLedger === null)
         ? {
             cursor,
             filters: [
@@ -112,7 +136,7 @@ export async function pollEvents() {
             limit: 100
           }
         : {
-            startLedger: await getLatestLedger(),
+            startLedger: resyncLedger ?? (await getLatestLedger()),
             filters: [
               {
                 type: 'contract',
@@ -127,6 +151,7 @@ export async function pollEvents() {
       let paginationCursor = cursor || '';
       let totalEventsProcessed = 0;
       let hasMore = true;
+      let reorgTriggered = false;
 
       while (hasMore) {
         // Build paginated request
@@ -156,13 +181,54 @@ export async function pollEvents() {
         // Process all events on this page
         if (response.events && response.events.length > 0) {
           for (const event of response.events) {
+            const eventLedger = event.ledger;
+
+            if (eventLedger) {
+              const anomaly = detectLedgerAnomaly(eventLedger, lastProcessedLedger);
+
+              if (anomaly.type === 'reorg') {
+                pollerHealth.reorgsDetected++;
+                pollerHealth.lastReorgAt = new Date().toISOString();
+                log('warn', 'Ledger re-org detected; discarding cursor and re-syncing from a safe ledger', {
+                  lastProcessedLedger: anomaly.fromLedger,
+                  incomingEventLedger: anomaly.toLedger,
+                });
+                // Don't trust or process events from a superseded ledger view.
+                // Rewind and let the next poll iteration re-fetch canonical events.
+                pendingResyncLedger = computeResyncStartLedger(anomaly.fromLedger);
+                reorgTriggered = true;
+                break;
+              }
+
+              if (anomaly.type === 'gap') {
+                pollerHealth.ledgerGapsDetected++;
+                pollerHealth.lastLedgerGapAt = new Date().toISOString();
+                log('warn', 'Missing ledger sequence(s) detected between polls', {
+                  fromLedger: anomaly.fromLedger,
+                  toLedger: anomaly.toLedger,
+                  missingCount: anomaly.missingCount,
+                });
+              }
+            }
+
             processEvent(event);
-            // Update last ledger from event
-            if (event.ledger) {
-              updateLastLedger(event.ledger);
+
+            if (eventLedger) {
+              lastProcessedLedger = eventLedger;
+              updateLastLedger(eventLedger);
             }
           }
-          totalEventsProcessed += response.events.length;
+
+          if (!reorgTriggered) {
+            totalEventsProcessed += response.events.length;
+          }
+        }
+
+        if (reorgTriggered) {
+          // Skip cursor persistence entirely this round; pendingResyncLedger
+          // drives the next iteration's request instead.
+          hasMore = false;
+          break;
         }
 
         // Check if there are more pages using paging_token (the cursor field)
@@ -177,7 +243,7 @@ export async function pollEvents() {
           // Only advance main cursor when all pages are consumed
           const oldCursor = cursor;
           cursor = response.cursor || pagingToken || '';
-          await saveCursor(cursor);
+          await saveCursor(cursor, lastProcessedLedger ?? undefined);
           pollerHealth.eventsProcessed += totalEventsProcessed;
 
           if (totalEventsProcessed > 0) {
