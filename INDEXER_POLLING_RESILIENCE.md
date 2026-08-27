@@ -9,6 +9,10 @@ The indexer's event polling was fragile and susceptible to permanent data loss:
 3. **Cursor advanced on failure** – If RPC fails after advancing cursor, events are lost
 4. **No retry mechanism** – Failed polls abandoned immediately
 5. **No health visibility** – No way to detect polling failures in production
+6. **No re-org handling** – A ledger sequence moving backward (re-org) or a gap in
+   processed sequences was indistinguishable from normal operation
+7. **No real-time visibility** – Consumers had to poll the REST API to notice new
+   invoice state; there was no way to subscribe to ingestion as it happened
 
 ### Consequences
 
@@ -16,6 +20,8 @@ The indexer's event polling was fragile and susceptible to permanent data loss:
 - No monitoring/alerting for polling failures
 - Events indexing unreliable during network issues
 - Silent data loss with no visibility
+- A re-org could silently corrupt invoice state derived from now-invalid events
+- Downstream consumers polled aggressively just to approximate real-time updates
 
 ## Solution
 
@@ -210,15 +216,63 @@ log('error', 'Poll failed, scheduling retry', {
 - `200 OK` – Poller running, can index events
 - `503 Service Unavailable` – Poller stopped, data loss risk
 
+### 7. Re-org and Missing Ledger Sequence Handling (`indexer/src/ledgerContinuity.ts`)
+
+The poller now tracks the last ledger sequence it successfully processed
+(persisted alongside the cursor in `cursor.json`) and compares it against
+each incoming event's ledger:
+
+- **Re-org** – the incoming event's ledger is *behind* the last processed
+  ledger. The poller discards the current cursor and resumes from
+  `lastProcessedLedger - REORG_REWIND_LEDGERS` (5 ledgers), so any events
+  invalidated by the re-org get safely re-ingested via the existing
+  idempotent `upsertInvoice` logic.
+- **Gap** – the incoming event's ledger jumps ahead by more than one
+  sequence. Logged and counted via `pollerHealth.ledgerGapsDetected`; a
+  single skipped ledger (no matching events) is not treated as a gap.
+
+Both conditions are exposed on `/health` (`reorgsDetected`, `lastReorgAt`,
+`ledgerGapsDetected`, `lastLedgerGapAt`) and broadcast over the WebSocket
+stream as `poller.reorg_detected`.
+
+### 8. Real-Time WebSocket Event Stream (`indexer/src/ws.ts`)
+
+Clients can subscribe to `ws://<host>:<port>/ws` instead of polling the REST
+API. On connect they receive a `connected` message; after that, every
+processed contract event is pushed as it's ingested:
+
+```json
+{ "type": "invoice.funded", "timestamp": "...", "data": { "invoiceId": "INV-1" } }
+```
+
+Degraded-state signals are streamed too: `poller.reorg_detected` and
+`poller.retry_scheduled` (emitted whenever a failed poll schedules a
+backoff retry), so consumers see resilience events live rather than only by
+polling `/health`.
+
+### 9. Configurable Backoff (`indexer/src/backoff.ts`)
+
+Backoff parameters were extracted into a standalone module and made tunable
+via environment variables, since a fixed 1s–5min curve isn't right for
+every RPC provider:
+
+```bash
+POLLER_MIN_BACKOFF_MS=1000
+POLLER_MAX_BACKOFF_MS=300000
+POLLER_BACKOFF_MULTIPLIER=2
+```
+
+Invalid or missing values fall back to the defaults above.
+
 ## Configuration
 
 ### Exponential Backoff Tuning
 
-Edit `indexer/src/poller.ts`:
-```typescript
-const MIN_BACKOFF_MS = 1000;              // Start: 1s
-const MAX_BACKOFF_MS = 5 * 60 * 1000;    // Cap: 5min
-const BACKOFF_MULTIPLIER = 2;            // Double each time
+Set via environment variables (see `indexer/.env.example`):
+```bash
+POLLER_MIN_BACKOFF_MS=1000        # Start: 1s
+POLLER_MAX_BACKOFF_MS=300000      # Cap: 5min
+POLLER_BACKOFF_MULTIPLIER=2       # Double each time
 ```
 
 ### Docker Health Check
@@ -266,23 +320,45 @@ done
 ✓ Events missed during RPC outage are replayed after recovery
 ✓ No more permanent data loss from transient failures
 ✓ Clear visibility into poller health via `/health` endpoint
-✓ Automatic recovery with exponential backoff
+✓ Automatic recovery with exponential backoff, tunable per environment
 ✓ Structured logging for log aggregation and alerts
 ✓ Monitoring-friendly status codes and metrics
+✓ Re-orgs and missing ledger sequences are detected and recovered from
+  instead of silently corrupting or losing state
+✓ Consumers can subscribe to ingestion in real time over WebSocket instead
+  of polling the REST API
 
 ## Files Modified
 
 1. `indexer/src/poller.ts`
    - Replaced `setInterval` with recursive async loop
-   - Added exponential backoff (1s-5min)
+   - Added exponential backoff (1s-5min, now configurable)
    - Added cursor safety (never advance on failure)
    - Added structured logging
    - Exported health state via `getPollerHealth()`
+   - Added ledger re-org/gap detection and resync
+   - Broadcasts ingested events and degraded-state signals over WebSocket
 
 2. `indexer/src/server.ts`
    - Added `GET /health` endpoint
-   - Integrated health state from poller
+   - Integrated health state from poller (including re-org/gap counters)
    - Returns appropriate HTTP status codes
+
+3. `indexer/src/ledgerContinuity.ts` (new)
+   - Pure functions for detecting re-orgs and ledger gaps
+   - Computes the safe resync ledger after a re-org
+
+4. `indexer/src/backoff.ts` (new)
+   - Exponential backoff math, extracted for unit testing
+   - Reads `POLLER_MIN_BACKOFF_MS` / `POLLER_MAX_BACKOFF_MS` /
+     `POLLER_BACKOFF_MULTIPLIER` from the environment
+
+5. `indexer/src/ws.ts` (new)
+   - WebSocket server attached to the existing HTTP server at `/ws`
+   - Broadcasts ingested events and poller status to connected clients
+
+6. `indexer/src/index.ts`
+   - Wires the WebSocket server into the HTTP server on startup
 
 ## Testing
 
@@ -296,9 +372,16 @@ done
 # Monitor health
 curl http://localhost:3001/health | jq .
 
+# Subscribe to the real-time event stream
+websocat ws://localhost:3001/ws   # or any WebSocket client
+
 # Check logs
 docker-compose logs -f indexer
 ```
+
+Automated coverage lives in `indexer/src/__tests__/`:
+`ledgerContinuity.test.ts` (re-org/gap detection), `backoff.test.ts`
+(backoff math and env parsing), and `ws.test.ts` (WebSocket broadcast).
 
 ---
 
