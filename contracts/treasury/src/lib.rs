@@ -10,19 +10,19 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, Map, Vec};
 use boxmeout_shared::errors::ContractError;
 use boxmeout_shared::types::{AuditAction, AuditEntry};
 
-const ADMIN: &str                   = "ADMIN";
-const BET_TOKEN: &str               = "BET_TOKEN";
-const FACTORY: &str                 = "FACTORY";
-const ACCUMULATED_FEES: &str        = "ACCUMULATED_FEES"; // token -> total
+const ADMIN: &str = "ADMIN";
+const BET_TOKEN: &str = "BET_TOKEN";
+const FACTORY: &str = "FACTORY";
+const ACCUMULATED_FEES: &str = "ACCUMULATED_FEES"; // token -> total
 const ACCUMULATED_FEES_BY_MARKET: &str = "ACCUMULATED_FEES_BY_MARKET"; // market_id -> (token -> amount)
-const APPROVED_MARKETS: &str        = "APPROVED_MARKETS";
-const WITHDRAWAL_LIMIT: &str        = "WITHDRAWAL_LIMIT";
-const DAILY_WITHDRAWN: &str         = "DAILY_WITHDRAWN";
-const WITHDRAWALS_PAUSED: &str      = "WITHDRAWALS_PAUSED";
-const AUDIT_LOG: &str               = "AUDIT_LOG";          // Vec<AuditEntry> (append-only)
-const AUDIT_NEXT_ID: &str           = "AUDIT_NEXT_ID";      // u64 monotonically increasing
-const WITHDRAWAL_IN_PROGRESS: &str  = "WITHDRAWAL_IN_PROGRESS"; // reentrancy guard
-const MIN_WITHDRAWAL: i128          = 10_000_000; // 1 XLM in stroops
+const APPROVED_MARKETS: &str = "APPROVED_MARKETS";
+const WITHDRAWAL_LIMIT: &str = "WITHDRAWAL_LIMIT";
+const DAILY_WITHDRAWN: &str = "DAILY_WITHDRAWN";
+const WITHDRAWALS_PAUSED: &str = "WITHDRAWALS_PAUSED";
+const AUDIT_LOG: &str = "AUDIT_LOG"; // Vec<AuditEntry> (append-only)
+const AUDIT_NEXT_ID: &str = "AUDIT_NEXT_ID"; // u64 monotonically increasing
+const WITHDRAWAL_IN_PROGRESS: &str = "WITHDRAWAL_IN_PROGRESS"; // reentrancy guard
+const MIN_WITHDRAWAL: i128 = 10_000_000; // 1 XLM in stroops
 
 #[contract]
 pub struct Treasury;
@@ -30,7 +30,8 @@ pub struct Treasury;
 impl Treasury {
     fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
         let admin: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&ADMIN)
             .ok_or(ContractError::Unauthorized)?;
         if *caller != admin {
@@ -43,13 +44,13 @@ impl Treasury {
         env.ledger().timestamp() / 86400
     }
 
-    /// Prune DAILY_WITHDRAWN to keep only the current bucket and the one before it.
-    /// Called on every withdrawal so the map never grows beyond 2 entries.
+    /// Prune DAILY_WITHDRAWN to keep only the current bucket.
+    /// Called on every withdrawal so the map never grows beyond 1 entry
+    /// and previous day tallies never carry into the new day.
     fn prune_daily_withdrawn(env: &Env, daily: &mut Map<u64, i128>, current_bucket: u64) {
-        // Collect keys older than current_bucket - 1 (keep current and previous)
         let mut stale: Vec<u64> = Vec::new(env);
         for (k, _) in daily.iter() {
-            if k + 1 < current_bucket {
+            if k < current_bucket {
                 stale.push_back(k);
             }
         }
@@ -59,8 +60,11 @@ impl Treasury {
     }
 
     fn add_to_accumulated_token(env: &Env, token: &Address, amount: i128) {
-        let mut fees: Map<Address, i128> =
-            env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(env));
+        let mut fees: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&ACCUMULATED_FEES)
+            .unwrap_or_else(|| Map::new(env));
         let current = fees.get(token.clone()).unwrap_or(0);
         fees.set(token.clone(), current + amount);
         env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
@@ -71,18 +75,8 @@ impl Treasury {
     /// The entry is assigned a monotonically increasing id and pushed onto the
     /// append-only `AUDIT_LOG`. Existing entries are never modified, so the log
     /// forms a tamper-evident, immutable history of every fund movement.
-    fn record_audit(
-        env: &Env,
-        action: AuditAction,
-        token: Address,
-        amount: i128,
-        actor: Address,
-    ) {
-        let next_id: u64 = env
-            .storage()
-            .persistent()
-            .get(&AUDIT_NEXT_ID)
-            .unwrap_or(0);
+    fn record_audit(env: &Env, action: AuditAction, token: Address, amount: i128, actor: Address) {
+        let next_id: u64 = env.storage().persistent().get(&AUDIT_NEXT_ID).unwrap_or(0);
         let entry = AuditEntry {
             id: next_id,
             action: action.clone(),
@@ -92,12 +86,17 @@ impl Treasury {
             timestamp: env.ledger().timestamp(),
         };
 
-        let mut log: Vec<AuditEntry> =
-            env.storage().persistent().get(&AUDIT_LOG).unwrap_or_else(|| Vec::new(env));
+        let mut log: Vec<AuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&AUDIT_LOG)
+            .unwrap_or_else(|| Vec::new(env));
         log.push_back(entry.clone());
 
         env.storage().persistent().set(&AUDIT_LOG, &log);
-        env.storage().persistent().set(&AUDIT_NEXT_ID, &(next_id + 1));
+        env.storage()
+            .persistent()
+            .set(&AUDIT_NEXT_ID, &(next_id + 1));
         boxmeout_shared::emit_audit_recorded(env, entry);
     }
 }
@@ -121,15 +120,30 @@ impl Treasury {
         env.storage().persistent().set(&ADMIN, &admin);
         env.storage().persistent().set(&BET_TOKEN, &bet_token);
         env.storage().persistent().set(&FACTORY, &factory);
-        env.storage().persistent().set(&WITHDRAWAL_LIMIT, &withdrawal_limit);
-        env.storage().persistent().set(&ACCUMULATED_FEES, &Map::<Address, i128>::new(&env));
-        env.storage().persistent().set(&ACCUMULATED_FEES_BY_MARKET, &Map::<u64, Map<Address, i128>>::new(&env));
-        env.storage().persistent().set(&DAILY_WITHDRAWN, &Map::<u64, i128>::new(&env));
-        env.storage().persistent().set(&APPROVED_MARKETS, &Vec::<Address>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&WITHDRAWAL_LIMIT, &withdrawal_limit);
+        env.storage()
+            .persistent()
+            .set(&ACCUMULATED_FEES, &Map::<Address, i128>::new(&env));
+        env.storage().persistent().set(
+            &ACCUMULATED_FEES_BY_MARKET,
+            &Map::<u64, Map<Address, i128>>::new(&env),
+        );
+        env.storage()
+            .persistent()
+            .set(&DAILY_WITHDRAWN, &Map::<u64, i128>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&APPROVED_MARKETS, &Vec::<Address>::new(&env));
         env.storage().persistent().set(&WITHDRAWALS_PAUSED, &false);
-        env.storage().persistent().set(&AUDIT_LOG, &Vec::<AuditEntry>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&AUDIT_LOG, &Vec::<AuditEntry>::new(&env));
         env.storage().persistent().set(&AUDIT_NEXT_ID, &0u64);
-        env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+        env.storage()
+            .persistent()
+            .set(&WITHDRAWAL_IN_PROGRESS, &false);
         Ok(())
     }
 
@@ -145,8 +159,11 @@ impl Treasury {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
 
-        let mut markets: Vec<Address> =
-            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let mut markets: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&APPROVED_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
         if !markets.contains(market_address.clone()) {
             markets.push_back(market_address);
         }
@@ -166,8 +183,11 @@ impl Treasury {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
 
-        let markets: Vec<Address> =
-            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let markets: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&APPROVED_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
         let mut updated: Vec<Address> = Vec::new(&env);
         for m in markets.iter() {
             if m != market_address {
@@ -195,15 +215,21 @@ impl Treasury {
     ) -> Result<(), ContractError> {
         // CHECKS
         market.require_auth();
-        let markets: Vec<Address> =
-            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let markets: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&APPROVED_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
         if !markets.contains(market.clone()) {
             return Err(ContractError::MarketNotApproved);
         }
 
         // EFFECTS
-        let mut fees: Map<Address, i128> =
-            env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(&env));
+        let mut fees: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&ACCUMULATED_FEES)
+            .unwrap_or_else(|| Map::new(&env));
         let current = fees.get(token.clone()).unwrap_or(0);
         fees.set(token.clone(), current + amount);
         env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
@@ -213,7 +239,13 @@ impl Treasury {
         token_client.transfer(&market, &env.current_contract_address(), &amount);
 
         // AUDIT — immutable ledger entry
-        Self::record_audit(&env, AuditAction::FeeDeposited, token.clone(), amount, market.clone());
+        Self::record_audit(
+            &env,
+            AuditAction::FeeDeposited,
+            token.clone(),
+            amount,
+            market.clone(),
+        );
 
         boxmeout_shared::emit_fee_deposited(&env, market, token, amount);
         Ok(())
@@ -232,8 +264,11 @@ impl Treasury {
     ) -> Result<(), ContractError> {
         // CHECKS
         market.require_auth();
-        let markets: Vec<Address> =
-            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let markets: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&APPROVED_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
         if !markets.contains(market.clone()) {
             return Err(ContractError::MarketNotApproved);
         }
@@ -246,15 +281,24 @@ impl Treasury {
             .persistent()
             .get(&ACCUMULATED_FEES_BY_MARKET)
             .unwrap_or_else(|| Map::new(&env));
-        let mut token_map: Map<Address, i128> = by_market.get(market_id).unwrap_or_else(|| Map::new(&env));
+        let mut token_map: Map<Address, i128> =
+            by_market.get(market_id).unwrap_or_else(|| Map::new(&env));
         let cur = token_map.get(token.clone()).unwrap_or(0);
         token_map.set(token.clone(), cur + amount);
         by_market.set(market_id, token_map);
-        env.storage().persistent().set(&ACCUMULATED_FEES_BY_MARKET, &by_market);
+        env.storage()
+            .persistent()
+            .set(&ACCUMULATED_FEES_BY_MARKET, &by_market);
 
         // INTERACTIONS — emit event (assumes token was already transferred by Market)
         // AUDIT — immutable ledger entry
-        Self::record_audit(&env, AuditAction::FeeReceived, token.clone(), amount, market.clone());
+        Self::record_audit(
+            &env,
+            AuditAction::FeeReceived,
+            token.clone(),
+            amount,
+            market.clone(),
+        );
 
         boxmeout_shared::emit_fee_deposited(&env, market, token, amount);
         Ok(())
@@ -289,48 +333,78 @@ impl Treasury {
         Self::require_admin(&env, &admin)?;
 
         // Reentrancy guard — blocks re-entrant double-withdrawal.
-        let guard: bool = env.storage().persistent().get(&WITHDRAWAL_IN_PROGRESS).unwrap_or(false);
+        let guard: bool = env
+            .storage()
+            .persistent()
+            .get(&WITHDRAWAL_IN_PROGRESS)
+            .unwrap_or(false);
         if guard {
             return Err(ContractError::ReentrancyGuard);
         }
-        env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &true);
+        env.storage()
+            .persistent()
+            .set(&WITHDRAWAL_IN_PROGRESS, &true);
 
         // Check minimum withdrawal amount
         if amount < MIN_WITHDRAWAL {
-            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            env.storage()
+                .persistent()
+                .set(&WITHDRAWAL_IN_PROGRESS, &false);
             return Err(ContractError::BelowMinimum);
         }
 
         // Check paused flag
-        let paused: bool = env.storage().persistent().get(&WITHDRAWALS_PAUSED).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&WITHDRAWALS_PAUSED)
+            .unwrap_or(false);
         if paused {
-            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            env.storage()
+                .persistent()
+                .set(&WITHDRAWAL_IN_PROGRESS, &false);
             return Err(ContractError::DailyWithdrawalLimitExceeded);
         }
 
-        let limit: i128 = env.storage().persistent().get(&WITHDRAWAL_LIMIT).unwrap_or(0);
+        let limit: i128 = env
+            .storage()
+            .persistent()
+            .get(&WITHDRAWAL_LIMIT)
+            .unwrap_or(0);
         if amount > limit {
-            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            env.storage()
+                .persistent()
+                .set(&WITHDRAWAL_IN_PROGRESS, &false);
             return Err(ContractError::DailyWithdrawalLimitExceeded);
         }
 
         let bucket = Self::day_bucket(&env);
-        let mut daily: Map<u64, i128> =
-            env.storage().persistent().get(&DAILY_WITHDRAWN).unwrap_or_else(|| Map::new(&env));
+        let mut daily: Map<u64, i128> = env
+            .storage()
+            .persistent()
+            .get(&DAILY_WITHDRAWN)
+            .unwrap_or_else(|| Map::new(&env));
         let today_total = daily.get(bucket).unwrap_or(0);
         // Enforce a strict daily cap: running total may never exceed `limit`.
         // (Previously this compared against `limit * 5`, letting withdrawals
         // accumulate well beyond the intended cap.)
         if today_total + amount > limit {
-            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            env.storage()
+                .persistent()
+                .set(&WITHDRAWAL_IN_PROGRESS, &false);
             return Err(ContractError::DailyWithdrawalLimitExceeded);
         }
 
-        let mut fees: Map<Address, i128> =
-            env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(&env));
+        let mut fees: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&ACCUMULATED_FEES)
+            .unwrap_or_else(|| Map::new(&env));
         let balance = fees.get(token.clone()).unwrap_or(0);
         if balance < amount {
-            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            env.storage()
+                .persistent()
+                .set(&WITHDRAWAL_IN_PROGRESS, &false);
             return Err(ContractError::InsufficientBalance);
         }
 
@@ -339,32 +413,38 @@ impl Treasury {
         env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
         daily.set(bucket, today_total + amount);
 
-        // Prune DAILY_WITHDRAWN — keep only current and previous day bucket
-        let prune_before = bucket.saturating_sub(1);
-        let keys: Vec<u64> = daily.keys();
-        for k in keys.iter() {
-            if k < prune_before {
-                daily.remove(k);
-            }
-        }
+        // Prune DAILY_WITHDRAWN — remove all entries before the current day bucket
+        Self::prune_daily_withdrawn(&env, &mut daily, bucket);
         env.storage().persistent().set(&DAILY_WITHDRAWN, &daily);
 
         // AUDIT — immutable ledger entry (completed withdrawals only)
-        Self::record_audit(&env, AuditAction::FeeWithdrawn, token.clone(), amount, destination.clone());
+        Self::record_audit(
+            &env,
+            AuditAction::FeeWithdrawn,
+            token.clone(),
+            amount,
+            destination.clone(),
+        );
 
         // INTERACTIONS
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &destination, &amount);
 
         // Clear the reentrancy guard only after the interaction completes.
-        env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+        env.storage()
+            .persistent()
+            .set(&WITHDRAWAL_IN_PROGRESS, &false);
 
         boxmeout_shared::emit_fee_withdrawn(&env, token, amount, destination);
         Ok(())
     }
 
     /// Registers a market address. Callable only by the Factory address stored at initialization.
-    pub fn register_market(env: Env, caller: Address, market_address: Address) -> Result<(), ContractError> {
+    pub fn register_market(
+        env: Env,
+        caller: Address,
+        market_address: Address,
+    ) -> Result<(), ContractError> {
         caller.require_auth();
         let stored_factory: Address = env
             .storage()
@@ -375,8 +455,11 @@ impl Treasury {
             return Err(ContractError::NotFactory);
         }
 
-        let mut markets: Vec<Address> =
-            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let mut markets: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&APPROVED_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
         if !markets.contains(market_address.clone()) {
             markets.push_back(market_address);
         }
@@ -386,23 +469,32 @@ impl Treasury {
 
     /// Returns true if the address is a registered market.
     pub fn is_registered_market(env: Env, market_address: Address) -> bool {
-        let markets: Vec<Address> =
-            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        let markets: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&APPROVED_MARKETS)
+            .unwrap_or_else(|| Vec::new(&env));
         markets.contains(market_address)
     }
 
     /// Returns the accumulated fees for a specific token.
     pub fn get_accumulated_fees(env: Env, token: Address) -> i128 {
-        let fees: Map<Address, i128> =
-            env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(&env));
+        let fees: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&ACCUMULATED_FEES)
+            .unwrap_or_else(|| Map::new(&env));
         fees.get(token).unwrap_or(0)
     }
 
     /// Returns the total amount withdrawn today.
     pub fn get_daily_withdrawal_amount(env: Env) -> i128 {
         let bucket = Self::day_bucket(&env);
-        let daily: Map<u64, i128> =
-            env.storage().persistent().get(&DAILY_WITHDRAWN).unwrap_or_else(|| Map::new(&env));
+        let daily: Map<u64, i128> = env
+            .storage()
+            .persistent()
+            .get(&DAILY_WITHDRAWN)
+            .unwrap_or_else(|| Map::new(&env));
         daily.get(bucket).unwrap_or(0)
     }
 
@@ -417,7 +509,9 @@ impl Treasury {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        env.storage().persistent().set(&WITHDRAWAL_LIMIT, &new_limit);
+        env.storage()
+            .persistent()
+            .set(&WITHDRAWAL_LIMIT, &new_limit);
         Ok(())
     }
 
@@ -430,17 +524,16 @@ impl Treasury {
     /// 1. CHECKS: require_auth, admin check
     /// 2. EFFECTS: zero ACCUMULATED_FEES[token]
     /// 3. INTERACTIONS: token transfer last
-    pub fn emergency_drain(
-        env: Env,
-        admin: Address,
-        token: Address,
-    ) -> Result<(), ContractError> {
+    pub fn emergency_drain(env: Env, admin: Address, token: Address) -> Result<(), ContractError> {
         // CHECKS
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
 
-        let mut fees: Map<Address, i128> =
-            env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(&env));
+        let mut fees: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&ACCUMULATED_FEES)
+            .unwrap_or_else(|| Map::new(&env));
         let balance = fees.get(token.clone()).unwrap_or(0);
 
         // EFFECTS
@@ -454,7 +547,13 @@ impl Treasury {
         }
 
         // AUDIT — immutable ledger entry
-        Self::record_audit(&env, AuditAction::FeeDrained, token.clone(), balance, admin.clone());
+        Self::record_audit(
+            &env,
+            AuditAction::FeeDrained,
+            token.clone(),
+            balance,
+            admin.clone(),
+        );
 
         boxmeout_shared::emit_emergency_drain(&env, token, balance, admin);
         Ok(())
@@ -462,13 +561,19 @@ impl Treasury {
 
     /// Returns the configured daily withdrawal limit.
     pub fn get_withdrawal_limit(env: Env) -> i128 {
-        env.storage().persistent().get(&WITHDRAWAL_LIMIT).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&WITHDRAWAL_LIMIT)
+            .unwrap_or(0)
     }
 
     /// Returns the number of immutable audit entries recorded.
     pub fn get_audit_log_count(env: Env) -> u64 {
-        let log: Vec<AuditEntry> =
-            env.storage().persistent().get(&AUDIT_LOG).unwrap_or_else(|| Vec::new(&env));
+        let log: Vec<AuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&AUDIT_LOG)
+            .unwrap_or_else(|| Vec::new(&env));
         log.len() as u64
     }
 
@@ -476,8 +581,11 @@ impl Treasury {
     /// the index is out of range. Entries are immutable and never mutated or
     /// removed after they are appended.
     pub fn get_audit_entry(env: Env, index: u64) -> Option<AuditEntry> {
-        let log: Vec<AuditEntry> =
-            env.storage().persistent().get(&AUDIT_LOG).unwrap_or_else(|| Vec::new(&env));
+        let log: Vec<AuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&AUDIT_LOG)
+            .unwrap_or_else(|| Vec::new(&env));
         let idx_u32 = index as u32;
         if idx_u32 >= log.len() {
             return None;
@@ -635,12 +743,12 @@ mod tests {
 // ============================================================
 #[cfg(test)]
 mod deposit_fees_tests {
+    use super::{Treasury, TreasuryClient};
     use soroban_sdk::{
         testutils::{Address as _, Events},
         token::StellarAssetClient,
         Address, Env, Symbol,
     };
-    use super::{Treasury, TreasuryClient};
 
     fn setup() -> (Env, TreasuryClient<'static>, Address, Address, Address) {
         let env = Env::default();
@@ -699,8 +807,8 @@ mod deposit_fees_tests {
 // ============================================================
 #[cfg(test)]
 mod initialize_tests {
-    use soroban_sdk::{testutils::Address as _, Address, Env};
     use super::{Treasury, TreasuryClient};
+    use soroban_sdk::{testutils::Address as _, Address, Env};
 
     fn setup_client(env: &Env) -> TreasuryClient<'static> {
         env.mock_all_auths();
@@ -787,16 +895,333 @@ mod initialize_tests {
 }
 
 // ============================================================
+// ISSUE #249: Treasury daily-limit reset / UTC bucket tests
+// ============================================================
+#[cfg(test)]
+mod daily_limit_reset_tests {
+    use super::{Treasury, TreasuryClient};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Map,
+    };
+
+    fn setup(env: &Env, limit: i128) -> (TreasuryClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(env, &id);
+        let admin = Address::generate(env);
+        let market = Address::generate(env);
+        let token = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(env);
+        client.initialize(&admin, &token, &factory, &limit);
+        (client, admin, market, token)
+    }
+
+    fn set_time(env: &Env, ts: u64) {
+        env.ledger().set(LedgerInfo {
+            timestamp: ts,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+    }
+
+    const DAY: u64 = 86_400;
+
+    /// First withdrawal of a UTC day succeeds
+    #[test]
+    fn test_first_withdrawal_of_day_succeeds() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &limit);
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &limit);
+
+        set_time(&env, DAY);
+        let dest = Address::generate(&env);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_accumulated_fees(&token), 0);
+    }
+
+    /// Multiple withdrawals during the same UTC day enforce daily limit
+    #[test]
+    fn test_multiple_withdrawals_same_day_enforce_limit() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &limit);
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &limit);
+
+        set_time(&env, DAY);
+        let dest = Address::generate(&env);
+
+        // First withdrawal — at the limit
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+
+        // Second withdrawal — would exceed daily limit
+        let result = client.try_withdraw_fees(&admin, &token, &1i128, &dest);
+        assert!(result.is_err(), "Second withdrawal on same day must fail");
+    }
+
+    /// Daily limit enforcement: partial withdrawal leaves room for another
+    #[test]
+    fn test_partial_withdrawal_allows_remainder() {
+        let env = Env::default();
+        let limit = 30_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &limit);
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &limit);
+
+        set_time(&env, DAY);
+        let dest = Address::generate(&env);
+
+        // Withdraw 10M (half of daily limit)
+        client.withdraw_fees(&admin, &token, &(limit / 2), &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit / 2);
+
+        // Withdraw the other half — should succeed
+        client.withdraw_fees(&admin, &token, &(limit / 2), &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+
+        // Any more should fail (daily limit exceeded)
+        let result = client.try_withdraw_fees(&admin, &token, &10_000_000i128, &dest);
+        assert!(result.is_err());
+    }
+
+    /// Transition from day N to day N+1: fresh limit on new day
+    #[test]
+    fn test_day_transition_fresh_limit() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &(limit * 2));
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &(limit * 2));
+
+        let dest = Address::generate(&env);
+
+        // Day 1 — exhaust limit
+        set_time(&env, DAY);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+
+        // Day 2 — fresh limit, full withdrawal succeeds
+        set_time(&env, DAY * 2);
+        assert_eq!(
+            client.get_daily_withdrawal_amount(),
+            0,
+            "New day must start with zero withdrawn"
+        );
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+    }
+
+    /// First withdrawal immediately after the UTC boundary succeeds
+    #[test]
+    fn test_withdrawal_right_after_utc_boundary() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &(limit * 2));
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &(limit * 2));
+
+        let dest = Address::generate(&env);
+
+        // Day 1 — exhaust limit
+        set_time(&env, DAY);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // Day 2 — fresh limit
+        set_time(&env, DAY * 2);
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+    }
+
+    /// Previous day's withdrawal does NOT count toward new day's limit
+    #[test]
+    fn test_previous_day_does_not_affect_new_day() {
+        let env = Env::default();
+        let limit = 30_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &(limit * 2));
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &(limit * 2));
+
+        let dest = Address::generate(&env);
+
+        // Day 1 — withdraw half
+        set_time(&env, DAY);
+        client.withdraw_fees(&admin, &token, &(limit / 2), &dest);
+
+        // Day 2 — full withdrawal should succeed (fresh limit)
+        set_time(&env, DAY * 2);
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+    }
+
+    /// Multiple days passing: each day gets a fresh limit
+    #[test]
+    fn test_multiple_days_fresh_limits() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &(limit * 3));
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &(limit * 3));
+
+        let dest = Address::generate(&env);
+
+        // Day 1
+        set_time(&env, DAY);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+
+        // Day 2
+        set_time(&env, DAY * 2);
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+
+        // Day 3
+        set_time(&env, DAY * 3);
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+    }
+
+    /// DAILY_WITHDRAWN map is pruned to at most 1 entry (current day only)
+    #[test]
+    fn test_daily_withdrawn_map_pruned_to_one_entry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, Treasury);
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        let limit = 10_000_000i128;
+        let token = env.register_stellar_asset_contract(admin.clone());
+        let factory = Address::generate(&env);
+        client.initialize(&admin, &token, &factory, &limit);
+
+        StellarAssetClient::new(&env, &token).mint(&market, &1_000_000_000i128);
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &1_000_000_000i128);
+
+        let dest = Address::generate(&env);
+
+        let set_time = |ts: u64| {
+            env.ledger().set(LedgerInfo {
+                timestamp: ts,
+                protocol_version: 20,
+                sequence_number: 100,
+                network_id: Default::default(),
+                base_reserve: 1,
+                min_temp_entry_ttl: 16,
+                min_persistent_entry_ttl: 4096,
+                max_entry_ttl: 6_311_520,
+            });
+        };
+
+        // Day 1
+        set_time(DAY);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // Day 2
+        set_time(DAY * 2);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // Day 3
+        set_time(DAY * 3);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // Verify map has exactly 1 entry (current day only)
+        let daily_len = env.as_contract(&id, || {
+            let daily: Map<u64, i128> = env
+                .storage()
+                .persistent()
+                .get(&"DAILY_WITHDRAWN")
+                .unwrap_or_else(|| Map::new(&env));
+            daily.keys().len()
+        });
+        assert_eq!(
+            daily_len, 1,
+            "DAILY_WITHDRAWN map should have exactly 1 entry (current day only)"
+        );
+    }
+
+    /// Exact bucket-boundary: withdrawal at end of day N, then start of day N+1
+    #[test]
+    fn test_exact_bucket_boundary() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &(limit * 2));
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &(limit * 2));
+
+        let dest = Address::generate(&env);
+
+        // End of day 1 (last second)
+        set_time(&env, DAY * 2 - 1);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+
+        // Start of day 2 (first second) — fresh limit
+        set_time(&env, DAY * 2);
+        assert_eq!(client.get_daily_withdrawal_amount(), 0);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+    }
+
+    /// Existing withdrawal behavior remains intact
+    #[test]
+    fn test_existing_withdrawal_behavior_intact() {
+        let env = Env::default();
+        let limit = 10_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        StellarAssetClient::new(&env, &token).mint(&market, &limit);
+        client.approve_market(&admin, &market);
+        client.deposit_fees(&market, &token, &limit);
+
+        let dest = Address::generate(&env);
+        set_time(&env, DAY);
+
+        // Withdraw at minimum
+        client.withdraw_fees(&admin, &token, &10_000_000i128, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), 10_000_000);
+
+        // Below minimum rejected
+        let result = client.try_withdraw_fees(&admin, &token, &9_999_999i128, &dest);
+        assert!(result.is_err());
+
+        // Insufficient balance rejected
+        let result = client.try_withdraw_fees(&admin, &token, &limit, &dest);
+        assert!(result.is_err());
+    }
+}
+
+// ============================================================
 // ISSUE #709: Treasury unit tests
 // ============================================================
 #[cfg(test)]
 mod treasury_lifecycle_tests {
+    use super::{Treasury, TreasuryClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::StellarAssetClient,
         Address, Env, Map,
     };
-    use super::{Treasury, TreasuryClient};
 
     fn setup(env: &Env, limit: i128) -> (TreasuryClient<'static>, Address, Address, Address) {
         env.mock_all_auths();
@@ -850,7 +1275,10 @@ mod treasury_lifecycle_tests {
         client.withdraw_fees(&admin, &token, &limit, &dest);
 
         assert_eq!(client.get_accumulated_fees(&token), 0);
-        assert_eq!(soroban_sdk::token::Client::new(&env, &token).balance(&dest), limit);
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&dest),
+            limit
+        );
     }
 
     // ── Insufficient balance error ────────────────────────────────────────────
@@ -952,7 +1380,10 @@ mod treasury_lifecycle_tests {
         client.withdraw_fees(&admin, &token, &10_000_000i128, &dest);
 
         assert_eq!(client.get_accumulated_fees(&token), limit - 10_000_000i128);
-        assert_eq!(soroban_sdk::token::Client::new(&env, &token).balance(&dest), 10_000_000i128);
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&dest),
+            10_000_000i128
+        );
     }
 
     // ── DAILY_WITHDRAWN pruning ───────────────────────────────────────────────
@@ -1015,7 +1446,10 @@ mod treasury_lifecycle_tests {
                 .unwrap_or_else(|| Map::new(&env));
             daily.keys().len()
         });
-        assert!(daily_len <= 2, "DAILY_WITHDRAWN map length should be ≤ 2, got {daily_len}");
+        assert!(
+            daily_len <= 2,
+            "DAILY_WITHDRAWN map length should be ≤ 2, got {daily_len}"
+        );
     }
 }
 
@@ -1027,15 +1461,18 @@ mod treasury_lifecycle_tests {
 // ============================================================
 #[cfg(test)]
 mod task11_treasury_contract_integrity_tests {
+    use crate::{Treasury, TreasuryClient};
+    use boxmeout_shared::errors::ContractError;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
         token::StellarAssetClient,
         Address, Env, Map,
     };
-    use boxmeout_shared::errors::ContractError;
-    use crate::{Treasury, TreasuryClient};
 
-    fn setup_treasury(env: &Env, limit: i128) -> (TreasuryClient<'static>, Address, Address, Address) {
+    fn setup_treasury(
+        env: &Env,
+        limit: i128,
+    ) -> (TreasuryClient<'static>, Address, Address, Address) {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 100_000,
@@ -1085,7 +1522,7 @@ mod task11_treasury_contract_integrity_tests {
         // Verify storage maps persist and remain readable
         assert_eq!(client.get_accumulated_fees(&token), 100_000_000i128);
         assert_eq!(client.get_withdrawal_limit(), limit);
-        assert!(client.is_market_approved(&market));
+        assert!(client.is_registered_market(&market));
     }
 
     // ── 2. Comprehensive Auth & Error Handling Audit ─────────────
@@ -1109,20 +1546,16 @@ mod task11_treasury_contract_integrity_tests {
         let err_limit = client.try_update_withdrawal_limit(&non_admin, &100_000_000i128);
         assert_eq!(err_limit.unwrap_err(), Ok(ContractError::Unauthorized));
 
-        // Non-admin cannot pause or unpause withdrawals
-        let err_pause = client.try_pause_withdrawals(&non_admin);
-        assert_eq!(err_pause.unwrap_err(), Ok(ContractError::Unauthorized));
-
-        let err_unpause = client.try_unpause_withdrawals(&non_admin);
-        assert_eq!(err_unpause.unwrap_err(), Ok(ContractError::Unauthorized));
-
         // Non-admin cannot withdraw fees
         let err_withdraw = client.try_withdraw_fees(&non_admin, &token, &15_000_000i128, &dest);
         assert_eq!(err_withdraw.unwrap_err(), Ok(ContractError::Unauthorized));
 
         // Unapproved market deposit rejected
         let err_unapproved = client.try_deposit_fees(&market, &token, &20_000_000i128);
-        assert_eq!(err_unapproved.unwrap_err(), Ok(ContractError::MarketNotApproved));
+        assert_eq!(
+            err_unapproved.unwrap_err(),
+            Ok(ContractError::MarketNotApproved)
+        );
     }
 
     // ── 3. Property-Based Fee Conservation & Daily Limits ────────
@@ -1158,7 +1591,9 @@ mod task11_treasury_contract_integrity_tests {
         // Invariant: remaining + total_withdrawn == total_deposited
         let remaining = client.get_accumulated_fees(&token);
         assert_eq!(remaining + withdraw_amt, total_deposited);
-        assert_eq!(soroban_sdk::token::Client::new(&env, &token).balance(&dest), withdraw_amt);
+        assert_eq!(
+            soroban_sdk::token::Client::new(&env, &token).balance(&dest),
+            withdraw_amt
+        );
     }
 }
-

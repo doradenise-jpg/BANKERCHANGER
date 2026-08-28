@@ -95,7 +95,8 @@ pub fn emit_dispute_resolved(env: &Env, market_id: u64, final_outcome: Outcome) 
 /// Data:   `(current_admin, proposed_admin)`
 pub fn emit_admin_proposed(env: &Env, current_admin: Address, proposed_admin: Address) {
     let topics = (Symbol::new(env, "admin_proposed"),);
-    env.events().publish(topics, (current_admin, proposed_admin));
+    env.events()
+        .publish(topics, (current_admin, proposed_admin));
 }
 
 /// Emits an `admin_transferred` event when admin privileges change hands.
@@ -231,7 +232,9 @@ mod tests {
     fn test_emit_market_created() {
         let (env, id) = env();
         let contract = addr(&env);
-        env.as_contract(&id, || { emit_market_created(&env, 1, contract.clone(), str(&env, "FURY-USYK-2025")); });
+        env.as_contract(&id, || {
+            emit_market_created(&env, 1, contract.clone(), str(&env, "FURY-USYK-2025"));
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_created"));
@@ -248,7 +251,9 @@ mod tests {
     #[test]
     fn test_emit_market_locked() {
         let (env, id) = env();
-        env.as_contract(&id, || { emit_market_locked(&env, 2); });
+        env.as_contract(&id, || {
+            emit_market_locked(&env, 2);
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_locked"));
@@ -262,7 +267,9 @@ mod tests {
     fn test_emit_market_resolved() {
         let (env, id) = env();
         let oracle = addr(&env);
-        env.as_contract(&id, || { emit_market_resolved(&env, 3, Outcome::FighterA, oracle.clone()); });
+        env.as_contract(&id, || {
+            emit_market_resolved(&env, 3, Outcome::FighterA, oracle.clone());
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_resolved"));
@@ -286,7 +293,9 @@ mod tests {
             placed_at: 1_000_000,
             claimed: false,
         };
-        env.as_contract(&id, || { emit_bet_placed(&env, 4, bet.clone()); });
+        env.as_contract(&id, || {
+            emit_bet_placed(&env, 4, bet.clone());
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "bet_placed"));
@@ -308,7 +317,9 @@ mod tests {
             fee_deducted: 200_000,
             claimed_at: 2_000_000,
         };
-        env.as_contract(&id, || { emit_winnings_claimed(&env, 5, receipt.clone()); });
+        env.as_contract(&id, || {
+            emit_winnings_claimed(&env, 5, receipt.clone());
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "winnings_claimed"));
@@ -324,7 +335,9 @@ mod tests {
     fn test_emit_refund_claimed() {
         let (env, id) = env();
         let bettor = addr(&env);
-        env.as_contract(&id, || { emit_refund_claimed(&env, 6, bettor.clone(), 5_000_000); });
+        env.as_contract(&id, || {
+            emit_refund_claimed(&env, 6, bettor.clone(), 5_000_000);
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "refund_claimed"));
@@ -339,7 +352,9 @@ mod tests {
     #[test]
     fn test_emit_market_cancelled() {
         let (env, id) = env();
-        env.as_contract(&id, || { emit_market_cancelled(&env, 7, str(&env, "fight_postponed")); });
+        env.as_contract(&id, || {
+            emit_market_cancelled(&env, 7, str(&env, "fight_postponed"));
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_cancelled"));
@@ -352,7 +367,9 @@ mod tests {
     #[test]
     fn test_emit_market_disputed() {
         let (env, id) = env();
-        env.as_contract(&id, || { emit_market_disputed(&env, 8, str(&env, "oracle_conflict")); });
+        env.as_contract(&id, || {
+            emit_market_disputed(&env, 8, str(&env, "oracle_conflict"));
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_disputed"));
@@ -365,7 +382,9 @@ mod tests {
     #[test]
     fn test_emit_dispute_resolved() {
         let (env, id) = env();
-        env.as_contract(&id, || { emit_dispute_resolved(&env, 9, Outcome::Draw); });
+        env.as_contract(&id, || {
+            emit_dispute_resolved(&env, 9, Outcome::Draw);
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "dispute_resolved"));
@@ -380,12 +399,13 @@ mod tests {
         let (env, id) = env();
         let old = addr(&env);
         let new = addr(&env);
-        env.as_contract(&id, || { emit_admin_transferred(&env, old.clone(), new.clone()); });
+        env.as_contract(&id, || {
+            emit_admin_transferred(&env, old.clone(), new.clone());
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "admin_transferred"));
-        let (ev_old, ev_new): (Address, Address) =
-            TryFromVal::try_from_val(&env, &ev.2).unwrap();
+        let (ev_old, ev_new): (Address, Address) = TryFromVal::try_from_val(&env, &ev.2).unwrap();
         assert_eq!(ev_old, old);
         assert_eq!(ev_new, new);
     }
@@ -397,7 +417,9 @@ mod tests {
         let (env, id) = env();
         let market = addr(&env);
         let token = addr(&env);
-        env.as_contract(&id, || { emit_fee_deposited(&env, market.clone(), token.clone(), 200_000); });
+        env.as_contract(&id, || {
+            emit_fee_deposited(&env, market.clone(), token.clone(), 200_000);
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "fee_deposited"));
@@ -415,7 +437,9 @@ mod tests {
         let (env, id) = env();
         let token = addr(&env);
         let dest = addr(&env);
-        env.as_contract(&id, || { emit_fee_withdrawn(&env, token.clone(), 1_000_000, dest.clone()); });
+        env.as_contract(&id, || {
+            emit_fee_withdrawn(&env, token.clone(), 1_000_000, dest.clone());
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "fee_withdrawn"));
@@ -433,7 +457,9 @@ mod tests {
         let (env, id) = env();
         let token = addr(&env);
         let admin = addr(&env);
-        env.as_contract(&id, || { emit_emergency_drain(&env, token.clone(), 50_000_000, admin.clone()); });
+        env.as_contract(&id, || {
+            emit_emergency_drain(&env, token.clone(), 50_000_000, admin.clone());
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "emergency_drain"));
@@ -449,7 +475,9 @@ mod tests {
     #[test]
     fn test_emit_config_updated() {
         let (env, id) = env();
-        env.as_contract(&id, || { emit_config_updated(&env, str(&env, "fee_bps"), 300); });
+        env.as_contract(&id, || {
+            emit_config_updated(&env, str(&env, "fee_bps"), 300);
+        });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "config_updated"));
@@ -465,10 +493,15 @@ mod tests {
     fn test_emit_conflicting_oracle_report() {
         let (env, id) = env();
         let oracle = addr(&env);
-        env.as_contract(&id, || { emit_conflicting_oracle_report(&env, 10, oracle.clone()); });
+        env.as_contract(&id, || {
+            emit_conflicting_oracle_report(&env, 10, oracle.clone());
+        });
 
         let ev = sole_event!(env);
-        assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "conflicting_oracle_report"));
+        assert_eq!(
+            topic_sym!(env, ev),
+            Symbol::new(&env, "conflicting_oracle_report")
+        );
         let topic_id: u64 = u64::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
         assert_eq!(topic_id, 10_u64);
         let ev_oracle: Address = TryFromVal::try_from_val(&env, &ev.2).unwrap();

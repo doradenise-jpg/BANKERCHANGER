@@ -80,14 +80,12 @@ pub fn compute_odds(
     }
 
     // Calculate the constant product invariant k
-    let k = pool_a
-        .checked_mul(pool_b)?
-        .checked_mul(pool_draw)?;
+    let k = pool_a.checked_mul(pool_b)?.checked_mul(pool_draw)?;
 
     let (pool_out, pool_in) = match side {
-        0 => (pool_a, pool_draw),    // Betting on FighterA: sell FighterA, buy with draw
-        1 => (pool_b, pool_draw),    // Betting on FighterB: sell FighterB, buy with draw
-        2 => (pool_draw, pool_a),    // Betting on Draw: sell draw, buy with FighterA
+        0 => (pool_a, pool_draw), // Betting on FighterA: sell FighterA, buy with draw
+        1 => (pool_b, pool_draw), // Betting on FighterB: sell FighterB, buy with draw
+        2 => (pool_draw, pool_a), // Betting on Draw: sell draw, buy with FighterA
         _ => return None,
     };
 
@@ -98,8 +96,8 @@ pub fn compute_odds(
     // For sides A/B: k / (new_pool_draw * pool_a * pool_b)
     // For draw: k / (new_pool_a * pool_b)
     let other_pool = match side {
-        0 | 1 => pool_b.checked_mul(pool_a)?,  // B and A remain the same for A/B bets
-        2 => pool_b.checked_mul(1)?,           // Only B remains constant for draw bets (multiply by 1 to keep type consistent)
+        0 | 1 => pool_b.checked_mul(pool_a)?, // B and A remain the same for A/B bets
+        2 => pool_b.checked_mul(1)?, // Only B remains constant for draw bets (multiply by 1 to keep type consistent)
         _ => return None,
     };
 
@@ -178,11 +176,7 @@ pub fn calc_max_trade(reserve: i128, _balance: i128) -> i128 {
 ///
 /// # Returns
 /// Amount of fees claimable in stroops
-pub fn calc_claimable_lp_fees(
-    lp_fee_per_share: i128,
-    lp_fee_debt: i128,
-    lp_shares: i128,
-) -> i128 {
+pub fn calc_claimable_lp_fees(lp_fee_per_share: i128, lp_fee_debt: i128, lp_shares: i128) -> i128 {
     if lp_shares <= 0 {
         return 0;
     }
@@ -216,9 +210,9 @@ mod tests {
 
     #[test]
     fn test_isqrt_non_perfect_squares() {
-        assert_eq!(isqrt(5), 2);   // floor(√5) = 2
-        assert_eq!(isqrt(10), 3);  // floor(√10) = 3
-        assert_eq!(isqrt(99), 9);  // floor(√99) = 9
+        assert_eq!(isqrt(5), 2); // floor(√5) = 2
+        assert_eq!(isqrt(10), 3); // floor(√10) = 3
+        assert_eq!(isqrt(99), 9); // floor(√99) = 9
         assert_eq!(isqrt(101), 10); // floor(√101) = 10
     }
 
@@ -283,7 +277,10 @@ mod tests {
 
     #[test]
     fn test_compute_odds_invalid_side() {
-        assert_eq!(compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000, 3), None);
+        assert_eq!(
+            compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000, 3),
+            None
+        );
     }
 
     #[test]
@@ -421,8 +418,8 @@ mod tests {
 /// These guard against checked-arithmetic panics that hand-crafted tests miss.
 #[cfg(test)]
 mod proptest_tests {
-    use proptest::prelude::*;
     use super::*;
+    use proptest::prelude::*;
 
     proptest! {
         /// For any random positive pool values and valid bet, compute_odds must never panic.

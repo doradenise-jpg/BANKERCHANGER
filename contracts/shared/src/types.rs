@@ -11,20 +11,20 @@ use soroban_sdk::{contracttype, Address, BytesN, String};
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum MarketStatus {
-    Open,       // Bets are being accepted
-    Locked,     // Fight has started; bets are closed
-    Resolved,   // Winner declared; claims are open
-    Cancelled,  // Fight cancelled; full refunds available
-    Disputed,   // Outcome under admin review; claims frozen
+    Open,      // Bets are being accepted
+    Locked,    // Fight has started; bets are closed
+    Resolved,  // Winner declared; claims are open
+    Cancelled, // Fight cancelled; full refunds available
+    Disputed,  // Outcome under admin review; claims frozen
 }
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    FighterA,   // First boxer wins
-    FighterB,   // Second boxer wins
-    Draw,       // Match ends in a draw
-    NoContest,  // Fight invalidated (DQ, early stop, etc.)
+    FighterA,  // First boxer wins
+    FighterB,  // Second boxer wins
+    Draw,      // Match ends in a draw
+    NoContest, // Fight invalidated (DQ, early stop, etc.)
 }
 
 #[contracttype]
