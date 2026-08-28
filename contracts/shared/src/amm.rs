@@ -159,11 +159,18 @@ pub fn compute_odds(
 /// Using constant product AMM: reserve * balance = k (constant)
 /// After trade: (reserve - collateral_in) * (balance + shares_out) = k
 /// Solving for max collateral_in where reserve_after = 1:
-/// (1) * (balance + shares_out) = reserve * balance
-/// shares_out = reserve * balance - balance
-/// collateral_in = reserve - 1
-pub fn calc_max_trade(reserve: i128, _balance: i128) -> i128 {
-    if reserve <= 1 {
+///   (1) * (balance + shares_out) = reserve * balance
+///   shares_out = reserve * balance - balance = balance * (reserve - 1)
+///   collateral_in = reserve - 1
+///
+/// Note: `balance` cancels out of the `collateral_in` expression above, so it does
+/// not appear in the returned value. It is accepted as a parameter to keep the
+/// function signature aligned with the CFMM derivation and to allow future
+/// extensions (e.g., fee-adjusted or multi-asset invariants) without a breaking
+/// API change. The `balance > 0` precondition is still checked to guard against
+/// degenerate pool states.
+pub fn calc_max_trade(reserve: i128, balance: i128) -> i128 {
+    if reserve <= 1 || balance <= 0 {
         return 0;
     }
     reserve - 1
@@ -516,6 +523,18 @@ mod proptest_tests {
     #[test]
     fn test_calc_max_trade_reserve_zero() {
         assert_eq!(calc_max_trade(0, 50), 0);
+    }
+
+    #[test]
+    fn test_calc_max_trade_zero_balance_rejected() {
+        // balance = 0 is a degenerate pool state; guard returns 0
+        assert_eq!(calc_max_trade(100, 0), 0);
+    }
+
+    #[test]
+    fn test_calc_max_trade_negative_balance_rejected() {
+        // negative balance should never occur but must not silently produce a result
+        assert_eq!(calc_max_trade(100, -1), 0);
     }
 
     // ── calc_claimable_lp_fees tests ────────────────────────────────────────────
