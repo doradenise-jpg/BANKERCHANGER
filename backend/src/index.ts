@@ -22,9 +22,11 @@ import governanceRouter from "./routes/governance.routes";
 import adminRouter from "./routes/admin.routes";
 import { getPortfolio, getPlatformStats } from "./api/controllers/MarketController";
 import claimsRouter from "./routes/bet.routes";
+import engagementRouter from "./routes/engagement.routes";
 import { startAutoResolutionCron, startAutoLockCron } from "./cron/autoResolution.cron";
 import { startCleanupCron } from "./cron/cleanup.cron";
-import { initActivityFeed } from "./websocket/realtime";
+import { initActivityFeed, getActivityFeed } from "./websocket/realtime";
+import { engagementService } from "./services/engagement.service";
 import { register, httpRequestDuration, httpRequestsTotal } from "./services/metrics.service";
 
 // Initialise Sentry before any other code (captures unhandled rejections/exceptions)
@@ -102,6 +104,7 @@ app.use("/api/claims", claimsRouter);
 app.get("/api/stats", getPlatformStats);
 app.get("/api/portfolio/:address", getPortfolio);
 app.use("/api/bets", claimsRouter);
+app.use("/api/engagement", engagementRouter);
 app.use("/api/admin", adminRouter);
 app.post("/trading/bet", (_req, res) => res.json({ ok: true }));
 app.post("/wallet/withdraw", (_req, res) => res.json({ ok: true }));
@@ -172,5 +175,15 @@ const server = app.listen(PORT, () => {
 })();
 
 initActivityFeed(server);
+
+// Bridge engagement leaderboard rank changes onto the WebSocket layer so
+// subscribed clients get real-time rank updates (issues #516, #517).
+engagementService.setRankUpdateListener((updates) => {
+  try {
+    getActivityFeed().emitLeaderboardRankUpdate(updates);
+  } catch (err) {
+    logger.warn({ err }, "Failed to emit leaderboard rank update");
+  }
+});
 
 export default app;
