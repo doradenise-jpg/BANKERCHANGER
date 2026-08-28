@@ -464,6 +464,8 @@ impl Market {
             // Clear pending reports
             env.storage().persistent().set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
             
+            // Include the oracle address in the event so on-chain data is sufficient
+            // to audit oracle performance without relying on off-chain records.
             boxmeout_shared::emit_market_resolved(&env, state.market_id, report.outcome, oracle);
         } else if conflicting_count > 0 && matching_count == 1 {
             // Emit event for conflicting report, wait for third oracle
@@ -831,6 +833,8 @@ impl Market {
         Self::save_state(&env, &state);
         Self::extend_market_ttl(&env);
 
+        // Include the admin address so on-chain audits can distinguish
+        // oracle-resolved markets from admin-overridden (dispute) resolutions.
         boxmeout_shared::emit_market_resolved(&env, state.market_id, final_outcome, admin);
         Ok(())
     }
