@@ -35,10 +35,27 @@ describe('EngagementService', () => {
     const tree = service.getReferralTree('referrer-1');
     const payout = service.calculateReferralPayout('referrer-1');
 
-    expect(tree.depth).toBe(2);
+    expect(tree.depth).toBe(3);
     expect(tree.totalReferrals).toBe(5);
-    expect(payout.total).toBe(0.3);
+    expect(payout.total).toBe(0.32);
     expect(payout.breakdown[0].amount).toBe(0.2);
+  });
+
+  it('tracks deeper referral chains without truncating depth', async () => {
+    const service = new EngagementService();
+
+    service.trackReferral('root-user', 'level-1-a');
+    service.trackReferral('root-user', 'level-1-b');
+    service.trackReferral('level-1-a', 'level-2-a');
+    service.trackReferral('level-2-a', 'level-3-a');
+
+    const tree = service.getReferralTree('root-user');
+    const payout = service.calculateReferralPayout('root-user');
+
+    expect(tree.depth).toBe(3);
+    expect(tree.totalReferrals).toBe(4);
+    expect(payout.total).toBe(0.27);
+    expect(payout.breakdown.map((entry) => entry.level)).toEqual([1, 2, 3]);
   });
 
   it('publishes leaderboard rank updates over WebSocket', async () => {

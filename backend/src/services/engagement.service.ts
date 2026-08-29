@@ -102,15 +102,13 @@ export class EngagementService {
     const users: string[] = [];
     const walk = (current: string, depth: number): number => {
       const children = this.referralGraph.get(current) ?? new Set<string>();
-      let maxDepth = Math.min(depth, 2);
+      let maxDepth = depth;
 
       for (const child of children) {
         if (seen.has(child)) continue;
         seen.add(child);
         users.push(child);
-        if (depth < 2) {
-          maxDepth = Math.max(maxDepth, walk(child, depth + 1));
-        }
+        maxDepth = Math.max(maxDepth, walk(child, depth + 1));
       }
 
       return maxDepth;
@@ -126,19 +124,34 @@ export class EngagementService {
 
   calculateReferralPayout(referrerUserId: string): ReferralPayoutResult {
     const tree = this.getReferralTree(referrerUserId);
-    const directReferrals = this.referralGraph.get(referrerUserId) ?? new Set<string>();
-    const totalDirect = directReferrals.size;
-    let secondLevelCount = 0;
+    const breakdown: ReferralPayoutBreakdown[] = [];
+    const levelCounts = new Map<number, number>();
 
-    for (const child of directReferrals) {
-      const nested = this.referralGraph.get(child) ?? new Set<string>();
-      secondLevelCount += nested.size;
+    const countReferralsAtLevel = (current: string, currentLevel: number, visited: Set<string>): void => {
+      if (visited.has(current)) return;
+      visited.add(current);
+
+      if (currentLevel > 0) {
+        levelCounts.set(currentLevel, (levelCounts.get(currentLevel) ?? 0) + 1);
+      }
+
+      const children = this.referralGraph.get(current) ?? new Set<string>();
+      for (const child of children) {
+        countReferralsAtLevel(child, currentLevel + 1, visited);
+      }
+    };
+
+    countReferralsAtLevel(referrerUserId, 0, new Set());
+
+    // Calculate payout: level 1 = 10%, level 2 = 5%, level 3+ = 2%
+    for (const [level, count] of levelCounts.entries()) {
+      if (level === 0) continue; // skip root
+      const rate = level === 1 ? 0.1 : level === 2 ? 0.05 : 0.02;
+      const amount = Number((count * rate).toFixed(2));
+      if (amount > 0) {
+        breakdown.push({ level, userId: referrerUserId, amount });
+      }
     }
-
-    const breakdown: ReferralPayoutBreakdown[] = [
-      { level: 1, userId: referrerUserId, amount: Number((totalDirect * 0.1).toFixed(2)) },
-      { level: 2, userId: referrerUserId, amount: Number((secondLevelCount * 0.05).toFixed(2)) },
-    ].filter((entry) => entry.amount > 0);
 
     const total = Number((breakdown.reduce((sum, entry) => sum + entry.amount, 0)).toFixed(2));
     return { total, breakdown };
