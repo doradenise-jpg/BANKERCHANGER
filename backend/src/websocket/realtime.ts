@@ -3,6 +3,7 @@ import type { IncomingMessage } from 'http';
 import type { Server } from 'http';
 import jwt from 'jsonwebtoken';
 import { logger } from '../utils/logger';
+import type { RankUpdate } from '../models/Engagement';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -18,8 +19,16 @@ export type ActivityEvent =
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
   | { type: 'resolved'; marketId: string; winningOutcomeId: string };
 
+/** Pushed to leaderboard subscribers whenever one or more ranks change. */
+export interface LeaderboardRankEvent {
+  type: 'leaderboard_rank_update';
+  updates: RankUpdate[];
+  timestamp: string;
+}
+
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
+type LeaderboardSubMsg = { type: 'subscribe_leaderboard' | 'unsubscribe_leaderboard' };
 
 // ---------------------------------------------------------------------------
 // Rate limiter — token bucket, max 20 events/sec per market
@@ -50,6 +59,8 @@ export class ActivityFeed {
   private wss: WebSocketServer;
   // marketId → set of subscribed sockets
   private subscriptions = new Map<string, Set<WebSocket>>();
+  // sockets subscribed to global leaderboard rank updates
+  private leaderboardSubs = new Set<WebSocket>();
   private rateLimiter = new MarketRateLimiter();
   // Track authenticated connections
   private authenticated = new WeakSet<WebSocket>();
@@ -58,7 +69,7 @@ export class ActivityFeed {
 
   constructor(server: Server) {
     this.wss = new WebSocketServer({ server });
-    this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    this.wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
       // Accept connection without verifying JWT in URL
       // Authentication happens in the first message
       
@@ -119,6 +130,17 @@ export class ActivityFeed {
       return;
     }
 
+    // Authenticated: leaderboard rank-update subscription (no per-market key)
+    const leaderboardMsg = msg as LeaderboardSubMsg;
+    if (leaderboardMsg.type === 'subscribe_leaderboard') {
+      this.leaderboardSubs.add(ws);
+      return;
+    }
+    if (leaderboardMsg.type === 'unsubscribe_leaderboard') {
+      this.leaderboardSubs.delete(ws);
+      return;
+    }
+
     // Authenticated: handle subscription messages
     const { type, marketId } = msg as SubscribeMsg;
     if (type !== 'subscribe_activity' || typeof marketId !== 'string') return;
@@ -144,6 +166,8 @@ export class ActivityFeed {
         this.subscriptions.delete(marketId);
       }
     }
+
+    this.leaderboardSubs.delete(ws);
   }
 
   /** Publish an activity event to all subscribers of the market. */
@@ -157,6 +181,24 @@ export class ActivityFeed {
     const payload = JSON.stringify(event);
     for (const ws of sockets) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+  }
+
+  /**
+   * Broadcast leaderboard rank changes to every subscribed client.
+   * Called by the engagement service's rank-update listener.
+   */
+  emitLeaderboardRankUpdate(updates: RankUpdate[]): void {
+    if (!updates.length || !this.leaderboardSubs.size) return;
+
+    const payload: LeaderboardRankEvent = {
+      type: 'leaderboard_rank_update',
+      updates,
+      timestamp: new Date().toISOString(),
+    };
+    const raw = JSON.stringify(payload);
+    for (const ws of this.leaderboardSubs) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(raw);
     }
   }
 
