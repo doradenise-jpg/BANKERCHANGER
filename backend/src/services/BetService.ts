@@ -55,27 +55,40 @@ export async function recordBet(
 
   const amount_xlm = Number(amount) / 10_000_000;
 
-  const result = await pool.query(
-    `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (tx_hash) DO NOTHING
-     RETURNING *`,
-    [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
-  );
-
+  const client = await pool.connect();
   let bet: any;
-  if (result.rows.length > 0) {
-    bet = result.rows[0];
-    // Invalidate cache only on new insert
-    await cacheDeletePattern(`market:${market_id}*`);
-    await cacheDeletePattern('platform:stats');
-  } else {
-    // Conflict occurred - fetch existing row
-    const existing = await pool.query(
-      'SELECT * FROM bets WHERE tx_hash = $1',
-      [tx_hash],
+
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (tx_hash) DO NOTHING
+       RETURNING *`,
+      [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
     );
-    bet = existing.rows[0];
+
+    if (result.rows.length > 0) {
+      bet = result.rows[0];
+      // Invalidate cache only on new insert
+      await cacheDeletePattern(`market:${market_id}*`);
+      await cacheDeletePattern('platform:stats');
+    } else {
+      // Conflict occurred - fetch existing row
+      const existing = await client.query(
+        'SELECT * FROM bets WHERE tx_hash = $1',
+        [tx_hash],
+      );
+      bet = existing.rows[0];
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 
   return {
