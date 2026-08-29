@@ -177,6 +177,15 @@ pub fn emit_stale_reports_cleared(env: &Env, market_id: u64, cleared_count: u32)
     env.events().publish(topics, cleared_count);
 }
 
+/// Emits a `fee_tiers_updated` event when the admin updates treasury fee tiers.
+///
+/// Topics: `(Symbol("fee_tiers_updated"),)`
+/// Data:   `(admin, tier_count)`
+pub fn emit_fee_tiers_updated(env: &Env, admin: Address, tier_count: u32) {
+    let topics = (Symbol::new(env, "fee_tiers_updated"),);
+    env.events().publish(topics, (admin, tier_count));
+}
+
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
