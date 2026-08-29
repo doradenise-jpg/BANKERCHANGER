@@ -1,0 +1,9 @@
+{
+  "name": "bankerchanger-root",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test:e2e": "npm --prefix backend run test:e2e",
+    "test:integration": "npm --prefix backend run test:integration"
+  }
+}
