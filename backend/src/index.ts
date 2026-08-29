@@ -27,8 +27,13 @@ import { startCleanupCron } from "./cron/cleanup.cron";
 import { initActivityFeed } from "./websocket/realtime";
 import { register, httpRequestDuration, httpRequestsTotal } from "./services/metrics.service";
 
+import { setDbAdapter, defaultDbAdapter } from "./services/MarketService";
+
 // Initialise Sentry before any other code (captures unhandled rejections/exceptions)
 initSentry(env.SENTRY_DSN, env.NODE_ENV);
+
+// Wire default production DbAdapter for MarketService
+setDbAdapter(defaultDbAdapter);
 
 const app = express();
 

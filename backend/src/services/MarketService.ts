@@ -49,6 +49,107 @@ export interface DbAdapter {
   updateMarketStatus(market_id: string, status: string): Promise<void>;
 }
 
+export const defaultDbAdapter: DbAdapter = {
+  async findMarkets(filters?: MarketFilters): Promise<Market[]> {
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (filters?.status) {
+      values.push(filters.status);
+      whereClauses.push(`status = $${values.length}`);
+    }
+    if (filters?.weight_class) {
+      values.push(filters.weight_class);
+      whereClauses.push(`weight_class = $${values.length}`);
+    }
+    if (filters?.fighter) {
+      values.push(`%${filters.fighter}%`);
+      whereClauses.push(`(fighter_a ILIKE $${values.length} OR fighter_b ILIKE $${values.length})`);
+    }
+    if (filters?.dateFrom) {
+      values.push(filters.dateFrom);
+      whereClauses.push(`scheduled_at >= $${values.length}`);
+    }
+    if (filters?.dateTo) {
+      values.push(filters.dateTo);
+      whereClauses.push(`scheduled_at <= $${values.length}`);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    const orderBySql =
+      filters?.sort === 'date_asc' ? 'ORDER BY scheduled_at ASC' :
+      filters?.sort === 'pool_desc' ? 'ORDER BY total_pool DESC' :
+      'ORDER BY scheduled_at DESC';
+
+    const { rows } = await pool.query(
+      `SELECT * FROM markets ${whereSql} ${orderBySql}`,
+      values,
+    );
+
+    return rows.map((row) => ({
+      ...row,
+      scheduled_at: new Date(row.scheduled_at),
+      created_at: new Date(row.created_at),
+      updated_at: new Date(row.updated_at),
+      resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+    } as Market));
+  },
+
+  async findMarketById(market_id: string): Promise<Market | null> {
+    const { rows } = await pool.query(
+      'SELECT * FROM markets WHERE market_id = $1',
+      [market_id],
+    );
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    return {
+      ...row,
+      scheduled_at: new Date(row.scheduled_at),
+      created_at: new Date(row.created_at),
+      updated_at: new Date(row.updated_at),
+      resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+    } as Market;
+  },
+
+  async findBetsByAddress(bettor_address: string): Promise<Bet[]> {
+    const { rows } = await pool.query(
+      'SELECT * FROM bets WHERE bettor_address = $1 ORDER BY placed_at DESC',
+      [bettor_address],
+    );
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  },
+
+  async findBetsByMarket(market_id: string, bettor_address?: string): Promise<Bet[]> {
+    const values: unknown[] = [market_id];
+    let sql = 'SELECT * FROM bets WHERE market_id = $1';
+
+    if (bettor_address) {
+      values.push(bettor_address);
+      sql += ` AND bettor_address = $${values.length}`;
+    }
+
+    sql += ' ORDER BY placed_at DESC';
+
+    const { rows } = await pool.query(sql, values);
+    return rows.map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as Bet));
+  },
+
+  async updateMarketStatus(market_id: string, status: string): Promise<void> {
+    await pool.query(
+      'UPDATE markets SET status = $1, updated_at = NOW() WHERE market_id = $2',
+      [status, market_id],
+    );
+  },
+};
+
 let _db: DbAdapter | null = null;
 
 export function setDbAdapter(adapter: DbAdapter): void {
