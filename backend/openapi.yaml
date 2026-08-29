@@ -691,6 +691,76 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse500' }
 
+  /api/users/{address}/history/export:
+    get:
+      summary: Export user transaction and betting history as CSV or JSON audit report
+      operationId: exportUserHistory
+      tags: [Users]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Stellar G... wallet address
+          schema: { type: string }
+        - name: format
+          in: query
+          required: false
+          description: Export format (csv or json)
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+        - name: startDate
+          in: query
+          required: false
+          description: Filter records starting from this ISO 8601 timestamp
+          schema: { type: string, format: date-time }
+        - name: endDate
+          in: query
+          required: false
+          description: Filter records up to this ISO 8601 timestamp
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Successfully generated audit report stream
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              example: 'attachment; filename="audit-history-GBETTOR...-1724890000000.csv"'
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    timestamp: { type: string, format: date-time }
+                    transactionHash: { type: string }
+                    marketId: { type: string }
+                    marketTitle: { type: string }
+                    actionType: { type: string, enum: [BET, CLAIM, REFUND] }
+                    outcomePicked: { type: string }
+                    amountXlm: { type: number }
+                    payoutXlm: { type: number }
+                    netPnlXlm: { type: number }
+        '400':
+          description: Invalid address or query parameter format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse400' }
+        '429':
+          description: Rate limit exceeded (max 5 requests per minute)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse429' }
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse500' }
+
   /api/users/{id}:
     get:
       summary: Get public user profile

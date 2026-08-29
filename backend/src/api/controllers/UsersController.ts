@@ -1,6 +1,7 @@
-// backend/src/api/controllers/UsersController.ts - User Controller
-import { Response } from 'express';
+import { Request, Response } from 'express';
+import { StrKey } from '@stellar/stellar-sdk';
 import { UserService } from '../../services/user.service.js';
+import { streamUserHistoryReport } from '../../services/export.service.js';
 import { AuthenticatedRequest } from '../../types/auth.types.js';
 import { UserTier } from '@prisma/client';
 import { logger } from '../../utils/logger.js';
@@ -128,6 +129,79 @@ export class UsersController {
       }
       logger.error('UsersController.updateRole error', { error });
       return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  }
+
+  /**
+   * GET /api/users/:address/history/export
+   * Generates and streams structured CSV or JSON audit reports of all bets, wins, losses,
+   * deposits, and claim events for a Stellar address.
+   */
+  async exportHistory(req: Request, res: Response) {
+    try {
+      const { address } = req.params;
+      const formatParam = ((req.query.format as string) || 'csv').toLowerCase();
+      const startDate = req.query.startDate as string | undefined;
+      const endDate = req.query.endDate as string | undefined;
+
+      // Validate Stellar address format
+      if (!address || !StrKey.isValidEd25519PublicKey(address)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_ADDRESS', message: 'Invalid Stellar address format' },
+          message: 'Invalid Stellar address format',
+        });
+      }
+
+      // Validate format parameter
+      if (formatParam !== 'csv' && formatParam !== 'json') {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_FORMAT', message: 'Invalid format. Supported formats: csv, json' },
+          message: 'Invalid format. Supported formats: csv, json',
+        });
+      }
+
+      // Validate dates
+      if (startDate) {
+        const d = new Date(startDate);
+        if (isNaN(d.getTime())) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_DATE', message: 'Invalid startDate format. Use ISO 8601 string.' },
+            message: 'Invalid startDate format. Use ISO 8601 string.',
+          });
+        }
+      }
+      if (endDate) {
+        const d = new Date(endDate);
+        if (isNaN(d.getTime())) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_DATE', message: 'Invalid endDate format. Use ISO 8601 string.' },
+            message: 'Invalid endDate format. Use ISO 8601 string.',
+          });
+        }
+      }
+      if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_DATE_RANGE', message: 'startDate cannot be after endDate' },
+          message: 'startDate cannot be after endDate',
+        });
+      }
+
+      await streamUserHistoryReport(res, {
+        address,
+        format: formatParam as 'csv' | 'json',
+        startDate,
+        endDate,
+      });
+    } catch (error) {
+      logger.error('UsersController.exportHistory error', { error });
+      if (!res.headersSent) {
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+      }
     }
   }
 }

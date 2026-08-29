@@ -7,9 +7,11 @@ import { validate } from '../middleware/validation.middleware.js';
 import { updateProfileBody } from '../schemas/validation.schemas.js';
 import { AuthenticatedRequest } from '../types/auth.types.js';
 import { UserRepository } from '../repositories/user.repository.js';
+import { rateLimit } from '../middleware/rate-limit.middleware.js';
 
 const router = Router();
 const userRepository = new UserRepository();
+const exportRateLimiter = rateLimit({ windowMs: 60_000, max: 5, keyBy: 'ip' });
 
 /**
  * Middleware: reject suspended users on any authenticated request (issue #37)
@@ -191,6 +193,48 @@ router.patch('/:id/role', requireAuth, requireAdmin, usersController.updateRole.
 
 /**
  * @swagger
+ * /api/users/{address}/history/export:
+ *   get:
+ *     summary: Export user transaction and betting history as CSV or JSON audit report
+ *     tags: [Users]
+ *     parameters:
+ *       - in: path
+ *         name: address
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Stellar G... wallet address
+ *       - in: query
+ *         name: format
+ *         schema:
+ *           type: string
+ *           enum: [csv, json]
+ *           default: csv
+ *         description: Output format (csv or json)
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: ISO 8601 start date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: ISO 8601 end date
+ *     responses:
+ *       200:
+ *         description: Streamed audit report file (CSV or JSON)
+ *       400:
+ *         description: Invalid address or parameter format
+ *       429:
+ *         description: Rate limit exceeded (maximum 5 export requests per minute per IP)
+ */
+router.get('/:address/history/export', exportRateLimiter, usersController.exportHistory.bind(usersController));
+
+/**
+ * @swagger
  * /api/users/{id}:
  *   get:
  *     summary: Get public user profile
@@ -201,6 +245,11 @@ router.patch('/:id/role', requireAuth, requireAdmin, usersController.updateRole.
  *         required: true
  *         schema:
  *           type: string
+ *     responses:
+ *       200:
+ *         description: Public user profile
+ *       404:
+ *         description: User not found
  *     responses:
  *       200:
  *         description: Public user profile
