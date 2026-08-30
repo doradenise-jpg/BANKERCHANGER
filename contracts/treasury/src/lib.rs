@@ -23,7 +23,7 @@ use soroban_sdk::{
 };
 
 use boxmeout_shared::errors::ContractError;
-use boxmeout_shared::types::{AuditAction, AuditEntry};
+use boxmeout_shared::types::{AuditAction, AuditEntry, FeeTier};
 
 const ADMIN: &str = "ADMIN";
 const BET_TOKEN: &str = "BET_TOKEN";
@@ -136,7 +136,7 @@ const MIN_WITHDRAWAL: i128          = 10_000_000; // 1 XLM in stroops
 //!   • Daily withdrawal cap enforcement (DAILY_WITHDRAWN tracked per bucket)
 //!   • Concurrency-safe fee extraction via FEE_EXTRACTION_LOCK flag
 //!   • Immutable on-chain audit trail (AUDIT_LOG Vec<AuditEntry>)
-//! ============================================================
+//! =====================================================
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Map, Symbol, Vec};
 
@@ -166,6 +166,7 @@ const SYM_FEE_WITHDRAW:   &str = "fee_wthdrl";
 const SYM_EMRG_DRAIN:     &str = "emrg_drain";
 const SYM_FEE_DEPOSIT:    &str = "fee_depst";
 const SYM_CAP_REACHED:    &str = "cap_rchd";
+const FEE_TIERS: &str               = "FEE_TIERS";
 
 #[contract]
 pub struct Treasury;
@@ -602,6 +603,13 @@ impl Treasury {
         env.storage().persistent().set(&WITHDRAWAL_NONCE, &0_u64);
 
         env.storage().persistent().set(&AUDIT_LOG, &Vec::<AuditEntry>::new(&env));
+
+        let mut default_tiers = Vec::<FeeTier>::new(&env);
+        default_tiers.push_back(FeeTier { volume_threshold: 100_000_000, fee_bps: 200 }); // <= 10 XLM: 200 bps (2%)
+        default_tiers.push_back(FeeTier { volume_threshold: 500_000_000, fee_bps: 150 }); // <= 50 XLM: 150 bps (1.5%)
+        default_tiers.push_back(FeeTier { volume_threshold: u64::MAX, fee_bps: 100 });    // > 50 XLM: 100 bps (1%)
+        env.storage().instance().set(&FEE_TIERS, &default_tiers);
+
         Ok(())
     }
 
@@ -2149,6 +2157,73 @@ impl Treasury {
         boxmeout_shared::emit_emergency_drain(&env, token, balance, admin);
         Ok(())
     }
+
+    /// Updates the dynamic fee tiers schedule.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    /// - `InvalidAmount`: Tiers vector is empty or contains invalid fee_bps (>10,000)
+    pub fn set_fee_tiers(
+        env: Env,
+        admin: Address,
+        tiers: Vec<FeeTier>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if tiers.is_empty() {
+            return Err(ContractError::InvalidAmount);
+        }
+        for tier in tiers.iter() {
+            if tier.fee_bps > 10_000 {
+                return Err(ContractError::InvalidAmount);
+            }
+        }
+
+        env.storage().instance().set(&FEE_TIERS, &tiers);
+        boxmeout_shared::emit_fee_tiers_updated(&env, admin, tiers.len() as u32);
+        Ok(())
+    }
+
+    /// Returns the configured fee tier schedule.
+    pub fn get_fee_tiers(env: Env) -> Vec<FeeTier> {
+        env.storage().instance().get(&FEE_TIERS).unwrap_or_else(|| {
+            let mut default_tiers = Vec::<FeeTier>::new(&env);
+            default_tiers.push_back(FeeTier { volume_threshold: 100_000_000, fee_bps: 200 });
+            default_tiers.push_back(FeeTier { volume_threshold: 500_000_000, fee_bps: 150 });
+            default_tiers.push_back(FeeTier { volume_threshold: u64::MAX, fee_bps: 100 });
+            default_tiers
+        })
+    }
+
+    /// Computes the fee for a bet given total market volume using the tiered schedule.
+    /// Uses safe integer arithmetic to prevent overflow and underflow.
+    pub fn calculate_fee(env: Env, market_total_volume: u64, bet_amount: u64) -> u64 {
+        let tiers = Self::get_fee_tiers(env);
+        let mut selected_bps: u32 = 200;
+        let mut matched = false;
+
+        for tier in tiers.iter() {
+            if market_total_volume <= tier.volume_threshold {
+                selected_bps = tier.fee_bps;
+                matched = true;
+                break;
+            }
+        }
+
+        if !matched && !tiers.is_empty() {
+            if let Some(last_tier) = tiers.last() {
+                selected_bps = last_tier.fee_bps;
+            }
+        }
+
+        let fee = (bet_amount as u128)
+            .checked_mul(selected_bps as u128)
+            .and_then(|prod| prod.checked_div(10_000))
+            .unwrap_or(0);
+
+        fee as u64
+    }
 }
 
 // ============================================================
@@ -2159,6 +2234,9 @@ impl Treasury {
 // Original smoke tests
 // Tests for pre-existing behaviour (updated to use 4-arg initialize)
 // ============================================================
+#[cfg(test)]
+mod test;
+
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{

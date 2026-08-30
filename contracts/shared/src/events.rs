@@ -461,6 +461,14 @@ pub fn emit_daily_cap_reached(
 ) {
     let topics = (Symbol::new(env, "daily_cap_reached"), day_bucket);
     env.events().publish(topics, (token, total_withdrawn_today, cap));
+
+/// Emits a `fee_tiers_updated` event when the admin updates treasury fee tiers.
+///
+/// Topics: `(Symbol("fee_tiers_updated"),)`
+/// Data:   `(admin, tier_count)`
+pub fn emit_fee_tiers_updated(env: &Env, admin: Address, tier_count: u32) {
+    let topics = (Symbol::new(env, "fee_tiers_updated"),);
+    env.events().publish(topics, (admin, tier_count));
 }
 
 #[cfg(test)]

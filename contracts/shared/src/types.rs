@@ -348,3 +348,15 @@ pub struct AuditEntry {
     /// Day bucket (timestamp / 86400) for daily-limit queries.
     pub day_bucket: u64,
 }
+
+/// A volume tier boundary and basis point rate for dynamic fee calculation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeeTier {
+    /// Volume threshold upper boundary in stroops (1 XLM = 10_000_000 stroops).
+    /// If market total volume <= volume_threshold, this tier's fee_bps applies.
+    pub volume_threshold: u64,
+    /// Platform fee in basis points (e.g. 200 = 2.00%, 150 = 1.50%, 100 = 1.00%).
+    pub fee_bps: u32,
+}
+
