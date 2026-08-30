@@ -211,6 +211,18 @@ pub fn emit_stale_reports_cleared(env: &Env, market_id: u64, cleared_count: u32)
     env.events().publish(topics, cleared_count);
 }
 
+/// Emits an `audit_log_entry` event each time fees are successfully withdrawn.
+/// This event forms the basis of the immutable off-chain audit trail; every
+/// withdrawal that passes all guards is guaranteed to produce exactly one entry.
+///
+/// Topics: `(Symbol("audit_log_entry"), seq)`
+/// Data:   `AuditEntry`
+pub fn emit_audit_log_entry(env: &Env, entry: AuditEntry) {
+    let seq = entry.seq;
+    let topics = (Symbol::new(env, "audit_log_entry"), seq);
+    env.events().publish(topics, entry);
+}
+
 #[cfg(test)]
 mod tests {
     use soroban_sdk::{
