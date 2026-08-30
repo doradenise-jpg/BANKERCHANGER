@@ -4,6 +4,7 @@
 //!         stale-state-after-transfer, payout math.
 //! ============================================================
 #![allow(unused_imports, unused_variables, unused_assignments, dead_code, unused_mut)]
+extern crate std;
 #[cfg(test)]
 mod security_tests {
     use soroban_sdk::{
@@ -4301,7 +4302,7 @@ mod upgrade_safety_tests {
 // Covers: storage TTL extensions across persistent maps,
 //         auth checks and error handling audit,
 //         property-based invariants & parimutuel conservation.
-// ==============================================
+// =======================================
 #[cfg(test)]
 mod task10_soroban_contract_integrity_tests {
     use soroban_sdk::{
@@ -4564,6 +4565,37 @@ mod auth_error_handling_audit_tests {
 
             scheduled_at: 100_000,
             venue: soroban_sdk::String::from_str(env, "Riyadh"),
+// ISSUE #477 (tier 16): AMM & Odds Calculation Pipeline —
+// slippage tolerance on bet execution
+// ============================================================
+#[cfg(test)]
+mod amm_slippage_guard_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::amm::compute_odds;
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetRecord, BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOracleRole, OptionalOutcome,
+    };
+    use proptest::prelude::*;
+    use crate::Market;
+
+    // MAX_SLIPPAGE_BPS = 3_000 (30%), mirrored from lib.rs
+    const MAX_SLIPPAGE_BPS: i128 = 3_000;
+    const SCHEDULED_AT: u64 = 200_000;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "SLIP-FIGHT-477"),
+            fighter_a: soroban_sdk::String::from_str(env, "Alpha"),
+            fighter_b: soroban_sdk::String::from_str(env, "Beta"),
+            weight_class: soroban_sdk::String::from_str(env, "Middleweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "London"),
             title_fight: true,
         }
     }
@@ -4591,6 +4623,14 @@ mod auth_error_handling_audit_tests {
         env.ledger().set(LedgerInfo {
             timestamp: 1_000,
 
+
+    /// Deploys a market that is Open and seeds pools directly into storage.
+    fn setup(
+        env: &Env,
+        pools: (i128, i128, i128),
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
             timestamp: 50_000,
             protocol_version: 20,
             sequence_number: 100,
@@ -4797,6 +4837,24 @@ mod property_based_integrity_tests {
         let contract_id = env.register_contract(None, Market);
         let client = crate::MarketClient::new(env, &contract_id);
         client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
+
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Open,
+            outcome: OptionalOutcome::None,
+            pool_a: pools.0,
+            pool_b: pools.1,
+            pool_draw: pools.2,
+            total_pool: pools.0 + pools.1 + pools.2,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
         let token_id = env.register_stellar_asset_contract(factory.clone());
         (client, contract_id, token_id, treasury)
     }
@@ -5026,6 +5084,189 @@ mod storage_integrity_and_lifecycle_tests {
             weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
             scheduled_at: 100_000,
             venue: soroban_sdk::String::from_str(env, "Riyadh"),
+
+    /// Extract the Symbol from event topic index 0.
+    fn topic_sym(env: &Env, event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)) -> Symbol {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.1.get(0).unwrap()).unwrap()
+    }
+
+    /// Decode the event data as a BetRecord.
+    fn data_bet_record(
+        env: &Env,
+        event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
+    ) -> BetRecord {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+    }
+
+    /// A min_shares_out above the executable share count must be rejected with
+    /// SlippageExceeded and must not move any state.
+    #[test]
+    fn test_min_shares_out_above_executable_rejected() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) = setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (shares, impact) = compute_odds(10_000_000, 10_000_000, 10_000_000, 1_000_000, 0).unwrap();
+        assert!(impact <= MAX_SLIPPAGE_BPS, "Baseline impact must stay under the guard");
+
+        let before = client.get_state();
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &(shares + 1));
+        assert_eq!(result.unwrap_err(), Ok(ContractError::SlippageExceeded),
+            "min_shares_out above executable shares must be rejected");
+
+        let after = client.get_state();
+        assert_eq!(before.pool_a, after.pool_a, "Failed bet must not mutate state");
+        assert_eq!(before.total_pool, after.total_pool, "Failed bet must not move funds");
+    }
+
+    /// A min_shares_out exactly equal to the executable shares must be accepted.
+    #[test]
+    fn test_min_shares_out_at_boundary_accepted() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) = setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (shares, impact) = compute_odds(10_000_000, 10_000_000, 10_000_000, 1_000_000, 0).unwrap();
+        assert!(impact <= MAX_SLIPPAGE_BPS);
+
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &shares);
+
+        let state = client.get_state();
+        assert_eq!(state.pool_a, 11_000_000, "Bet at min_shares boundary must execute");
+        assert_eq!(state.total_pool, 31_000_000);
+    }
+
+    /// A bet large enough to move the price by more than MAX_SLIPPAGE_BPS must be
+    /// rejected with BetTooLarge before any effect.
+    #[test]
+    fn test_thin_pool_large_bet_rejected_as_too_large() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) = setup(&env, (1_000_000, 1_000_000, 1_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let (_shares, impact) = compute_odds(1_000_000, 1_000_000, 1_000_000, 10_000_000, 0).unwrap();
+        assert!(impact > MAX_SLIPPAGE_BPS, "Impact must exceed 30% for this configuration");
+
+        let result = client.try_place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::BetTooLarge),
+            "A bet with >30% price impact must be rejected as too large");
+    }
+
+    /// A small bet into a deep pool executes with negligible slippage.
+    #[test]
+    fn test_deep_pool_small_bet_executes_with_low_slippage() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) = setup(&env, (100_000_000, 100_000_000, 100_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let (_shares, impact) = compute_odds(100_000_000, 100_000_000, 100_000_000, 1_000_000, 0).unwrap();
+        assert!(impact < 100, "Deep-pool small bet must have <1% slippage (impact={impact})");
+
+        client.place_bet(&bettor, &BetSide::FighterB, &1_000_000i128, &token_id, &0i128);
+        assert_eq!(client.get_state().pool_b, 101_000_000);
+    }
+
+    /// When pools are empty the AMM is not live, so the slippage guard is skipped
+    /// even for an extreme min_shares_out.
+    #[test]
+    fn test_zero_pools_skip_slippage_guard() {
+        let env = Env::default();
+        let (client, _contract_id, token_id, _treasury) = setup(&env, (0, 0, 0));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &1_000_000_000i128);
+        assert_eq!(client.get_state().pool_a, 1_000_000,
+            "Zero-pool market must ignore min_shares_out");
+    }
+
+    /// A successful bet emits a structured `bet_placed` event carrying the full
+    /// BetRecord (real-time frontend feed).
+    #[test]
+    fn test_bet_placed_event_is_structured_for_frontend() {
+        let env = Env::default();
+        let (client, contract_id, token_id, _treasury) = setup(&env, (10_000_000, 10_000_000, 10_000_000));
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &1_000_000i128);
+
+        let events_before = env.events().all().len();
+        client.place_bet(&bettor, &BetSide::FighterA, &1_000_000i128, &token_id, &0i128);
+
+        let events = env.events().all();
+        let contract_events = events
+            .iter()
+            .skip(events_before as usize)
+            .filter(|e| e.0 == contract_id)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(contract_events.len(), 1, "Exactly one contract event expected");
+
+        let ev = &contract_events[0];
+        assert_eq!(topic_sym(&env, ev), Symbol::new(&env, "bet_placed"));
+        let market_id: u64 = soroban_sdk::TryFromVal::try_from_val(&env, &ev.1.get(1).unwrap()).unwrap();
+        assert_eq!(market_id, 1u64, "Event must carry the market id");
+
+        let bet = data_bet_record(&env, ev);
+        assert_eq!(bet.bettor, bettor);
+        assert_eq!(bet.side, BetSide::FighterA);
+        assert_eq!(bet.amount, 1_000_000, "Event data must carry the full structured bet");
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_amm_quote_bounds_and_monotonic_shares(
+            pool_a in 1_000_000i128..=1_000_000_000i128,
+            pool_b in 1_000_000i128..=1_000_000_000i128,
+            pool_draw in 1_000_000i128..=1_000_000_000i128,
+            small in 1_000_000i128..=10_000_000i128,
+            side in 0u8..=2u8,
+        ) {
+            let big = small * 2;
+            if let Some((shares_small, impact_small)) = compute_odds(pool_a, pool_b, pool_draw, small, side) {
+                prop_assert!(shares_small > 0, "shares must be positive");
+                prop_assert!(impact_small >= 0 && impact_small <= 10_000,
+                    "impact must be bounded in bps, got {impact_small}");
+                if let Some((shares_big, _impact_big)) = compute_odds(pool_a, pool_b, pool_draw, big, side) {
+                    prop_assert!(shares_big >= shares_small,
+                        "larger collateral must never yield fewer shares (flooring may tie)");
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
+// ISSUE #477 (tier 16): 2-of-3 oracle consensus validation
+// ============================================================
+#[cfg(test)]
+mod oracle_two_of_three_consensus_tests {
+    use soroban_sdk::{
+        contract, contractimpl, contracttype,
+        testutils::{Address as _, Events, Ledger, LedgerInfo},
+        Address, Bytes, BytesN, Env, Map, Symbol, Vec,
+    };
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        FightDetails, MarketConfig, MarketState, MarketStatus, OracleReport, OracleRole,
+        OptionalOracleRole, OptionalOutcome, Outcome,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 200_000;
+    const MATCH_ID: &str = "2OF3-FIGHT-477";
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            fighter_a: soroban_sdk::String::from_str(env, "Alpha"),
+            fighter_b: soroban_sdk::String::from_str(env, "Beta"),
+            weight_class: soroban_sdk::String::from_str(env, "Middleweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "London"),
             title_fight: true,
         }
     }
@@ -5050,6 +5291,96 @@ mod storage_integrity_and_lifecycle_tests {
             timestamp: 1_000,
 
     fn setup(env: &Env) -> (crate::MarketClient<'static>, Address, Address, Address, Address) {
+
+    fn outcome_byte(outcome: &Outcome) -> u8 {
+        match outcome {
+            Outcome::FighterA => 0,
+            Outcome::FighterB => 1,
+            Outcome::Draw => 2,
+            Outcome::NoContest => 3,
+        }
+    }
+
+    /// Builds the canonical signed message exactly as the contract does:
+    /// concat(match_id XDR, outcome_byte, reported_at big-endian).
+    fn sign_report(env: &Env, sk: &SigningKey, match_id: &soroban_sdk::String, outcome: &Outcome, reported_at: u64) -> BytesN<64> {
+        use soroban_sdk::xdr::ToXdr;
+        let mut msg = Bytes::new(env);
+        msg.append(&match_id.clone().to_xdr(env));
+        msg.push_back(outcome_byte(outcome));
+        for b in reported_at.to_be_bytes().iter() {
+            msg.push_back(*b);
+        }
+        let raw: std::vec::Vec<u8> = msg.iter().collect();
+        BytesN::from_array(env, &sk.sign(&raw).to_bytes())
+    }
+
+    fn make_report(
+        env: &Env,
+        oracle: &Address,
+        sk: &SigningKey,
+        vk_bytes: &[u8; 32],
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> OracleReport {
+        OracleReport {
+            match_id: soroban_sdk::String::from_str(env, MATCH_ID),
+            outcome: outcome.clone(),
+            reported_at,
+            submitted_at: env.ledger().timestamp(),
+            signature: sign_report(env, sk, &soroban_sdk::String::from_str(env, MATCH_ID), outcome, reported_at),
+            oracle_address: oracle.clone(),
+            pub_key: BytesN::from_array(env, vk_bytes),
+        }
+    }
+
+    // Mock factory contract implementing the FactoryInterface used by the market.
+    #[contract]
+    struct MockFactory;
+
+    #[contracttype]
+    #[derive(Clone)]
+    struct MockFactoryData {
+        oracles: Vec<Address>,
+        keys: Map<Address, BytesN<32>>,
+    }
+
+    #[contractimpl]
+    impl MockFactory {
+        pub fn get_oracles(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryData>(&"DATA")
+                .map(|d| d.oracles)
+                .unwrap_or_else(|| Vec::new(&env))
+        }
+
+        pub fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>> {
+            env.storage()
+                .instance()
+                .get::<_, MockFactoryData>(&"DATA")
+                .and_then(|d| d.keys.get(oracle))
+        }
+
+        pub fn is_paused(_env: Env) -> bool {
+            false
+        }
+    }
+
+    /// Oracle identity: a fresh contract address, its Ed25519 signing key and
+    /// the corresponding public key registered at the factory.
+    #[derive(Clone)]
+    pub struct Oracle {
+        pub address: Address,
+        pub sk: SigningKey,
+        pub vk: [u8; 32],
+    }
+
+    /// Deploys a Market in Locked state plus a factory that whitelists `oracles`.
+    pub fn setup_locked_market(
+        env: &Env,
+        oracles: &[Oracle],
+    ) -> (crate::MarketClient<'static>, Address, Address) {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 50_000,
@@ -5382,5 +5713,307 @@ mod storage_integrity_and_lifecycle_tests {
             prop_assert!(p_a + p_b <= net,
                 "Floored payouts plus fee must never exceed the net pool");
         }
+    }
+}
+
+        let mut factory_addresses: Vec<Address> = Vec::new(env);
+        for o in oracles.iter() {
+            factory_addresses.push_back(o.address.clone());
+        }
+        let mut keys: Map<Address, BytesN<32>> = Map::new(env);
+        for o in oracles.iter() {
+            keys.set(o.address.clone(), BytesN::from_array(env, &o.vk));
+        }
+        let factory_id = env.register_contract(None, MockFactory);
+        env.as_contract(&factory_id, || {
+            env.storage().instance().set(
+                &"DATA",
+                &MockFactoryData { oracles: factory_addresses, keys },
+            );
+        });
+
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        let treasury = Address::generate(env);
+        client.initialize(&factory_id, &1u64, &fight(env), &config(), &treasury);
+
+        // Set the market to Locked with a fight that has not expired the window.
+        let state = MarketState {
+            market_id: 1,
+            fight: fight(env),
+            config: config(),
+            status: MarketStatus::Locked,
+            outcome: OptionalOutcome::None,
+            pool_a: 5_000_000,
+            pool_b: 3_000_000,
+            pool_draw: 0,
+            total_pool: 8_000_000,
+            resolved_at: 0,
+            oracle_used: OptionalOracleRole::None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        (client, contract_id, factory_id)
+    }
+
+    pub fn make_oracle(env: &Env, seed: u8) -> Oracle {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        Oracle {
+            address: Address::generate(env),
+            sk,
+            vk,
+        }
+    }
+
+    pub fn submit(
+        client: &crate::MarketClient<'_>,
+        env: &Env,
+        oracle: &Oracle,
+        outcome: &Outcome,
+        reported_at: u64,
+    ) -> Result<(), ContractError> {
+        let report = make_report(env, &oracle.address, &oracle.sk, &oracle.vk, outcome, reported_at);
+        match client.try_resolve_market(&oracle.address, &report) {
+            Ok(Ok(())) => Ok(()),
+            Err(Ok(err)) => Err(err),
+            Ok(Err(conv)) => panic!("unexpected conversion failure: {conv:?}"),
+            Err(Err(invoke)) => panic!("unexpected invocation failure: {invoke:?}"),
+        }
+    }
+
+    /// Extract the Symbol from event topic index 0.
+    fn topic_sym(env: &Env, event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)) -> Symbol {
+        soroban_sdk::TryFromVal::try_from_val(env, &event.1.get(0).unwrap()).unwrap()
+    }
+
+    // ── 1. Two matching reports reach consensus ───────────────────────────────
+
+    #[test]
+    fn test_two_matching_reports_resolve_market() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let oracle_b = make_oracle(&env, 2);
+        let (client, _contract_id, _factory_id) =
+            setup_locked_market(&env, &[oracle_a.clone(), oracle_b.clone()]);
+
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+        submit(&client, &env, &oracle_b, &Outcome::FighterA, 50_000).unwrap();
+
+        let state = client.get_state();
+        assert_eq!(state.status, MarketStatus::Resolved,
+            "Two matching reports must reach 2-of-3 consensus and resolve");
+        assert_eq!(state.outcome, OptionalOutcome::Some(Outcome::FighterA));
+        assert_eq!(state.oracle_used, OptionalOracleRole::Some(OracleRole::Primary));
+    }
+
+    #[test]
+    fn test_single_report_does_not_resolve() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let (client, _contract_id, _factory_id) =
+            setup_locked_market(&env, &[oracle_a.clone()]);
+
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+
+        let state = client.get_state();
+        assert_eq!(state.status, MarketStatus::Locked, "One report must not resolve");
+        assert_eq!(state.outcome, OptionalOutcome::None);
+        assert_eq!(state.oracle_used, OptionalOracleRole::None);
+    }
+
+    // ── 2. Conflicting reports block resolution and surface an event ──────────
+
+    #[test]
+    fn test_conflicting_reports_emit_event_and_do_not_resolve() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let oracle_b = make_oracle(&env, 2);
+        let (client, _contract_id, _factory_id) = setup_locked_market(
+            &env,
+            &[oracle_a.clone(), oracle_b.clone()],
+        );
+
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+        submit(&client, &env, &oracle_b, &Outcome::FighterB, 50_000).unwrap();
+
+        assert_eq!(client.get_state().status, MarketStatus::Locked,
+            "A/A vs B conflict must not resolve the market");
+
+        let ev = env.events().all().last().unwrap();
+        assert_eq!(topic_sym(&env, &ev), Symbol::new(&env, "conflicting_oracle_report"),
+            "A conflict must emit conflicting_oracle_report for the frontend");
+    }
+
+    // ── 3. Third oracle breaks the tie ────────────────────────────────────────
+
+    #[test]
+    fn test_third_matching_report_breaks_tie_and_resolves() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let oracle_b = make_oracle(&env, 2);
+        let oracle_c = make_oracle(&env, 3);
+        let (client, _contract_id, _factory_id) = setup_locked_market(
+            &env,
+            &[oracle_a.clone(), oracle_b.clone(), oracle_c.clone()],
+        );
+
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+        submit(&client, &env, &oracle_b, &Outcome::FighterB, 50_000).unwrap();
+        submit(&client, &env, &oracle_c, &Outcome::FighterA, 50_000).unwrap();
+
+        let state = client.get_state();
+        assert_eq!(state.status, MarketStatus::Resolved);
+        assert_eq!(state.outcome, OptionalOutcome::Some(Outcome::FighterA));
+        assert_eq!(state.oracle_used, OptionalOracleRole::Some(OracleRole::Primary));
+
+        let ev = env.events().all().last().unwrap();
+        assert_eq!(topic_sym(&env, &ev), Symbol::new(&env, "market_resolved"),
+            "Consensus must emit market_resolved");
+    }
+
+    // ── 4. Duplicate / unauthorised reports ───────────────────────────────────
+
+    #[test]
+    fn test_duplicate_report_from_same_oracle_rejected() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let (client, _contract_id, _factory_id) = setup_locked_market(
+            &env,
+            &[oracle_a.clone()],
+        );
+
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+        let result = submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000);
+        assert_eq!(result.unwrap_err(), ContractError::Unauthorized,
+            "An oracle must not be able to submit twice");
+    }
+
+    #[test]
+    fn test_unwhitelisted_oracle_rejected() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let intruder = make_oracle(&env, 9);
+        let (client, _contract_id, _factory_id) = setup_locked_market(
+            &env,
+            &[oracle_a.clone()],
+        );
+
+        let result = submit(&client, &env, &intruder, &Outcome::FighterA, 50_000);
+        assert_eq!(result.unwrap_err(), ContractError::NotOracle,
+            "A non-whitelisted oracle must be rejected before any state change");
+    }
+
+    #[test]
+    fn test_report_oracle_address_mismatch_rejected() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let oracle_b = make_oracle(&env, 2);
+        let (client, _contract_id, _factory_id) = setup_locked_market(
+            &env,
+            &[oracle_a.clone(), oracle_b.clone()],
+        );
+
+        // oracle_a signs, then the payload claims oracle_b as its source.
+        let report = make_report(&env, &oracle_b.address, &oracle_a.sk, &oracle_a.vk, &Outcome::FighterA, 50_000);
+        let result = client.try_resolve_market(&oracle_a.address, &report);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidOracleSignature),
+            "A report whose oracle_address does not match the caller must be rejected");
+    }
+
+    // ── 5. Pending reports are cleared once consensus is reached ──────────────
+
+    #[test]
+    fn test_pending_reports_cleared_after_consensus() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let oracle_b = make_oracle(&env, 2);
+        let (client, contract_id, _factory_id) = setup_locked_market(
+            &env,
+            &[oracle_a.clone(), oracle_b.clone()],
+        );
+
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+        submit(&client, &env, &oracle_b, &Outcome::FighterA, 50_000).unwrap();
+
+        let pending: Option<Map<Address, OracleReport>> = env.as_contract(&contract_id, || {
+            env.storage().persistent().get::<_, Map<Address, OracleReport>>(&"PENDING_REPORTS")
+        });
+        match pending {
+            Some(map) => assert_eq!(map.len(), 0, "Pending reports must be cleared on resolution"),
+            None => (), // absent is also a cleared state
+        }
+    }
+}
+
+// ============================================================
+// ISSUES #414 / #415 / #417 (tasks 1, 2, 4): contract storage
+// lifecycle — TTL behaviour of oracle pending reports.
+//
+// NOTE: The Soroban test environment does NOT enforce TTL expiry on
+// storage reads — entries created with the default persistent TTL
+// remain accessible indefinitely in unit tests. These tests verify
+// that behaviour so a future upgrade adding TTL enforcement can
+// detect the change.
+// ============================================================
+#[cfg(test)]
+mod oracle_pending_reports_ttl_tests {
+    use soroban_sdk::{
+        testutils::{Ledger, LedgerInfo},
+        Address, Env,
+    };
+    use boxmeout_shared::types::{MarketStatus, Outcome};
+    use super::oracle_two_of_three_consensus_tests::{
+        make_oracle, setup_locked_market, submit, Oracle,
+    };
+
+    const DEFAULT_PERSISTENT_TTL: u32 = 4096;
+    const MAX_TTL: u32 = 6_311_520;
+
+    fn advance(env: &Env, entries: u32) {
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000 + u64::from(entries),
+            protocol_version: 20,
+            sequence_number: 100 + entries,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: DEFAULT_PERSISTENT_TTL,
+            max_entry_ttl: MAX_TTL,
+        });
+    }
+
+    /// Keep STATE alive across the ledger advance, exactly as the normal bet /
+    /// lock / resolve lifecycle does via extend_market_ttl.
+    fn keep_state_alive(env: &Env, contract_id: &Address) {
+        env.as_contract(contract_id, || {
+            env.storage().persistent().extend_ttl(&"STATE", MAX_TTL, MAX_TTL);
+        });
+    }
+
+    /// A pending report is still present even after advancing the ledger past
+    /// the default persistent TTL (4096). This documents the current test-env
+    /// behaviour where TTL is not enforced on reads.
+    #[test]
+    fn test_pending_reports_survive_past_default_ttl_in_test_env() {
+        let env = Env::default();
+        let oracle_a = make_oracle(&env, 1);
+        let oracle_b = make_oracle(&env, 2);
+        let (client, contract_id, _factory_id) =
+            setup_locked_market(&env, &[oracle_a.clone(), oracle_b.clone()]);
+
+        keep_state_alive(&env, &contract_id);
+        submit(&client, &env, &oracle_a, &Outcome::FighterA, 50_000).unwrap();
+
+        // Advance well past the default persistent TTL.
+        advance(&env, DEFAULT_PERSISTENT_TTL + 500);
+
+        // In the unit-test environment, the first report is still readable.
+        submit(&client, &env, &oracle_b, &Outcome::FighterA, 50_000).unwrap();
+
+        assert_eq!(client.get_state().status, MarketStatus::Resolved,
+            "Pending reports survive past default TTL in the test env (TTL not enforced on reads)");
     }
 }
