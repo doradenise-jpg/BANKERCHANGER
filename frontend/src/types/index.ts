@@ -86,3 +86,65 @@ export interface Invoice {
   dueDate: string; // ISO 8601 timestamp
   status: InvoiceStatus;
 }
+
+// ============================================================
+// Engagement (User Experience & Social)
+// ============================================================
+
+export interface UserStreak {
+  address: string;
+  current_streak: number;
+  best_streak: number;
+  total_predictions: number;
+  last_prediction_date: string | null;
+}
+
+export interface Achievement {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  category: string;
+  threshold: number;
+  reward_label: string;
+}
+
+export interface UserAchievement extends Achievement {
+  earned_at: string;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  address: string;
+  predictions: number;
+  score: number;
+}
+
+export interface Leaderboard {
+  entries: LeaderboardEntry[];
+  updatedAt: string;
+}
+
+export interface ReferralSummary {
+  address: string;
+  directCount: number;
+  convertedCount: number;
+  totalPayout: string;
+  treeDepth: number;
+  treeSize: number;
+}
+
+export interface ReferralPayoutResult {
+  totalPayout: string;
+  breakdown: { level: number; count: number; amount: string }[];
+}
+
+export interface UserNotification {
+  id: number;
+  type: string;
+  title: string;
+  body: string;
+  payload: Record<string, unknown>;
+  read: boolean;
+  created_at: string;
+}

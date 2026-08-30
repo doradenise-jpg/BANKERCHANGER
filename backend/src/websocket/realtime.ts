@@ -16,10 +16,11 @@ const AUTH_TIMEOUT_MS = 5_000; // 5 seconds to send auth message
 export type ActivityEvent =
   | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
-  | { type: 'resolved'; marketId: string; winningOutcomeId: string };
+  | { type: 'resolved'; marketId: string; winningOutcomeId: string }
+  | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string };
 
 type AuthMsg = { type: 'auth'; token: string };
-type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
+type SubscribeMsg = { type: 'subscribe_activity'; marketId: string } | { type: 'subscribe_leaderboard' };
 
 // ---------------------------------------------------------------------------
 // Rate limiter — token bucket, max 20 events/sec per market
@@ -50,6 +51,8 @@ export class ActivityFeed {
   private wss: WebSocketServer;
   // marketId → set of subscribed sockets
   private subscriptions = new Map<string, Set<WebSocket>>();
+  // sockets subscribed to the global leaderboard feed
+  private leaderboardSubscribers = new Set<WebSocket>();
   private rateLimiter = new MarketRateLimiter();
   // Track authenticated connections
   private authenticated = new WeakSet<WebSocket>();
@@ -120,7 +123,14 @@ export class ActivityFeed {
     }
 
     // Authenticated: handle subscription messages
-    const { type, marketId } = msg as SubscribeMsg;
+    const { type } = msg as SubscribeMsg;
+
+    if (type === 'subscribe_leaderboard') {
+      this.leaderboardSubscribers.add(ws);
+      return;
+    }
+
+    const { marketId } = msg as SubscribeMsg;
     if (type !== 'subscribe_activity' || typeof marketId !== 'string') return;
 
     if (!this.subscriptions.has(marketId)) {
@@ -137,6 +147,9 @@ export class ActivityFeed {
       this.authTimeouts.delete(ws);
     }
 
+    // Remove from leaderboard subscriptions
+    this.leaderboardSubscribers.delete(ws);
+
     // Remove from subscriptions
     for (const [marketId, sockets] of this.subscriptions.entries()) {
       sockets.delete(ws);
@@ -148,6 +161,12 @@ export class ActivityFeed {
 
   /** Publish an activity event to all subscribers of the market. */
   publish(event: ActivityEvent): void {
+    // Leaderboard rank updates are broadcast to the dedicated leaderboard feed.
+    if ((event as { type: string }).type === 'leaderboard_rank') {
+      this.publishLeaderboard(event as Extract<ActivityEvent, { type: 'leaderboard_rank' }>);
+      return;
+    }
+
     const { marketId } = event as { marketId: string };
     if (!this.rateLimiter.allow(marketId)) return;
 
@@ -156,6 +175,16 @@ export class ActivityFeed {
 
     const payload = JSON.stringify(event);
     for (const ws of sockets) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+  }
+
+  /** Publish a leaderboard rank update to all leaderboard subscribers. */
+  private publishLeaderboard(event: Extract<ActivityEvent, { type: 'leaderboard_rank' }>): void {
+    if (this.leaderboardSubscribers.size === 0) return;
+
+    const payload = JSON.stringify(event);
+    for (const ws of this.leaderboardSubscribers) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
     }
   }
