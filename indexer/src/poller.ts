@@ -1,6 +1,9 @@
 import { rpc, scValToNative } from '@stellar/stellar-sdk';
-import { getCursor, saveCursor, upsertInvoice } from './db';
+import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice } from './db';
 import { updateLastLedger } from './health';
+import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
+import { calculateBackoff, loadBackoffConfigFromEnv } from './backoff';
+import { broadcast } from './ws';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,6 +25,10 @@ interface PollerHealth {
   lastErrorAt: string | null;
   lastSuccessfulPollAt: string | null;
   eventsProcessed: number;
+  reorgsDetected: number;
+  lastReorgAt: string | null;
+  ledgerGapsDetected: number;
+  lastLedgerGapAt: string | null;
 }
 
 let pollerHealth: PollerHealth = {
@@ -31,25 +38,18 @@ let pollerHealth: PollerHealth = {
   lastErrorAt: null,
   lastSuccessfulPollAt: null,
   eventsProcessed: 0,
+  reorgsDetected: 0,
+  lastReorgAt: null,
+  ledgerGapsDetected: 0,
+  lastLedgerGapAt: null,
 };
 
 export function getPollerHealth(): PollerHealth {
   return { ...pollerHealth };
 }
 
-// ── Exponential backoff strategy ────────────────────────────────────────────
-const MIN_BACKOFF_MS = 1000;      // 1 second
-const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
-const BACKOFF_MULTIPLIER = 2;
-
-function calculateBackoff(failureCount: number): number {
-  const backoff = MIN_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, failureCount - 1);
-  const cappedBackoff = Math.min(backoff, MAX_BACKOFF_MS);
-  // Add jitter to prevent thundering herd: backoff * (0.5 + Math.random() * 0.5)
-  // This produces a range of [0.5 * backoff, backoff]
-  const jitter = cappedBackoff * (0.5 + Math.random() * 0.5);
-  return Math.round(jitter);
-}
+// ── Exponential backoff strategy (tunable via POLLER_*_BACKOFF_MS env vars) ─
+const BACKOFF_CONFIG = loadBackoffConfigFromEnv();
 
 // ── Structured logging ──────────────────────────────────────────────────────
 interface LogEntry {
@@ -74,6 +74,12 @@ export async function pollEvents() {
   pollerHealth.isRunning = true;
 
   let cursor = (await getCursor()) || '';
+  // Last ledger sequence we successfully processed, used to detect re-orgs
+  // (ledger sequence moving backward) and gaps (skipped sequences) across polls.
+  let lastProcessedLedger: number | null = await getLastKnownLedger();
+  // Set when a re-org is detected; forces the next request to resync from a
+  // safe ledger instead of trusting the (possibly now-invalid) cursor.
+  let pendingResyncLedger: number | null = null;
 
   // ── Graceful shutdown handlers ──────────────────────────────────────────
   // Save cursor before exit to avoid re-processing events on restart
@@ -98,8 +104,17 @@ export async function pollEvents() {
   // Recursive async loop with exponential backoff
   async function pollLoop(): Promise<void> {
     try {
+      // A pending resync (set after a re-org) always takes priority over the
+      // persisted cursor, since the cursor may point past ledgers that no
+      // longer exist on the canonical chain.
+      const resyncLedger = pendingResyncLedger;
+      pendingResyncLedger = null;
+      if (resyncLedger !== null) {
+        cursor = '';
+      }
+
       // Build request with proper typing (use any to bypass strict filter type checking)
-      const request: any = cursor
+      const request: any = (cursor && resyncLedger === null)
         ? {
             cursor,
             filters: [
@@ -112,7 +127,7 @@ export async function pollEvents() {
             limit: 100
           }
         : {
-            startLedger: await getLatestLedger(),
+            startLedger: resyncLedger ?? (await getLatestLedger()),
             filters: [
               {
                 type: 'contract',
@@ -127,6 +142,7 @@ export async function pollEvents() {
       let paginationCursor = cursor || '';
       let totalEventsProcessed = 0;
       let hasMore = true;
+      let reorgTriggered = false;
 
       while (hasMore) {
         // Build paginated request
@@ -156,13 +172,59 @@ export async function pollEvents() {
         // Process all events on this page
         if (response.events && response.events.length > 0) {
           for (const event of response.events) {
+            const eventLedger = event.ledger;
+
+            if (eventLedger) {
+              const anomaly = detectLedgerAnomaly(eventLedger, lastProcessedLedger);
+
+              if (anomaly.type === 'reorg') {
+                pollerHealth.reorgsDetected++;
+                pollerHealth.lastReorgAt = new Date().toISOString();
+                log('warn', 'Ledger re-org detected; discarding cursor and re-syncing from a safe ledger', {
+                  lastProcessedLedger: anomaly.fromLedger,
+                  incomingEventLedger: anomaly.toLedger,
+                });
+                broadcast({
+                  type: 'poller.reorg_detected',
+                  timestamp: new Date().toISOString(),
+                  data: { lastProcessedLedger: anomaly.fromLedger, incomingEventLedger: anomaly.toLedger },
+                });
+                // Don't trust or process events from a superseded ledger view.
+                // Rewind and let the next poll iteration re-fetch canonical events.
+                pendingResyncLedger = computeResyncStartLedger(anomaly.fromLedger);
+                reorgTriggered = true;
+                break;
+              }
+
+              if (anomaly.type === 'gap') {
+                pollerHealth.ledgerGapsDetected++;
+                pollerHealth.lastLedgerGapAt = new Date().toISOString();
+                log('warn', 'Missing ledger sequence(s) detected between polls', {
+                  fromLedger: anomaly.fromLedger,
+                  toLedger: anomaly.toLedger,
+                  missingCount: anomaly.missingCount,
+                });
+              }
+            }
+
             processEvent(event);
-            // Update last ledger from event
-            if (event.ledger) {
-              updateLastLedger(event.ledger);
+
+            if (eventLedger) {
+              lastProcessedLedger = eventLedger;
+              updateLastLedger(eventLedger);
             }
           }
-          totalEventsProcessed += response.events.length;
+
+          if (!reorgTriggered) {
+            totalEventsProcessed += response.events.length;
+          }
+        }
+
+        if (reorgTriggered) {
+          // Skip cursor persistence entirely this round; pendingResyncLedger
+          // drives the next iteration's request instead.
+          hasMore = false;
+          break;
         }
 
         // Check if there are more pages using paging_token (the cursor field)
@@ -177,7 +239,7 @@ export async function pollEvents() {
           // Only advance main cursor when all pages are consumed
           const oldCursor = cursor;
           cursor = response.cursor || pagingToken || '';
-          await saveCursor(cursor);
+          await saveCursor(cursor, lastProcessedLedger ?? undefined);
           pollerHealth.eventsProcessed += totalEventsProcessed;
 
           if (totalEventsProcessed > 0) {
@@ -211,13 +273,19 @@ export async function pollEvents() {
       pollerHealth.lastError = err instanceof Error ? err.message : String(err);
       pollerHealth.lastErrorAt = new Date().toISOString();
 
-      const backoffMs = calculateBackoff(pollerHealth.consecutiveFailures);
+      const backoffMs = calculateBackoff(pollerHealth.consecutiveFailures, BACKOFF_CONFIG);
 
       log('error', 'Poll failed, scheduling retry', {
         error: pollerHealth.lastError,
         consecutiveFailures: pollerHealth.consecutiveFailures,
         backoffMs,
         cursor,
+      });
+
+      broadcast({
+        type: 'poller.retry_scheduled',
+        timestamp: new Date().toISOString(),
+        data: { consecutiveFailures: pollerHealth.consecutiveFailures, backoffMs },
       });
 
       // Wait with exponential backoff before retrying
@@ -269,36 +337,44 @@ export function processEvent(event: rpc.Api.EventResponse) {
     // and just { id } for status changes. This is dependent on contract implementation.
     
     if (eventType === 'submitted') {
+      const invoiceId = data.id;
       upsertInvoice({
-        id: data.id,
+        id: invoiceId,
         freelancer: data.freelancer || '',
         payer: data.payer || '',
         amount: data.amount || 0,
         due_date: data.dueDate || new Date().toISOString(),
         status: 'Pending'
       });
-      log('info', 'Processed event: submitted', { invoiceId: data.id });
+      log('info', 'Processed event: submitted', { invoiceId });
+      broadcast({ type: 'invoice.submitted', timestamp: new Date().toISOString(), data: { invoiceId } });
     } else if (eventType === 'funded') {
+      const invoiceId = data.id || data;
       upsertInvoice({
-        id: data.id || data,
+        id: invoiceId,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Funded'
       });
-      log('info', 'Processed event: funded', { invoiceId: data.id || data });
+      log('info', 'Processed event: funded', { invoiceId });
+      broadcast({ type: 'invoice.funded', timestamp: new Date().toISOString(), data: { invoiceId } });
     } else if (eventType === 'paid') {
+      const invoiceId = data.id || data;
       upsertInvoice({
-        id: data.id || data,
+        id: invoiceId,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Paid'
       });
-      log('info', 'Processed event: paid', { invoiceId: data.id || data });
+      log('info', 'Processed event: paid', { invoiceId });
+      broadcast({ type: 'invoice.paid', timestamp: new Date().toISOString(), data: { invoiceId } });
     } else if (eventType === 'defaulted') {
+      const invoiceId = data.id || data;
       upsertInvoice({
-        id: data.id || data,
+        id: invoiceId,
         freelancer: '', payer: '', amount: 0, due_date: '',
         status: 'Defaulted'
       });
-      log('info', 'Processed event: defaulted', { invoiceId: data.id || data });
+      log('info', 'Processed event: defaulted', { invoiceId });
+      broadcast({ type: 'invoice.defaulted', timestamp: new Date().toISOString(), data: { invoiceId } });
     }
   } catch (err) {
     log('error', 'Failed to process event', {

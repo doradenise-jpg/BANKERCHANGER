@@ -89,6 +89,10 @@ app.get('/health', (req: Request, res: Response) => {
         lastErrorAt: health.lastErrorAt,
         lastSuccessfulPollAt: health.lastSuccessfulPollAt,
         eventsProcessed: health.eventsProcessed,
+        reorgsDetected: health.reorgsDetected,
+        lastReorgAt: health.lastReorgAt,
+        ledgerGapsDetected: health.ledgerGapsDetected,
+        lastLedgerGapAt: health.lastLedgerGapAt,
       },
     });
   } catch (err: any) {
