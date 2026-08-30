@@ -20,7 +20,8 @@
     "drizzle:studio": "drizzle-kit studio",
     "schema:verify": "node scripts/verify-schema.js",
     "test": "jest --passWithNoTests",
-    "test:integration": "jest --passWithNoTests --testPathPatterns=tests/integration"
+    "test:integration": "jest --passWithNoTests --testPathPatterns=tests/integration",
+    "test:e2e": "jest --passWithNoTests --runInBand --testPathPatterns=tests/e2e"
   },
   "dependencies": {
     "@sentry/node": "8.55.0",

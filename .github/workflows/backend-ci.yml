@@ -112,6 +112,13 @@ jobs:
           DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
           REDIS_URL: redis://localhost:6379
 
+      - name: Automated E2E Integration Test Suite
+        working-directory: backend
+        run: npm run test:e2e
+        env:
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
+          REDIS_URL: redis://localhost:6379
+
   load-test:
     name: k6 WebSocket Load Test
     runs-on: ubuntu-latest
