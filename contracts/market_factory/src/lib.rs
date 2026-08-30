@@ -925,3 +925,190 @@ mod admin_transfer_tests {
         assert!(result.is_err(), "Second accept must fail after PENDING_ADMIN is cleared");
     }
 }
+
+// ============================================================
+// TASK 12: Soroban Contract Integrity & Safety Verification Tests
+// Covers: storage TTL extensions across persistent maps in Factory,
+//         auth checks and error handling audit,
+//         market deployment validation and oracle management.
+// ============================================================
+#[cfg(test)]
+mod task12_factory_market_integrity_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, BytesN, Env,
+    };
+    use boxmeout_shared::{
+        errors::ContractError,
+        types::{FactoryConfig, FightDetails, MarketConfig},
+    };
+    use crate::{MarketFactory, MarketFactoryClient};
+
+    fn setup_factory(env: &Env) -> (MarketFactoryClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000,
+            protocol_version: 20,
+            sequence_number: 500,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let contract_id = env.register_contract(None, MarketFactory);
+        let client = MarketFactoryClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let treasury = Address::generate(env);
+        let oracle = Address::generate(env);
+        let oracle_raw_key: BytesN<32> = BytesN::from_array(env, &[7u8; 32]);
+
+        client.initialize(
+            &admin,
+            &treasury,
+            &oracle,
+            &oracle_raw_key,
+            &FactoryConfig {
+                default_min_bet: 1_000_000,
+                default_max_bet: 100_000_000_000,
+                default_fee_bps: 200,
+                default_lock_before_secs: 3_600,
+                default_resolution_window: 86_400,
+            },
+        );
+
+        (client, admin, treasury, oracle)
+    }
+
+    // ── 1. Storage TTL Extensions Across Persistent Maps ─────────
+    #[test]
+    fn test_task12_persistent_map_ttl_survival() {
+        let env = Env::default();
+        let (client, admin, _treasury, oracle) = setup_factory(&env);
+
+        // Advance ledger 50,000 sequences
+        env.ledger().set(LedgerInfo {
+            timestamp: 50_000 + 86_400 * 14,
+            protocol_version: 20,
+            sequence_number: 50_500,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        // Verify storage maps persist and remain readable
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_market_count(), 0u64);
+        let oracles = client.get_oracles();
+        assert_eq!(oracles.len(), 1);
+        assert_eq!(oracles.get(0).unwrap(), oracle);
+    }
+
+    // ── 2. Comprehensive Auth & Error Handling Audit ─────────────
+    #[test]
+    fn test_task12_auth_checks_and_error_handling() {
+        let env = Env::default();
+        let (client, admin, _treasury, _oracle) = setup_factory(&env);
+        let non_admin = Address::generate(&env);
+        let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        // Non-admin cannot update wasm hash
+        let err_wasm = client.try_update_market_wasm(&non_admin, &wasm_hash);
+        assert_eq!(err_wasm.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        // Non-admin cannot pause / unpause factory
+        let err_pause = client.try_pause_factory(&non_admin);
+        assert_eq!(err_pause.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        let err_unpause = client.try_unpause_factory(&non_admin);
+        assert_eq!(err_unpause.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        // Non-admin cannot propose admin
+        let nominee = Address::generate(&env);
+        let err_prop = client.try_propose_admin(&non_admin, &nominee);
+        assert_eq!(err_prop.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        // Non-admin cannot add or remove oracle
+        let new_oracle = Address::generate(&env);
+        let raw_key = BytesN::from_array(&env, &[2u8; 32]);
+        let err_add_oracle = client.try_add_oracle(&non_admin, &new_oracle, &raw_key);
+        assert_eq!(err_add_oracle.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        let err_rem_oracle = client.try_remove_oracle(&non_admin, &new_oracle);
+        assert_eq!(err_rem_oracle.unwrap_err(), Ok(ContractError::NotAdmin));
+    }
+
+    // ── 3. Market Creation Parameter Validation Audit ────────────
+    #[test]
+    fn test_task12_create_market_parameter_validations() {
+        let env = Env::default();
+        let (client, admin, _treasury, _oracle) = setup_factory(&env);
+        let caller = Address::generate(&env);
+
+        let valid_fight = FightDetails {
+            match_id: soroban_sdk::String::from_str(&env, "VALID-MATCH"),
+            fighter_a: soroban_sdk::String::from_str(&env, "Alice"),
+            fighter_b: soroban_sdk::String::from_str(&env, "Bob"),
+            weight_class: soroban_sdk::String::from_str(&env, "Middleweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_str(&env, "MGM"),
+            title_fight: true,
+        };
+
+        let valid_config = MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+        };
+
+        // 1. Fight scheduled in the past
+        let mut past_fight = valid_fight.clone();
+        past_fight.scheduled_at = 40_000; // current time is 50_000
+        let err_past = client.try_create_market(&caller, &past_fight, &valid_config, &None);
+        assert_eq!(err_past.unwrap_err(), Ok(ContractError::InvalidTimeRange));
+
+        // 2. Empty fighter name
+        let mut empty_fighter = valid_fight.clone();
+        empty_fighter.fighter_a = soroban_sdk::String::from_str(&env, "");
+        let err_empty = client.try_create_market(&caller, &empty_fighter, &valid_config, &None);
+        assert_eq!(err_empty.unwrap_err(), Ok(ContractError::InvalidMarketParameters));
+
+        // 3. Zero min bet amount
+        let mut zero_min_bet = valid_config.clone();
+        zero_min_bet.min_bet_amount = 0;
+        let err_zero_min = client.try_create_market(&caller, &valid_fight, &zero_min_bet, &None);
+        assert_eq!(err_zero_min.unwrap_err(), Ok(ContractError::BelowMinimum));
+
+        // 4. Excessive fee_bps (> 1000)
+        let err_fee = client.try_create_market(&caller, &valid_fight, &valid_config, &Some(1500));
+        assert_eq!(err_fee.unwrap_err(), Ok(ContractError::InvalidMarketParameters));
+    }
+
+    // ── 4. Oracle Whitelist Lifecycle & Lookups ──────────────────
+    #[test]
+    fn test_task12_oracle_whitelist_lifecycle() {
+        let env = Env::default();
+        let (client, admin, _treasury, oracle1) = setup_factory(&env);
+        let oracle2 = Address::generate(&env);
+        let key2 = BytesN::from_array(&env, &[9u8; 32]);
+
+        // Add second oracle
+        client.add_oracle(&admin, &oracle2, &key2);
+        assert_eq!(client.get_oracles().len(), 2);
+        assert_eq!(client.get_oracle_key(&oracle2), Some(key2));
+
+        // Adding duplicate oracle fails
+        let err_dup = client.try_add_oracle(&admin, &oracle2, &key2);
+        assert_eq!(err_dup.unwrap_err(), Ok(ContractError::OracleAlreadyWhitelisted));
+
+        // Remove oracle2
+        client.remove_oracle(&admin, &oracle2);
+        assert_eq!(client.get_oracles().len(), 1);
+        assert_eq!(client.get_oracle_key(&oracle2), None);
+    }
+}
