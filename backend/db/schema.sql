@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS indexer_checkpoints (
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS indexer_ledger_ranges (
+  id             SERIAL PRIMARY KEY,
+  start_ledger   INTEGER     NOT NULL,
+  end_ledger     INTEGER     NOT NULL,
+  processed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (start_ledger, end_ledger)
+);
+CREATE INDEX IF NOT EXISTS indexer_ledger_ranges_start_idx ON indexer_ledger_ranges (start_ledger);
+
 CREATE TABLE IF NOT EXISTS oracle_reports (
   id               SERIAL PRIMARY KEY,
   match_id         TEXT        NOT NULL,
