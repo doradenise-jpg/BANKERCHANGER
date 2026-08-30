@@ -111,16 +111,18 @@ pub const fn tier_oracle_consensus_threshold(_tier: u8) -> u32 {
 /// Used in constant product calculations to solve x² equations.
 ///
 /// # Arguments
-/// * `n` - Non-negative integer to take the square root of
+/// * `n` - Integer to take the square root of
 ///
 /// # Returns
-/// Floor of the square root
-pub fn isqrt(n: i128) -> i128 {
+/// `Some(floor(√n))` for `n >= 0`, or `None` if `n` is negative.
+/// Callers must handle `None` explicitly rather than silently receiving 0,
+/// which would propagate a wrong result through the AMM calculation.
+pub fn isqrt(n: i128) -> Option<i128> {
     if n < 0 {
-        return 0;
+        return None;
     }
     if n == 0 {
-        return 0;
+        return Some(0);
     }
 
     let mut x = n;
@@ -129,7 +131,7 @@ pub fn isqrt(n: i128) -> i128 {
         x = y;
         y = (x + n / x) / 2;
     }
-    x
+    Some(x)
 }
 
 /// Computes dynamic odds using constant product AMM.
@@ -281,20 +283,20 @@ mod tests {
 
     #[test]
     fn test_isqrt_zero() {
-        assert_eq!(isqrt(0), 0);
+        assert_eq!(isqrt(0), Some(0));
     }
 
     #[test]
     fn test_isqrt_one() {
-        assert_eq!(isqrt(1), 1);
+        assert_eq!(isqrt(1), Some(1));
     }
 
     #[test]
     fn test_isqrt_perfect_squares() {
-        assert_eq!(isqrt(4), 2);
-        assert_eq!(isqrt(9), 3);
-        assert_eq!(isqrt(16), 4);
-        assert_eq!(isqrt(100), 10);
+        assert_eq!(isqrt(4), Some(2));
+        assert_eq!(isqrt(9), Some(3));
+        assert_eq!(isqrt(16), Some(4));
+        assert_eq!(isqrt(100), Some(10));
     }
 
     #[test]
@@ -303,6 +305,18 @@ mod tests {
         assert_eq!(isqrt(10), 3); // floor(√10) = 3
         assert_eq!(isqrt(99), 9); // floor(√99) = 9
         assert_eq!(isqrt(101), 10); // floor(√101) = 10
+
+        assert_eq!(isqrt(5), Some(2));   // floor(√5) = 2
+        assert_eq!(isqrt(10), Some(3));  // floor(√10) = 3
+        assert_eq!(isqrt(99), Some(9));  // floor(√99) = 9
+        assert_eq!(isqrt(101), Some(10)); // floor(√101) = 10
+    }
+
+    #[test]
+    fn test_isqrt_negative_returns_none() {
+        assert_eq!(isqrt(-1), None);
+        assert_eq!(isqrt(-100), None);
+        assert_eq!(isqrt(i128::MIN), None);
     }
 
     // ── compute_odds tests ──────────────────────────────────────────────────────
