@@ -1145,21 +1145,24 @@ impl Market {
     /// - `AlreadyClaimed`: Bettor has already claimed refund
     ///
     /// # Security (CEI strictly enforced)
-    /// 1. CHECKS: require_auth, pause guard, reentrancy guard, status
+    /// 1. CHECKS: require_auth, status guard (Cancelled), pause guard, reentrancy guard
     /// 2. EFFECTS: mark bets claimed + set CLAIMING lock BEFORE transfer
     /// 3. INTERACTIONS: token transfer last
     pub fn claim_refund(env: Env, bettor: Address, token: Address) -> Result<i128, ContractError> {
         // ── CHECKS ────────────────────────────────────────────────────────────
         bettor.require_auth();
-        Self::require_not_paused(&env)?;
-        Self::require_not_claiming(&env)?;
 
-        // Reload state fresh from storage
+        // Status guard is the FIRST check: reject immediately if the market is
+        // not Cancelled, before touching the pause flag, reentrancy lock, or
+        // iterating any bettor data. This prevents premature fund drains on
+        // Open or Locked markets regardless of any other state.
         let state = Self::load_state(&env)?;
-
         if state.status != MarketStatus::Cancelled {
             return Err(ContractError::InvalidMarketStatus);
         }
+
+        Self::require_not_paused(&env)?;
+        Self::require_not_claiming(&env)?;
 
         let bets = Self::load_bets(&env, &bettor);
         if bets.is_empty() {
