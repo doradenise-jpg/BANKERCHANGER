@@ -1,0 +1,1804 @@
+{
+  "info": {
+    "_postman_id": "bankerchanger-api-1788102247430",
+    "name": "BANKERCHANGER API",
+    "description": "REST API collection for the BANKERCHANGER decentralized boxing prediction market. Import into Postman and set the {{baseUrl}} and {{auth_token}} variables.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3001"
+    },
+    {
+      "key": "auth_token",
+      "value": ""
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{auth_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health check for the API, database, and Redis",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/health",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Prometheus metrics endpoint",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/metrics",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "metrics"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register a new user",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/register",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login with email and password",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/login",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Exchange a refresh token for a new access token",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/refresh",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke a refresh token server-side",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/logout",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Request a password-reset email",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/forgot-password",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "forgot-password"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reset password using a reset token",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/reset-password",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "reset-password"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Generate TOTP secret and QR code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/auth/2fa/setup",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "2fa",
+                "setup"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Enable 2FA after verifying TOTP code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/auth/2fa/enable",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "2fa",
+                "enable"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Disable 2FA",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/auth/2fa/disable",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "2fa",
+                "disable"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Complete login by verifying 2FA OTP",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/auth/2fa/verify",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "auth",
+                "2fa",
+                "verify"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Get authenticated user's profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/users/me",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update authenticated user's profile",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/users/me",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get public user profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/users/{id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "users",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List all users (admin only)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/users",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "role",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Suspend a user account (admin only)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/users/{id}/suspend",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "users",
+                ":id",
+                "suspend"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update user role (admin only)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/users/{id}/role",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "users",
+                ":id",
+                "role"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Platform",
+      "item": [
+        {
+          "name": "Get platform statistics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/stats",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "stats"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Markets",
+      "item": [
+        {
+          "name": "List markets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "weight_class",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "page",
+                  "value": "1",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "type": "text",
+                  "disabled": false
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get market by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get bets for a market",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}/bets",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id",
+                "bets"
+              ],
+              "query": [
+                {
+                  "key": "address",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "page",
+                  "value": "1",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "type": "text",
+                  "disabled": false
+                }
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get current odds for a market",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}/odds",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id",
+                "odds"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Server-Sent Events stream of live odds for a market",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}/odds/stream",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id",
+                "odds",
+                "stream"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get aggregate stats for a market",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}/stats",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id",
+                "stats"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Simulate payout for a given bet amount and outcome",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}/simulate",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id",
+                "simulate"
+              ],
+              "query": [
+                {
+                  "key": "amount",
+                  "value": "",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "outcome",
+                  "value": "",
+                  "type": "text",
+                  "disabled": false
+                }
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Resolve a market (admin only)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/markets/{market_id}/resolve",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "markets",
+                ":market_id",
+                "resolve"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Bets",
+      "item": [
+        {
+          "name": "Get all bets by a Stellar address",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/bets/{bettor_address}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "bets",
+                ":bettor_address"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "type": "text",
+                  "disabled": false
+                }
+              ],
+              "variable": [
+                {
+                  "key": "bettor_address",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get betting statistics for an address",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/bets/{bettor_address}/stats",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "bets",
+                ":bettor_address",
+                "stats"
+              ],
+              "variable": [
+                {
+                  "key": "bettor_address",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get portfolio summary for a Stellar address",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/portfolio/{address}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "portfolio",
+                ":address"
+              ],
+              "variable": [
+                {
+                  "key": "address",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Claim winnings for a resolved market",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/claims",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "claims"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Claim a refund for a cancelled market",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/claims/refund",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "claims",
+                "refund"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Governance",
+      "item": [
+        {
+          "name": "List all governance proposals (paginated)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/governance/proposals",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "governance",
+                "proposals"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "status",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get a single governance proposal by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/governance/proposals/{proposal_id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "governance",
+                "proposals",
+                ":proposal_id"
+              ],
+              "variable": [
+                {
+                  "key": "proposal_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Oracle",
+      "item": [
+        {
+          "name": "Submit a signed oracle fight result",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/oracle/submit",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "oracle",
+                "submit"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get all oracle reports for a fight",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/oracle/reports/{match_id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "oracle",
+                "reports",
+                ":match_id"
+              ],
+              "variable": [
+                {
+                  "key": "match_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Disputes",
+      "item": [
+        {
+          "name": "Submit a new dispute",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/disputes",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "disputes"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List all disputes (admin only)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/disputes",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "disputes"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "marketId",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "page",
+                  "value": "1",
+                  "type": "text",
+                  "disabled": false
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "type": "text",
+                  "disabled": false
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get dispute details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:3001/api/disputes/{disputeId}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "disputes",
+                ":disputeId"
+              ],
+              "variable": [
+                {
+                  "key": "disputeId",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark dispute as under review (admin only)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/disputes/{disputeId}/review",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "disputes",
+                ":disputeId",
+                "review"
+              ],
+              "variable": [
+                {
+                  "key": "disputeId",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Resolve a dispute (admin only)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/disputes/{disputeId}/resolve",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "disputes",
+                ":disputeId",
+                "resolve"
+              ],
+              "variable": [
+                {
+                  "key": "disputeId",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "List all disputes (admin only)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/disputes",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "disputes"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Flag a market as disputed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/dispute/{market_id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "dispute",
+                ":market_id"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark a dispute as under investigation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/dispute/{market_id}/investigate",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "dispute",
+                ":market_id",
+                "investigate"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Resolve a disputed market with admin-verified outcome",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/resolve-dispute/{market_id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "resolve-dispute",
+                ":market_id"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel a market",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/cancel/{market_id}",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "cancel",
+                ":market_id"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Process refunds for a cancelled market",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/cancel/{market_id}/refunds",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "cancel",
+                ":market_id",
+                "refunds"
+              ],
+              "variable": [
+                {
+                  "key": "market_id",
+                  "value": ""
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Pause multiple markets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/markets/bulk-pause",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "markets",
+                "bulk-pause"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel multiple markets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/markets/bulk-cancel",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "markets",
+                "bulk-cancel"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Stream users CSV export",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/export/users",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "export",
+                "users"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Stream trades CSV export",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/export/trades",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "export",
+                "trades"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Stream treasury CSV export",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/export/treasury",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "export",
+                "treasury"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Queue an async export and email it when ready",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/export/request",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "export",
+                "request"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh the whitelist of trusted oracle addresses",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3001/api/admin/oracle/refresh-whitelist",
+              "host": [
+                "localhost:3001"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "oracle",
+                "refresh-whitelist"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "isCollection": false
+    }
+  ]
+}

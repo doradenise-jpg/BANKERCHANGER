@@ -155,7 +155,7 @@ const PORT = env.PORT;
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   if (env.NODE_ENV === 'development' || env.ENABLE_SWAGGER) {
-    logger.info(`Swagger UI available at http://localhost:${PORT}/docs`);
+    logger.info(`Swagger UI available at http://localhost:${PORT}/api/docs`);
   }
   startAutoResolutionCron();
   startAutoLockCron();
