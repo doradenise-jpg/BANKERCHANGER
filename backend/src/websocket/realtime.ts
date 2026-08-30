@@ -19,6 +19,8 @@ export type ActivityEvent =
   | { type: 'resolved'; marketId: string; winningOutcomeId: string }
   | { type: 'market_update'; marketId: string; eventType: string; data: Record<string, unknown> };
 
+  | { type: 'cancelled'; marketId: string };
+
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
 

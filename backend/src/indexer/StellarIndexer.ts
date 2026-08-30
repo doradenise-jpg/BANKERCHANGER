@@ -15,6 +15,20 @@ import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/St
 import { cacheDeletePattern } from '../services/cache.service';
 import { tryGetActivityFeed, ActivityEvent } from '../websocket/realtime';
 
+import { getActivityFeed } from '../websocket/realtime';
+
+/**
+ * Publish to the live ActivityFeed without letting a missing/uninitialised
+ * feed (e.g. in tests, or a backfill-only run) break event ingestion.
+ */
+function publishActivity(event: Parameters<ReturnType<typeof getActivityFeed>['publish']>[0]): void {
+  try {
+    getActivityFeed().publish(event);
+  } catch (err) {
+    console.warn('[Indexer] Could not publish to ActivityFeed:', err instanceof Error ? err.message : err);
+  }
+}
+
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
   contract_address: string;
@@ -66,6 +80,19 @@ export function calculateBackoff(failureCount: number): number {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+
+// ── Backoff for the fallback polling loop ───────────────────────────────────
+const POLL_MIN_BACKOFF_MS = 1_000;
+const POLL_MAX_BACKOFF_MS = 5 * 60 * 1000;
+const POLL_BACKOFF_MULTIPLIER = 2;
+
+/** Exponential backoff with jitter, capped at POLL_MAX_BACKOFF_MS. */
+function calculatePollBackoff(consecutiveFailures: number): number {
+  const backoff = POLL_MIN_BACKOFF_MS * Math.pow(POLL_BACKOFF_MULTIPLIER, consecutiveFailures - 1);
+  const capped = Math.min(backoff, POLL_MAX_BACKOFF_MS);
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
 
 export async function startIndexer(): Promise<void> {
   const pollInterval = Number(process.env.POLL_INTERVAL_MS ?? 5000);
@@ -138,6 +165,16 @@ export async function startIndexer(): Promise<void> {
   // outage doesn't require manual intervention to recover from.
   indexerHealth.isRunning = true;
 
+
+  // Keep polling for new ledgers as fallback
+  let consecutiveFailures = 0;
+  // Highest ledger sequence any RPC response has reported so far. Stellar's
+  // federated consensus gives closed ledgers instant finality, so a healthy
+  // node's "latest ledger" never goes backwards — if it does, we're either
+  // talking to a stale/lagging RPC node or (in the pathological case) a
+  // network re-org, and trusting it would rewind lastProcessed and cause the
+  // same ledgers to be reprocessed out of order.
+  let highestSeenLedger = lastProcessed;
   while (true) {
     try {
       const next = await pollOnce(lastProcessed);
@@ -151,7 +188,30 @@ export async function startIndexer(): Promise<void> {
 
       if (!madeProgress) {
         await sleep(pollInterval);
+
+      if (latestLedger < highestSeenLedger) {
+        console.warn(
+          `[Indexer] RPC reported ledger ${latestLedger}, behind previously seen ledger ` +
+          `${highestSeenLedger}. Possible stale RPC node or re-org; skipping this poll ` +
+          `without advancing lastProcessed.`,
+        );
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        consecutiveFailures = 0;
+        continue;
       }
+      highestSeenLedger = latestLedger;
+
+      if (latestLedger > lastProcessed) {
+        for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
+          await processLedger(seq);
+          await saveCheckpoint(seq);
+          lastProcessed = seq;
+        }
+      } else {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      }
+
+      consecutiveFailures = 0;
     } catch (err) {
       indexerHealth.consecutiveFailures++;
       indexerHealth.lastError = err instanceof Error ? err.message : String(err);
@@ -164,6 +224,17 @@ export async function startIndexer(): Promise<void> {
         err,
       );
       await sleep(backoffMs);
+
+      consecutiveFailures++;
+      const backoffMs = calculatePollBackoff(consecutiveFailures);
+      console.error(
+        `[Indexer] Poll failed (consecutiveFailures=${consecutiveFailures}), retrying in ${backoffMs}ms:`,
+        err,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+      // Loop continues — a transient RPC/DB error no longer kills the process.
+      // lastProcessed was not advanced past the failed ledger, so the same
+      // sequence is retried once the backoff elapses.
     }
   }
 }
@@ -372,20 +443,68 @@ function buildEventPayload(
 // ---------------------------------------------------------------------------
 
 export async function processLedger(ledger_sequence: number): Promise<void> {
-  try {
-    const request: rpc.Api.GetEventsRequest = {
-      startLedger: ledger_sequence,
-      filters: [
-        {
-          type: 'contract',
-          contractIds: [FACTORY_CONTRACT, TREASURY_CONTRACT].filter(id => id),
-          topics: [['*']]
-        }
-      ],
-      limit: 100
+  // Errors are intentionally left to propagate (not swallowed here): the
+  // caller in startIndexer/backfillLedgerRange must know a ledger failed so
+  // it does not advance the checkpoint past it. Advancing on a swallowed
+  // error would permanently skip that ledger's events on restart.
+  const request: rpc.Api.GetEventsRequest = {
+    startLedger: ledger_sequence,
+    filters: [
+      {
+        type: 'contract',
+        contractIds: [FACTORY_CONTRACT, TREASURY_CONTRACT].filter(id => id),
+        topics: [['*']]
+      }
+    ],
+    limit: 100
+  };
+
+  const response = await server.getEvents(request);
+
+  if (!response.events || response.events.length === 0) {
+    return;
+  }
+
+  for (const event of response.events) {
+    const contractId = typeof event.contractId === 'string' ? event.contractId : event.contractId?.toString() || '';
+
+    // Properly extract event type from ScVal Symbol topic
+    const eventType = (event.topic[0] as any)?.sym()?.toString() || 'unknown';
+
+    // Build a flat JSON record from ScVal topics + value
+    const payload = buildEventPayload(eventType, event.topic, event.value);
+    const data = JSON.stringify(payload);
+
+    const rawEvent: RawStellarEvent = {
+      contract_address: contractId,
+      event_type: eventType,
+      topics: event.topic.map((t: any) => scvToString(t)),
+      data,
+      ledger_sequence: event.ledger,
+      ledger_close_time: event.ledgerClosedAt,
+      tx_hash: event.txHash
     };
 
-    const response = await server.getEvents(request);
+    // Persist raw event to blockchain_events table — use DO UPDATE so
+    // re-indexing during a backfill refreshes stale rows instead of skipping.
+    await pool.query(
+      `INSERT INTO blockchain_events
+         (contract_address, event_type, payload, ledger_sequence, ledger_close_time, tx_hash)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (tx_hash) DO UPDATE
+         SET contract_address  = EXCLUDED.contract_address,
+             event_type        = EXCLUDED.event_type,
+             payload           = EXCLUDED.payload,
+             ledger_close_time = EXCLUDED.ledger_close_time`,
+      [
+        rawEvent.contract_address,
+        rawEvent.event_type,
+        rawEvent.data,
+        rawEvent.ledger_sequence,
+        rawEvent.ledger_close_time,
+        rawEvent.tx_hash
+      ]
+    );
 
     if (!response.events || response.events.length === 0) {
       return;
@@ -441,6 +560,9 @@ export async function processLedger(ledger_sequence: number): Promise<void> {
     // drop events and make the gap unrecoverable.
     console.error(`Error processing ledger ${ledger_sequence}:`, err);
     throw err;
+
+    // Process the event
+    await processEvent(rawEvent);
   }
 }
 
@@ -595,15 +717,28 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
       ],
     );
     const col = p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
-    await client.query(
+    const { rows: [pools] } = await client.query(
       `UPDATE markets
           SET ${col}      = ${col} + $1,
               total_pool  = total_pool + $1,
               updated_at  = NOW()
-        WHERE market_id   = $2`,
+        WHERE market_id   = $2
+        RETURNING ${col} AS side_pool, total_pool`,
       [p.amount, p.market_id],
     );
     await client.query('COMMIT');
+
+    const totalPool = Number(pools?.total_pool ?? 0);
+    const sidePool = Number(pools?.side_pool ?? 0);
+    publishActivity({
+      type: 'trade',
+      marketId: String(p.market_id),
+      outcomeId: String(p.side),
+      side: String(p.side),
+      sharesAmount: Number(p.amount),
+      priceBps: totalPool > 0 ? Math.round((sidePool / totalPool) * 10_000) : 0,
+      timestamp: new Date().toISOString(),
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -625,6 +760,8 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   // Declared outside the try block: cacheDeletePattern() below needs it
   // after the try/catch/finally, and a `const` scoped to the try block
   // would throw ReferenceError there on every call.
+
+  const outcome = typeof p.outcome === 'string' ? p.outcome : null;
   const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
   try {
@@ -688,6 +825,10 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   // Invalidate all Redis cache keys for this market
   await cacheDeletePattern(`market:${marketId}*`);
   await cacheDeletePattern(`markets:*`);
+
+  if (marketId) {
+    publishActivity({ type: 'resolved', marketId, winningOutcomeId: outcome ?? '' });
+  }
 }
 
 export async function handleMarketCancelled(event: RawStellarEvent): Promise<void> {
@@ -723,6 +864,10 @@ export async function handleMarketCancelled(event: RawStellarEvent): Promise<voi
     throw err;
   } finally {
     client.release();
+  }
+
+  if (typeof p.market_id === 'string') {
+    publishActivity({ type: 'cancelled', marketId: p.market_id });
   }
 }
 
