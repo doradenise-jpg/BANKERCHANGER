@@ -2291,6 +2291,40 @@ impl Treasury {
 
         fee as u64
     }
+
+    /// Pauses fee withdrawals.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    pub fn pause_withdrawals(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&WITHDRAWALS_PAUSED, &true);
+        Ok(())
+    }
+
+    /// Unpauses fee withdrawals.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    pub fn unpause_withdrawals(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&WITHDRAWALS_PAUSED, &false);
+        Ok(())
+    }
+
+    /// Returns true if withdrawals are currently paused.
+    pub fn are_withdrawals_paused(env: Env) -> bool {
+        env.storage().persistent().get(&WITHDRAWALS_PAUSED).unwrap_or(false)
+    }
+
+    /// Returns true if the address is an approved market.
+    pub fn is_market_approved(env: Env, market_address: Address) -> bool {
+        let markets: Vec<Address> =
+            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        markets.contains(market_address)
+    }
 }
 
 // ============================================================
@@ -3589,6 +3623,86 @@ mod task11_treasury_contract_integrity_tests {
             soroban_sdk::token::Client::new(&env, &token).balance(&dest),
             withdraw_amt
         );
+    }
+
+    // ── Task 6: Daily Limits, Reentrancy & Audit Trail Tests ──────
+    #[test]
+    fn test_task6_daily_withdrawal_cap_enforcement() {
+        let env = Env::default();
+        let limit = 100_000_000i128;
+        let (client, admin, _factory, token) = setup_treasury(&env, limit);
+        let market = Address::generate(&env);
+        let dest = Address::generate(&env);
+
+        client.approve_market(&admin, &market);
+        StellarAssetClient::new(&env, &token).mint(&market, &200_000_000i128);
+        client.deposit_fees(&market, &token, &200_000_000i128);
+
+        // First withdrawal within daily limit succeeds
+        client.withdraw_fees(&admin, &token, &60_000_000i128, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), 60_000_000i128);
+
+        // Second withdrawal exceeding remaining daily limit fails
+        let err = client.try_withdraw_fees(&admin, &token, &50_000_000i128, &dest);
+        assert_eq!(err.unwrap_err(), Ok(ContractError::DailyWithdrawalLimitExceeded));
+
+        // Second withdrawal fitting remaining daily limit succeeds (60M + 40M == 100M)
+        client.withdraw_fees(&admin, &token, &40_000_000i128, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), 100_000_000i128);
+    }
+
+    #[test]
+    fn test_task6_pause_unpause_withdrawals() {
+        let env = Env::default();
+        let limit = 100_000_000i128;
+        let (client, admin, _factory, token) = setup_treasury(&env, limit);
+        let market = Address::generate(&env);
+        let dest = Address::generate(&env);
+
+        client.approve_market(&admin, &market);
+        StellarAssetClient::new(&env, &token).mint(&market, &100_000_000i128);
+        client.deposit_fees(&market, &token, &100_000_000i128);
+
+        assert_eq!(client.are_withdrawals_paused(), false);
+        client.pause_withdrawals(&admin);
+        assert_eq!(client.are_withdrawals_paused(), true);
+
+        // Withdrawals should fail with WithdrawalsPaused
+        let err = client.try_withdraw_fees(&admin, &token, &20_000_000i128, &dest);
+        assert_eq!(err.unwrap_err(), Ok(ContractError::WithdrawalsPaused));
+
+        // Unpause restores withdrawals
+        client.unpause_withdrawals(&admin);
+        assert_eq!(client.are_withdrawals_paused(), false);
+        client.withdraw_fees(&admin, &token, &20_000_000i128, &dest);
+        assert_eq!(client.get_daily_withdrawal_amount(), 20_000_000i128);
+    }
+
+    #[test]
+    fn test_task6_immutable_audit_trail_logging() {
+        let env = Env::default();
+        let limit = 100_000_000i128;
+        let (client, admin, _factory, token) = setup_treasury(&env, limit);
+        let market = Address::generate(&env);
+        let dest = Address::generate(&env);
+
+        client.approve_market(&admin, &market);
+        StellarAssetClient::new(&env, &token).mint(&market, &50_000_000i128);
+
+        assert_eq!(client.get_audit_log_count(), 0);
+        client.deposit_fees(&market, &token, &50_000_000i128);
+        assert_eq!(client.get_audit_log_count(), 1);
+
+        let entry0 = client.get_audit_entry(&0).unwrap();
+        assert_eq!(entry0.id, 0);
+        assert_eq!(entry0.amount, 50_000_000i128);
+
+        client.withdraw_fees(&admin, &token, &20_000_000i128, &dest);
+        assert_eq!(client.get_audit_log_count(), 2);
+
+        let entry1 = client.get_audit_entry(&1).unwrap();
+        assert_eq!(entry1.id, 1);
+        assert_eq!(entry1.amount, 20_000_000i128);
     }
 }
 
