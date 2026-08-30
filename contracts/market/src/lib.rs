@@ -507,6 +507,10 @@ impl Market {
             return Err(ContractError::InvalidMarketStatus);
         }
 
+        if env.ledger().timestamp() < state.fight.scheduled_at {
+            return Err(ContractError::MarketNotStarted);
+        }
+
         let deadline = state.fight.scheduled_at
             .saturating_add(state.config.resolution_window);
         if env.ledger().timestamp() > deadline {
