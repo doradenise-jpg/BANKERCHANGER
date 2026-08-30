@@ -58,8 +58,10 @@ const LP_FEE_PER_SHARE: &str = "LP_FEE_PER_SHARE";
 const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
 
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
-/// Maximum TTL for market data (30 days in ledger entries)
-const MAX_TTL: u32 = 2_592_000;
+/// Maximum TTL for market data expressed in ledgers.
+/// At ~5 seconds per ledger: 30 days × 24 h × 60 min × 12 ledgers/min = 518_400 ledgers.
+/// Using ledger counts (not seconds) as required by Soroban's extend_ttl API.
+const MAX_TTL: u32 = 518_400;
 
 /// Fallback maximum price impact (slippage) when no tier is set, in basis points.
 /// Used in `emit_slippage_checked` for legacy / no-tier markets.
