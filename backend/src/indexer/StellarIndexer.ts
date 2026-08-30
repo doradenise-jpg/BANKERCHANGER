@@ -13,6 +13,7 @@ import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
 import { cacheDeletePattern } from '../services/cache.service';
+import { tryGetActivityFeed, ActivityEvent } from '../websocket/realtime';
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -30,6 +31,41 @@ const FACTORY_CONTRACT = process.env.FACTORY_CONTRACT_ADDRESS || '';
 const TREASURY_CONTRACT = process.env.TREASURY_CONTRACT_ADDRESS || '';
 
 const server = new rpc.Server(RPC_URL);
+
+// ── Health tracking for the fallback ledger-polling loop ────────────────────
+export interface IndexerHealth {
+  isRunning: boolean;
+  consecutiveFailures: number;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  lastSuccessfulPollAt: string | null;
+}
+
+const indexerHealth: IndexerHealth = {
+  isRunning: false,
+  consecutiveFailures: 0,
+  lastError: null,
+  lastErrorAt: null,
+  lastSuccessfulPollAt: null,
+};
+
+export function getIndexerHealth(): IndexerHealth {
+  return { ...indexerHealth };
+}
+
+// ── Exponential backoff for RPC failures ────────────────────────────────────
+const MIN_BACKOFF_MS = 1000; // 1 second
+const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+const BACKOFF_MULTIPLIER = 2;
+
+/** Jittered exponential backoff: [0.5x, 1x] of min(MIN * 2^(n-1), MAX). */
+export function calculateBackoff(failureCount: number): number {
+  const backoff = MIN_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, Math.max(failureCount - 1, 0));
+  const capped = Math.min(backoff, MAX_BACKOFF_MS);
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function startIndexer(): Promise<void> {
   const pollInterval = Number(process.env.POLL_INTERVAL_MS ?? 5000);
@@ -83,6 +119,7 @@ export async function startIndexer(): Promise<void> {
   // Handle graceful shutdown
   process.on('SIGTERM', () => {
     console.log('[Indexer] SIGTERM received, shutting down gracefully');
+    indexerHealth.isRunning = false;
     unsubscribeFactory();
     unsubscribeTreasury();
     process.exit(0);
@@ -90,31 +127,100 @@ export async function startIndexer(): Promise<void> {
 
   process.on('SIGINT', () => {
     console.log('[Indexer] SIGINT received, shutting down gracefully');
+    indexerHealth.isRunning = false;
     unsubscribeFactory();
     unsubscribeTreasury();
     process.exit(0);
   });
 
-  // Keep polling for new ledgers as fallback
+  // Keep polling for new ledgers as fallback. RPC failures no longer crash
+  // the process — they're retried with exponential backoff so a transient
+  // outage doesn't require manual intervention to recover from.
+  indexerHealth.isRunning = true;
+
   while (true) {
     try {
-      const latestLedgerResponse = await server.getLatestLedger();
-      const latestLedger = latestLedgerResponse.sequence;
+      const next = await pollOnce(lastProcessed);
+      const madeProgress = next !== lastProcessed;
+      lastProcessed = next;
 
-      if (latestLedger > lastProcessed) {
-        for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
-          await processLedger(seq);
-          await saveCheckpoint(seq);
-          lastProcessed = seq;
-        }
-      } else {
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      indexerHealth.consecutiveFailures = 0;
+      indexerHealth.lastError = null;
+      indexerHealth.lastErrorAt = null;
+      indexerHealth.lastSuccessfulPollAt = new Date().toISOString();
+
+      if (!madeProgress) {
+        await sleep(pollInterval);
       }
     } catch (err) {
-      console.error('[Indexer] Unrecoverable error:', err);
-      process.exit(1);
+      indexerHealth.consecutiveFailures++;
+      indexerHealth.lastError = err instanceof Error ? err.message : String(err);
+      indexerHealth.lastErrorAt = new Date().toISOString();
+
+      const backoffMs = calculateBackoff(indexerHealth.consecutiveFailures);
+      console.error(
+        `[Indexer] Poll failed (consecutive failures: ${indexerHealth.consecutiveFailures}), ` +
+        `retrying in ${backoffMs}ms:`,
+        err,
+      );
+      await sleep(backoffMs);
     }
   }
+}
+
+/**
+ * True if `err` indicates the requested ledger has fallen outside the RPC
+ * node's retention window (already pruned) rather than a transient RPC
+ * failure. These ledgers will never become available, so they must be
+ * skipped instead of retried forever.
+ */
+function isLedgerRangeError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /start\s*ledger|ledger\s*range|oldest\s*ledger|out of range/i.test(msg);
+}
+
+/**
+ * Runs a single fallback-polling iteration: advances from `lastProcessed`
+ * up to the current chain tip, checkpointing after every ledger. Returns
+ * the new last-processed ledger sequence.
+ *
+ * Handles two edge cases cleanly instead of looping forever or crashing:
+ *  - Re-org / RPC rewind: if the reported tip is behind `lastProcessed`,
+ *    never process backward — resume from the new tip.
+ *  - Missing/pruned ledgers: if a ledger has aged out of the RPC's
+ *    retention window it can never be fetched, so it is skipped (logged)
+ *    rather than blocking the indexer indefinitely.
+ */
+export async function pollOnce(lastProcessed: number): Promise<number> {
+  const latestLedgerResponse = await server.getLatestLedger();
+  const latestLedger = latestLedgerResponse.sequence;
+
+  if (latestLedger < lastProcessed) {
+    console.warn(
+      `[Indexer] Re-org detected: latest ledger ${latestLedger} is behind ` +
+      `last processed ${lastProcessed}. Resuming from tip without replaying backward.`,
+    );
+    await saveCheckpoint(latestLedger);
+    return latestLedger;
+  }
+
+  for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
+    try {
+      await processLedger(seq);
+    } catch (err) {
+      if (isLedgerRangeError(err)) {
+        console.warn(`[Indexer] Ledger ${seq} unavailable (pruned/out of range), skipping`, err);
+      } else {
+        // Real RPC failure — stop here without checkpointing so the
+        // caller's backoff-and-retry picks this ledger back up.
+        throw err;
+      }
+    }
+    await saveCheckpoint(seq);
+    lastProcessed = seq;
+  }
+
+  return lastProcessed;
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +436,11 @@ export async function processLedger(ledger_sequence: number): Promise<void> {
       await processEvent(rawEvent);
     }
   } catch (err) {
+    // Rethrow so the caller (pollOnce) does not checkpoint past a ledger
+    // whose events were never fetched — checkpointing here would silently
+    // drop events and make the gap unrecoverable.
     console.error(`Error processing ledger ${ledger_sequence}:`, err);
+    throw err;
   }
 }
 
@@ -355,6 +465,10 @@ export async function processEvent(event: RawStellarEvent): Promise<void> {
 
     if (handler) {
       await handler(event);
+      // Push the freshly-persisted event to any live WebSocket subscribers
+      // now that it's durable — never lets a broadcast failure affect
+      // indexing, and no-ops if the WebSocket layer isn't running.
+      broadcastIndexedEvent(event);
     } else {
       console.warn(
         `[Indexer] Unknown event type "${event.event_type}" on contract ${event.contract_address} ` +
@@ -372,6 +486,35 @@ export async function processEvent(event: RawStellarEvent): Promise<void> {
 
 function parsePayload(data: string): Record<string, unknown> {
   try { return JSON.parse(data); } catch { return {}; }
+}
+
+/** Maps an ingested contract event onto the WebSocket ActivityEvent shape and publishes it. */
+function broadcastIndexedEvent(event: RawStellarEvent): void {
+  const feed = tryGetActivityFeed();
+  if (!feed) return; // WebSocket layer not initialised in this process (e.g. tests, standalone worker)
+
+  const p = parsePayload(event.data);
+  const marketId = typeof p.market_id === 'string' ? p.market_id : '';
+  if (!marketId) return;
+
+  let activityEvent: ActivityEvent;
+  if (event.event_type === 'bet_placed') {
+    activityEvent = {
+      type: 'trade',
+      marketId,
+      outcomeId: String(p.side ?? ''),
+      side: String(p.side ?? ''),
+      sharesAmount: Number(p.amount ?? 0),
+      priceBps: 0,
+      timestamp: event.ledger_close_time,
+    };
+  } else if (event.event_type === 'market_resolved') {
+    activityEvent = { type: 'resolved', marketId, winningOutcomeId: String(p.outcome ?? '') };
+  } else {
+    activityEvent = { type: 'market_update', marketId, eventType: event.event_type, data: p };
+  }
+
+  feed.publish(activityEvent);
 }
 
 // ---------------------------------------------------------------------------
@@ -479,12 +622,15 @@ export async function handleMarketLocked(event: RawStellarEvent): Promise<void> 
 
 export async function handleMarketResolved(event: RawStellarEvent): Promise<void> {
   const p = parsePayload(event.data);
+  // Declared outside the try block: cacheDeletePattern() below needs it
+  // after the try/catch/finally, and a `const` scoped to the try block
+  // would throw ReferenceError there on every call.
+  const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const outcome = typeof p.outcome === 'string' ? p.outcome : null;
-    const marketId = typeof p.market_id === 'string' ? p.market_id : null;
     const matchId = typeof p.match_id === 'string' ? p.match_id : null;
     const oracleAddress = typeof p.oracle_address === 'string' ? p.oracle_address : null;
     const signature = typeof p.signature === 'string' ? p.signature : null;
