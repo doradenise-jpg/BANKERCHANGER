@@ -82,6 +82,10 @@ pub enum ContractError {
     InsufficientBalance = 42,
     /// Market is not approved to deposit or receive fees
     MarketNotApproved = 43,
+    /// A fee extraction is already in progress; concurrent call rejected
+    FeeExtractionInProgress = 44,
+    /// The daily withdrawal cap has been reached for today's bucket
+    DailyCapReached = 45,
 
     // ── Factory ────────────────────────────────────────────
     /// Factory is paused; new market creation is disabled

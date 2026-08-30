@@ -427,6 +427,40 @@ pub fn emit_odds_computed(
 pub fn emit_withdrawals_paused(env: &Env, paused: bool) {
     let topics = (Symbol::new(env, "withdrawals_paused"),);
     env.events().publish(topics, paused);
+
+/// Emits an `audit_log` event for every treasury action that alters balances.
+///
+/// Topics: `(Symbol("audit_log"), day_bucket)`
+/// Data:   `(action_name: &str, token, amount, actor, timestamp)`
+///
+/// The `action_name` is a short ASCII string matching the `AuditAction` variant
+/// name, kept as a `Symbol` so downstream indexers can filter cheaply by topic.
+pub fn emit_audit_log(
+    env: &Env,
+    action: soroban_sdk::Symbol,
+    token: Address,
+    amount: i128,
+    actor: Address,
+    timestamp: u64,
+    day_bucket: u64,
+) {
+    let topics = (Symbol::new(env, "audit_log"), day_bucket);
+    env.events().publish(topics, (action, token, amount, actor, timestamp));
+}
+
+/// Emits a `daily_cap_reached` event when a withdrawal hits the daily ceiling.
+///
+/// Topics: `(Symbol("daily_cap_reached"), day_bucket)`
+/// Data:   `(token, total_withdrawn_today, cap)`
+pub fn emit_daily_cap_reached(
+    env: &Env,
+    token: Address,
+    total_withdrawn_today: i128,
+    cap: i128,
+    day_bucket: u64,
+) {
+    let topics = (Symbol::new(env, "daily_cap_reached"), day_bucket);
+    env.events().publish(topics, (token, total_withdrawn_today, cap));
 }
 
 #[cfg(test)]

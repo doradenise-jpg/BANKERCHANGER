@@ -313,5 +313,38 @@ pub struct AuditEntry {
     /// Ledger timestamp when the withdrawal executed.
     pub timestamp: u64,
     /// Day bucket (timestamp / 86400) — matches the DAILY_WITHDRAWN key.
+
+/// Classifies the action recorded in an audit log entry.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuditAction {
+    /// Admin withdrew accumulated fees to a destination address.
+    FeeWithdrawal,
+    /// Admin performed an emergency drain of all fees for a token.
+    EmergencyDrain,
+    /// A market deposited fees into the treasury.
+    FeeDeposit,
+    /// Daily withdrawal cap was reached for the current day bucket.
+    DailyCapReached,
+}
+
+/// An immutable record appended to the treasury's on-chain audit log.
+///
+/// Stored as a `Vec<AuditEntry>` under the `AUDIT_LOG` persistent key.
+/// Entries are append-only; none are ever removed or modified.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AuditEntry {
+    /// Ledger timestamp (seconds since Unix epoch) when the action occurred.
+    pub timestamp: u64,
+    /// Which type of treasury action this entry records.
+    pub action: AuditAction,
+    /// The token involved in the transaction (fee token address).
+    pub token: Address,
+    /// The amount involved (stroops).
+    pub amount: i128,
+    /// The actor who initiated the action (admin or market address).
+    pub actor: Address,
+    /// Day bucket (timestamp / 86400) for daily-limit queries.
     pub day_bucket: u64,
 }
