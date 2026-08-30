@@ -1,4 +1,4 @@
-// =====================================================
+// ==============================================
 // BANKERCHANGER — Engagement Service
 // Gamification & Notifications:
 //   * user prediction streaks + achievement badges
@@ -352,6 +352,10 @@ export const engagementService = new EngagementService();
 // ============================================================
 // Single in-memory service (mirrors the style of user.service.ts)
 // backing four engagement surfaces:
+// ============================================================
+// BANKERCHANGER — Engagement / Gamification Service
+// ============================================================
+// Single in-memory service backing four engagement surfaces:
 //
 //   1. Prediction streaks   — recordPredictionResult / getStreak
 //   2. Achievement badges    — awarded as a side effect, getBadges
@@ -361,6 +365,8 @@ export const engagementService = new EngagementService();
 //
 // The leaderboard exposes a listener hook so the WebSocket layer can
 // broadcast real-time rank changes without this service importing `ws`.
+
+// broadcast real-time rank changes without this service importing ws.
 // ============================================================
 
 import { AppError } from '../utils/AppError';
@@ -383,6 +389,10 @@ const REFERRAL_RATES: Record<1 | 2 | 3, number> = {
   1: 0.1, // direct referral
   2: 0.05, // referral of a referral
   3: 0.025, // third level
+
+  1: 0.1, // direct referral (10%)
+  2: 0.05, // referral of a referral (5%)
+  3: 0.025, // third level (2.5%)
 };
 
 const MAX_REFERRAL_DEPTH = 3;

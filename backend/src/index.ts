@@ -186,6 +186,8 @@ initActivityFeed(server);
 
 // Bridge engagement leaderboard rank changes onto the WebSocket layer so
 // subscribed clients get real-time rank updates (issues #516, #517).
+
+// subscribed clients get real-time rank updates.
 engagementService.setRankUpdateListener((updates) => {
   try {
     getActivityFeed().emitLeaderboardRankUpdate(updates);
