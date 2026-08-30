@@ -7,8 +7,10 @@ import {
   timestamp,
   integer,
   jsonb,
+  date,
   uniqueIndex,
   index,
+  primaryKey,
 } from 'drizzle-orm/pg-core';
 
 export const markets = pgTable(
@@ -287,6 +289,111 @@ export const proposals = pgTable(
   }),
 );
 
+export const user_streaks = pgTable(
+  'user_streaks',
+  {
+    id: serial('id').primaryKey(),
+    address: text('address').notNull(),
+    current_streak: integer('current_streak').notNull().default(0),
+    best_streak: integer('best_streak').notNull().default(0),
+    total_predictions: integer('total_predictions').notNull().default(0),
+    last_prediction_date: date('last_prediction_date'),
+    updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    address_idx: uniqueIndex('user_streaks_address_idx').on(table.address),
+  }),
+);
+
+export const achievements = pgTable(
+  'achievements',
+  {
+    id: serial('id').primaryKey(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    description: text('description').notNull(),
+    category: text('category').notNull().default('general'), // 'streak' | 'volume' | 'referral' | 'general'
+    threshold: integer('threshold').notNull().default(0),
+    reward_label: text('reward_label').notNull().default(''),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    code_idx: uniqueIndex('achievements_code_idx').on(table.code),
+  }),
+);
+
+export const user_achievements = pgTable(
+  'user_achievements',
+  {
+    id: serial('id').primaryKey(),
+    address: text('address').notNull(),
+    achievement_id: integer('achievement_id')
+      .notNull()
+      .references(() => achievements.id, { onDelete: 'cascade' }),
+    earned_at: timestamp('earned_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    address_idx: index('user_achievements_address_idx').on(table.address),
+    address_achievement_unique: uniqueIndex('user_achievements_address_achievement_idx').on(
+      table.address,
+      table.achievement_id,
+    ),
+  }),
+);
+
+export const referrals = pgTable(
+  'referrals',
+  {
+    id: serial('id').primaryKey(),
+    referrer_address: text('referrer_address').notNull(),
+    referred_address: text('referred_address').notNull(),
+    referral_code: text('referral_code').notNull(),
+    status: text('status').notNull().default('active'), // 'active' | 'converted'
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+    converted_at: timestamp('converted_at', { withTimezone: true }),
+  },
+  (table) => ({
+    referred_address_idx: uniqueIndex('referrals_referred_address_idx').on(table.referred_address),
+    referrer_address_idx: index('referrals_referrer_address_idx').on(table.referrer_address),
+  }),
+);
+
+export const referral_payouts = pgTable(
+  'referral_payouts',
+  {
+    id: serial('id').primaryKey(),
+    referrer_address: text('referrer_address').notNull(),
+    referred_address: text('referred_address').notNull(),
+    level: integer('level').notNull().default(1),
+    amount: numeric('amount').notNull().default('0'),
+    source_amount: numeric('source_amount').notNull().default('0'),
+    rate_bps: integer('rate_bps').notNull().default(0),
+    status: text('status').notNull().default('pending'), // 'pending' | 'paid'
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    referrer_address_idx: index('referral_payouts_referrer_address_idx').on(table.referrer_address),
+  }),
+);
+
+export const user_notifications = pgTable(
+  'user_notifications',
+  {
+    id: serial('id').primaryKey(),
+    address: text('address').notNull(),
+    type: text('type').notNull(), // 'streak' | 'achievement' | 'referral' | 'leaderboard'
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    payload: jsonb('payload').default('{}'),
+    read: boolean('read').default(false),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    address_idx: index('user_notifications_address_idx').on(table.address),
+    read_idx: index('user_notifications_read_idx').on(table.read),
+  }),
+);
+
 export type Market = typeof markets.$inferSelect;
 export type NewMarket = typeof markets.$inferInsert;
 export type Bet = typeof bets.$inferSelect;
@@ -403,3 +510,5 @@ export type Referral = typeof referrals.$inferSelect;
 export type NewReferral = typeof referrals.$inferInsert;
 export type ReferralPayout = typeof referral_payouts.$inferSelect;
 export type NewReferralPayout = typeof referral_payouts.$inferInsert;
+export type UserNotification = typeof user_notifications.$inferSelect;
+export type NewUserNotification = typeof user_notifications.$inferInsert;
