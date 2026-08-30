@@ -42,6 +42,13 @@ function publishActivity(event: ActivityEvent): void {
   }
 }
 
+import {
+  findMissingRanges,
+  getProcessedRanges,
+  getLastProcessedLedger as getTrackerLastProcessed,
+  recordProcessedRange,
+} from './ledgerTracker';
+
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
   contract_address: string;
@@ -258,14 +265,24 @@ export async function startIndexer(): Promise<void> {
         await saveCheckpoint(lastProcessed);
       }
 
-      if (latestLedger > lastProcessed) {
-        for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
-          await processLedger(seq);
-          await saveCheckpoint(seq);
-          lastProcessed = seq;
-        }
-      } else {
+      // Tracked processed ranges (from Redis cache or Postgres) let us detect
+      // any sequences that were skipped while the RPC endpoint was unreachable.
+      const fromLedger = await getTrackerLastProcessed();
+      const ranges = await getProcessedRanges();
+      const missing = findMissingRanges(fromLedger + 1, latestLedger, ranges);
+
+      if (missing.length === 0) {
         await new Promise(resolve => setTimeout(resolve, pollInterval));
+        continue;
+      }
+
+      // Automatically backfill every missing sequence, then persist each newly
+      // processed range under transaction isolation so a crash mid-backfill is
+      // re-detected on the next poll and re-run idempotently.
+      for (const range of missing) {
+        console.log(`[Indexer] Backfilling missing ledgers ${range.start}–${range.end}`);
+        await backfillAndRecord(range.start, range.end);
+        lastProcessed = Math.max(lastProcessed, range.end);
       }
 
       consecutiveFailures = 0;
@@ -305,6 +322,11 @@ export async function startIndexer(): Promise<void> {
         err instanceof Error ? err.message : err,
       );
       await new Promise(resolve => setTimeout(resolve, backoffMs));
+
+      // Do not exit on transient RPC/network errors — the poll loop keeps
+      // running and range-based gap detection recovers after downtime.
+      console.error(`[Indexer] Poll error (will retry):`, err);
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
     }
   }
 }
@@ -362,6 +384,15 @@ export async function pollOnce(lastProcessed: number): Promise<number> {
   }
 
   return lastProcessed;
+
+ * Process every ledger in the inclusive range `[from, to]` and record the
+ * range as fully processed in a single transaction-isolated write.
+ */
+async function backfillAndRecord(from: number, to: number): Promise<void> {
+  for (let seq = from; seq <= to; seq++) {
+    await processLedger(seq);
+  }
+  await recordProcessedRange(from, to);
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,8 +1088,10 @@ export async function backfillLedgerRange(
       }
     }
 
-    // Persist checkpoint after every batch so a restart only re-does the last batch
-    await saveCheckpoint(batchEnd);
+    // Persist the processed range after every batch so a restart only re-does
+    // the last batch. Recording runs under transaction isolation and coalesces
+    // with any previously tracked ranges.
+    await recordProcessedRange(batchStart, batchEnd);
   }
 
   console.log(`[Backfill] Complete — ${processed} ledgers processed.`);
@@ -1090,6 +1123,6 @@ export async function backfillFromLedger(fromLedger: number, toLedger?: number):
   }
 
   if (toLedger) {
-    await saveCheckpoint(toLedger);
+    await recordProcessedRange(fromLedger, toLedger);
   }
 }

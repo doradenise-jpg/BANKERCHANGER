@@ -94,6 +94,23 @@ export const indexer_checkpoints = pgTable('indexer_checkpoints', {
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
+export const indexer_ledger_ranges = pgTable(
+  'indexer_ledger_ranges',
+  {
+    id: serial('id').primaryKey(),
+    start_ledger: integer('start_ledger').notNull(),
+    end_ledger: integer('end_ledger').notNull(),
+    processed_at: timestamp('processed_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    rangeUnique: uniqueIndex('indexer_ledger_ranges_range_unique').on(
+      table.start_ledger,
+      table.end_ledger,
+    ),
+    startIdx: index('indexer_ledger_ranges_start_idx').on(table.start_ledger),
+  }),
+);
+
 export const oracle_reports = pgTable(
   'oracle_reports',
   {
