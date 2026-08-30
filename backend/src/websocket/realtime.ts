@@ -31,11 +31,25 @@ export interface LeaderboardRankEvent {
   timestamp: string;
 }
 
+export type LeaderboardRankUpdateEvent = {
+  type: 'leaderboard_rank_update';
+  leaderboardId: string;
+  userId: string;
+  rank: number;
+  score: number;
+  displayName?: string;
+  timestamp: string;
+};
+
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
 type LeaderboardSubMsg = { type: 'subscribe_leaderboard' | 'unsubscribe_leaderboard' };
 
 export type LeaderboardChannel = 'global' | 'referrals';
+
+type SubscribeMsg =
+  | { type: 'subscribe_activity'; marketId: string }
+  | { type: 'subscribe_leaderboard'; leaderboardId: string };
 
 // ---------------------------------------------------------------------------
 // Rate limiter — token bucket, max 20 events/sec per market
@@ -71,6 +85,8 @@ export class ActivityFeed {
 
   // sockets subscribed to global leaderboard rank updates
   private leaderboardSubs = new Set<WebSocket>();
+
+  private leaderboardSubscriptions = new Map<string, Set<WebSocket>>();
   private rateLimiter = new MarketRateLimiter();
   // Track authenticated connections
   private authenticated = new WeakSet<WebSocket>();
@@ -163,8 +179,22 @@ export class ActivityFeed {
 
     if (!this.subscriptions.has(marketId)) {
       this.subscriptions.set(marketId, new Set());
+
+    const msgData = msg as SubscribeMsg;
+    if (msgData.type === 'subscribe_activity' && typeof msgData.marketId === 'string') {
+      if (!this.subscriptions.has(msgData.marketId)) {
+        this.subscriptions.set(msgData.marketId, new Set());
+      }
+      this.subscriptions.get(msgData.marketId)!.add(ws);
+      return;
     }
-    this.subscriptions.get(marketId)!.add(ws);
+
+    if (msgData.type === 'subscribe_leaderboard' && typeof msgData.leaderboardId === 'string') {
+      if (!this.leaderboardSubscriptions.has(msgData.leaderboardId)) {
+        this.leaderboardSubscriptions.set(msgData.leaderboardId, new Set());
+      }
+      this.leaderboardSubscriptions.get(msgData.leaderboardId)!.add(ws);
+    }
   }
 
   private cleanupSocket(ws: WebSocket): void {
@@ -186,20 +216,46 @@ export class ActivityFeed {
 
 
     this.leaderboardSubs.delete(ws);
+
+
+    for (const [leaderboardId, sockets] of this.leaderboardSubscriptions.entries()) {
+      sockets.delete(ws);
+      if (sockets.size === 0) {
+        this.leaderboardSubscriptions.delete(leaderboardId);
+      }
+    }
   }
 
   /** Publish an activity event to all subscribers of the market. */
-  publish(event: ActivityEvent): void {
-    const { marketId } = event as { marketId: string };
-    if (!this.rateLimiter.allow(marketId)) return;
+  publish(event: ActivityEvent | LeaderboardRankUpdateEvent): void {
+    if ('marketId' in event) {
+      const marketId = event.marketId;
+      if (!this.rateLimiter.allow(marketId)) return;
 
-    const sockets = this.subscriptions.get(marketId);
-    if (!sockets?.size) return;
+      const sockets = this.subscriptions.get(marketId);
+      if (!sockets?.size) return;
 
-    const payload = JSON.stringify(event);
-    for (const ws of sockets) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      const payload = JSON.stringify(event);
+      for (const ws of sockets) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      }
+      return;
     }
+
+    if ('leaderboardId' in event) {
+      const leaderboardId = event.leaderboardId;
+      const sockets = this.leaderboardSubscriptions.get(leaderboardId);
+      if (!sockets?.size) return;
+
+      const payload = JSON.stringify(event);
+      for (const ws of sockets) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      }
+    }
+  }
+
+  publishLeaderboardUpdate(event: LeaderboardRankUpdateEvent): void {
+    this.publish(event);
   }
 
   /** Broadcast a leaderboard rank update to all sockets subscribed to the leaderboard channel. */
