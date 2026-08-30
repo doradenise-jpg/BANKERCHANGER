@@ -1,4 +1,4 @@
-// ==============================================
+// =======================================
 // BANKERCHANGER — Engagement Service
 // Gamification & Notifications:
 //   * user prediction streaks + achievement badges
