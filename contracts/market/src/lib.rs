@@ -13,7 +13,7 @@ extern crate std;
 mod tests;
 
 use soroban_sdk::{
-    contract, contractimpl, contractclient, token, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contractclient, contractimpl, token, Address, BytesN, Env, Map, Symbol, Vec,
 };
 
 use boxmeout_shared::{
@@ -25,23 +25,26 @@ use boxmeout_shared::{
 
         BetRecord, BetSide, ClaimReceipt, Config, FightDetails, LiquidityPosition, MarketConfig,
         MarketState, MarketStatus, OptionalOracleRole, OptionalOutcome, Outcome, OracleReport, OracleRole,
+
+        BetRecord, BetSide, ClaimReceipt, Config, FightDetails, MarketConfig, MarketState,
+        MarketStatus, OptionalOracleRole, OptionalOutcome, OracleReport, OracleRole, Outcome,
     },
 };
 
 // ─── Storage Keys ─────────────────────────────────────────────────────────────
-const STATE: &str        = "STATE";
+const STATE: &str = "STATE";
 /// Prefix for the per-bettor bets key: (BET_PREFIX, bettor) -> Vec<BetRecord>.
 /// Keyed per-address so a lookup for one bettor doesn't deserialize every
 /// other bettor's bets (see issue #255).
-const BET_PREFIX: &str   = "BET";
-const BETTOR_LIST: &str  = "BETTOR_LIST";
-const FACTORY: &str      = "FACTORY";
-const CONFIG: &str       = "CONFIG";
-const TREASURY: &str     = "TREASURY";
+const BET_PREFIX: &str = "BET";
+const BETTOR_LIST: &str = "BETTOR_LIST";
+const FACTORY: &str = "FACTORY";
+const CONFIG: &str = "CONFIG";
+const TREASURY: &str = "TREASURY";
 /// Reentrancy guard — set true while a claim/refund transfer is in flight
-const CLAIMING: &str     = "CLAIMING";
+const CLAIMING: &str = "CLAIMING";
 /// Emergency pause — when true all fund-moving operations are blocked
-const PAUSED: &str       = "PAUSED";
+const PAUSED: &str = "PAUSED";
 /// Pending oracle reports for 2-of-3 consensus
 const PENDING_REPORTS: &str = "PENDING_REPORTS";
 const REPORT_TTL: u64 = 172_800;
@@ -103,7 +106,10 @@ impl Market {
     }
 
     fn load_state(env: &Env) -> Result<MarketState, ContractError> {
-        env.storage().persistent().get(&STATE).ok_or(ContractError::MarketNotFound)
+        env.storage()
+            .persistent()
+            .get(&STATE)
+            .ok_or(ContractError::MarketNotFound)
     }
 
     fn save_state(env: &Env, state: &MarketState) {
@@ -116,18 +122,24 @@ impl Market {
 
     fn load_bets(env: &Env, bettor: &Address) -> Vec<BetRecord> {
         let key = Self::bet_key(env, bettor);
-        env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env))
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     fn save_bets(env: &Env, bettor: &Address, bets: &Vec<BetRecord>) {
         let key = Self::bet_key(env, bettor);
         env.storage().persistent().set(&key, bets);
-        env.storage().persistent().extend_ttl(&key, MAX_TTL, MAX_TTL);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MAX_TTL, MAX_TTL);
     }
 
     fn is_oracle_whitelisted(env: &Env, caller: &Address) -> Result<bool, ContractError> {
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         let client = FactoryClient::new(env, &factory);
@@ -136,9 +148,13 @@ impl Market {
     }
 
     /// Returns the raw Ed25519 public key for `caller` if they are whitelisted, or None.
-    fn get_oracle_raw_key(env: &Env, caller: &Address) -> Result<Option<BytesN<32>>, ContractError> {
+    fn get_oracle_raw_key(
+        env: &Env,
+        caller: &Address,
+    ) -> Result<Option<BytesN<32>>, ContractError> {
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         let client = FactoryClient::new(env, &factory);
@@ -147,8 +163,12 @@ impl Market {
 
     /// Extend TTL on market data entries to prevent premature expiration.
     fn extend_market_ttl(env: &Env) {
-        env.storage().persistent().extend_ttl(&STATE, MAX_TTL, MAX_TTL);
-        env.storage().persistent().extend_ttl(&BETTOR_LIST, MAX_TTL, MAX_TTL);
+        env.storage()
+            .persistent()
+            .extend_ttl(&STATE, MAX_TTL, MAX_TTL);
+        env.storage()
+            .persistent()
+            .extend_ttl(&BETTOR_LIST, MAX_TTL, MAX_TTL);
     }
 
     fn lp_key(env: &Env, provider: &Address) -> (Symbol, Address) {
@@ -232,7 +252,9 @@ impl Market {
         env.storage().persistent().set(&STATE, &state);
         env.storage().persistent().set(&FACTORY, &factory);
         env.storage().persistent().set(&TREASURY, &treasury);
-        env.storage().persistent().set(&BETTOR_LIST, &Vec::<Address>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&BETTOR_LIST, &Vec::<Address>::new(&env));
         env.storage().instance().set(&PAUSED, &false);
         env.storage().instance().set(&CLAIMING, &false);
 
@@ -267,8 +289,8 @@ impl Market {
         min_shares_out: i128,
     ) -> Result<BetRecord, ContractError> {
         // ── CHECKS ────────────────────────────────────────────────────────────
-        bettor.require_auth();                          // auth first
-        Self::require_not_paused(&env)?;                // pause guard
+        bettor.require_auth(); // auth first
+        Self::require_not_paused(&env)?; // pause guard
 
         let state = Self::load_state(&env)?;
 
@@ -276,12 +298,17 @@ impl Market {
             return Err(ContractError::MarketNotOpen);
         }
 
-        let lock_threshold = state.fight.scheduled_at
+        let lock_threshold = state
+            .fight
+            .scheduled_at
             .saturating_sub(state.config.lock_before_secs);
         if env.ledger().timestamp() >= lock_threshold {
             return Err(ContractError::BettingClosed);
         }
 
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
         if amount < state.config.min_bet_amount {
             return Err(ContractError::BelowMinimum);
         }
@@ -319,7 +346,7 @@ impl Market {
             let side_byte: u8 = match side {
                 BetSide::FighterA => 0,
                 BetSide::FighterB => 1,
-                BetSide::Draw     => 2,
+                BetSide::Draw => 2,
             };
             if let Some((shares_out, impact_bps)) = boxmeout_shared::amm::compute_odds(
                 state.pool_a,
@@ -354,7 +381,7 @@ impl Market {
         match side {
             BetSide::FighterA => new_state.pool_a += amount,
             BetSide::FighterB => new_state.pool_b += amount,
-            BetSide::Draw     => new_state.pool_draw += amount,
+            BetSide::Draw => new_state.pool_draw += amount,
         }
         new_state.total_pool += amount;
         Self::save_state(&env, &new_state);
@@ -377,8 +404,11 @@ impl Market {
         Self::save_bets(&env, &bettor, &bets);
 
         if is_first_bet {
-            let mut bettor_list: Vec<Address> =
-                env.storage().persistent().get(&BETTOR_LIST).unwrap_or_else(|| Vec::new(&env));
+            let mut bettor_list: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&BETTOR_LIST)
+                .unwrap_or_else(|| Vec::new(&env));
             bettor_list.push_back(bettor.clone());
             env.storage().persistent().set(&BETTOR_LIST, &bettor_list);
         }
@@ -714,12 +744,11 @@ impl Market {
 
         // Caller must be a whitelisted oracle OR the factory admin
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        let is_admin = caller == factory;
-        let is_oracle = Self::is_oracle_whitelisted(&env, &caller)?;
-        if !is_admin && !is_oracle {
+        if caller != factory && !Self::is_oracle_whitelisted(&env, &caller)? {
             return Err(ContractError::NotOracle);
         }
 
@@ -728,7 +757,9 @@ impl Market {
             return Err(ContractError::InvalidMarketStatus);
         }
 
-        let lock_threshold = state.fight.scheduled_at
+        let lock_threshold = state
+            .fight
+            .scheduled_at
             .saturating_sub(state.config.lock_before_secs);
         if env.ledger().timestamp() < lock_threshold {
             return Err(ContractError::InvalidTimeRange);
@@ -769,8 +800,8 @@ impl Market {
 
         // Look up the whitelisted raw public key for this oracle address.
         // This is the authoritative 32-byte Ed25519 key registered by the admin.
-        let whitelisted_pub_key: BytesN<32> = Self::get_oracle_raw_key(&env, &oracle)?
-            .ok_or(ContractError::NotOracle)?;
+        let whitelisted_pub_key: BytesN<32> =
+            Self::get_oracle_raw_key(&env, &oracle)?.ok_or(ContractError::NotOracle)?;
 
         let mut state = Self::load_state(&env)?;
         if state.status != MarketStatus::Locked {
@@ -782,6 +813,10 @@ impl Market {
         }
 
         let deadline = state.fight.scheduled_at
+
+        let deadline = state
+            .fight
+            .scheduled_at
             .saturating_add(state.config.resolution_window);
         if env.ledger().timestamp() > deadline {
             return Err(ContractError::ResolutionWindowExpired);
@@ -795,12 +830,12 @@ impl Market {
         // Use the authoritative key from the whitelist — NOT report.pub_key — to prevent
         // a malicious oracle from substituting a different key in the report payload.
         {
-            use soroban_sdk::Bytes;
             use soroban_sdk::xdr::ToXdr;
+            use soroban_sdk::Bytes;
             let outcome_byte: u8 = match report.outcome {
-                Outcome::FighterA  => 0,
-                Outcome::FighterB  => 1,
-                Outcome::Draw      => 2,
+                Outcome::FighterA => 0,
+                Outcome::FighterB => 1,
+                Outcome::Draw => 2,
                 Outcome::NoContest => 3,
             };
             let mut msg = Bytes::new(&env);
@@ -812,12 +847,16 @@ impl Market {
             }
             // whitelisted_pub_key is the raw 32-byte Ed25519 key registered by the admin.
             // This is correct — unlike oracle.to_string().to_bytes() which is base32-encoded.
-            env.crypto().ed25519_verify(&whitelisted_pub_key, &msg, &report.signature);
+            env.crypto()
+                .ed25519_verify(&whitelisted_pub_key, &msg, &report.signature);
         }
 
         // EFFECTS — 2-of-3 consensus logic
-        let mut pending: Map<Address, OracleReport> =
-            env.storage().persistent().get(&PENDING_REPORTS).unwrap_or_else(|| Map::new(&env));
+        let mut pending: Map<Address, OracleReport> = env
+            .storage()
+            .persistent()
+            .get(&PENDING_REPORTS)
+            .unwrap_or_else(|| Map::new(&env));
 
         // Check if we already have a report from this oracle
         if pending.contains_key(oracle.clone()) {
@@ -890,7 +929,7 @@ impl Market {
             state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
             Self::save_state(&env, &state);
             Self::extend_market_ttl(&env);
-            
+
             // Clear pending reports
             env.storage().persistent().set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
 
@@ -904,6 +943,11 @@ impl Market {
                 outcome_byte,
             );
             
+
+            env.storage()
+                .persistent()
+                .set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
+
             boxmeout_shared::emit_market_resolved(&env, state.market_id, report.outcome, oracle);
         } else if conflicting_count > 0 && matching_count == 1 {
             // Emit event for conflicting report, wait for third oracle
@@ -918,15 +962,19 @@ impl Market {
     pub fn clear_stale_reports(env: Env, caller: Address) -> Result<u32, ContractError> {
         caller.require_auth();
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if caller != factory {
             return Err(ContractError::Unauthorized);
         }
 
-        let pending: Map<Address, OracleReport> =
-            env.storage().persistent().get(&PENDING_REPORTS).unwrap_or_else(|| Map::new(&env));
+        let pending: Map<Address, OracleReport> = env
+            .storage()
+            .persistent()
+            .get(&PENDING_REPORTS)
+            .unwrap_or_else(|| Map::new(&env));
         let now = env.ledger().timestamp();
         let mut updated: Map<Address, OracleReport> = Map::new(&env);
         let mut cleared = 0u32;
@@ -966,9 +1014,9 @@ impl Market {
         token: Address,
     ) -> Result<ClaimReceipt, ContractError> {
         // ── CHECKS ────────────────────────────────────────────────────────────
-        bettor.require_auth();                          // auth first
-        Self::require_not_paused(&env)?;                // pause guard
-        Self::require_not_claiming(&env)?;              // reentrancy guard
+        bettor.require_auth(); // auth first
+        Self::require_not_paused(&env)?; // pause guard
+        Self::require_not_claiming(&env)?; // reentrancy guard
 
         // Reload state fresh from storage (never use a stale copy)
         let state = Self::load_state(&env)?;
@@ -986,9 +1034,9 @@ impl Market {
         };
 
         let winning_side = match &winning_outcome {
-            Outcome::FighterA  => BetSide::FighterA,
-            Outcome::FighterB  => BetSide::FighterB,
-            Outcome::Draw      => BetSide::Draw,
+            Outcome::FighterA => BetSide::FighterA,
+            Outcome::FighterB => BetSide::FighterB,
+            Outcome::Draw => BetSide::Draw,
             Outcome::NoContest => return Err(ContractError::InvalidOutcome),
         };
 
@@ -1014,15 +1062,17 @@ impl Market {
         let winning_pool = match &winning_side {
             BetSide::FighterA => state.pool_a,
             BetSide::FighterB => state.pool_b,
-            BetSide::Draw     => state.pool_draw,
+            BetSide::Draw => state.pool_draw,
         };
-        
+
         // Use checked arithmetic to prevent overflow
-        let fee = state.total_pool
+        let fee = state
+            .total_pool
             .checked_mul(state.config.fee_bps as i128)
             .and_then(|v| v.checked_div(10_000))
             .ok_or(ContractError::InsufficientAmount)?;
-        let net_pool = state.total_pool
+        let net_pool = state
+            .total_pool
             .checked_sub(fee)
             .ok_or(ContractError::InsufficientAmount)?;
         let payout = if winning_pool > 0 {
@@ -1060,7 +1110,8 @@ impl Market {
         // ── INTERACTIONS ──────────────────────────────────────────────────────
         let token_client = token::Client::new(&env, &token);
         let treasury: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&TREASURY)
             .ok_or(ContractError::Unauthorized)?;
 
@@ -1095,11 +1146,7 @@ impl Market {
     /// 1. CHECKS: require_auth, pause guard, reentrancy guard, status
     /// 2. EFFECTS: mark bets claimed + set CLAIMING lock BEFORE transfer
     /// 3. INTERACTIONS: token transfer last
-    pub fn claim_refund(
-        env: Env,
-        bettor: Address,
-        token: Address,
-    ) -> Result<i128, ContractError> {
+    pub fn claim_refund(env: Env, bettor: Address, token: Address) -> Result<i128, ContractError> {
         // ── CHECKS ────────────────────────────────────────────────────────────
         bettor.require_auth();
         Self::require_not_paused(&env)?;
@@ -1174,12 +1221,11 @@ impl Market {
 
         // Caller must be a whitelisted oracle OR the factory admin
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        let is_admin = caller == factory;
-        let is_oracle = Self::is_oracle_whitelisted(&env, &caller)?;
-        if !is_admin && !is_oracle {
+        if caller != factory && !Self::is_oracle_whitelisted(&env, &caller)? {
             return Err(ContractError::NotOracle);
         }
 
@@ -1214,7 +1260,8 @@ impl Market {
 
         // Admin must be the factory address (factory is the privileged admin)
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if admin != factory {
@@ -1251,7 +1298,8 @@ impl Market {
         Self::require_not_paused(&env)?;
 
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if admin != factory {
@@ -1307,8 +1355,8 @@ impl Market {
         if state.total_pool == 0 {
             return (0, 0, 0);
         }
-        let odds_a    = (state.pool_a    * 10_000 / state.total_pool) as u32;
-        let odds_b    = (state.pool_b    * 10_000 / state.total_pool) as u32;
+        let odds_a = (state.pool_a * 10_000 / state.total_pool) as u32;
+        let odds_b = (state.pool_b * 10_000 / state.total_pool) as u32;
         let odds_draw = (state.pool_draw * 10_000 / state.total_pool) as u32;
         (odds_a, odds_b, odds_draw)
     }
@@ -1325,13 +1373,13 @@ impl Market {
         let (hypo_a, hypo_b, hypo_draw) = match side {
             BetSide::FighterA => (state.pool_a + amount, state.pool_b, state.pool_draw),
             BetSide::FighterB => (state.pool_a, state.pool_b + amount, state.pool_draw),
-            BetSide::Draw     => (state.pool_a, state.pool_b, state.pool_draw + amount),
+            BetSide::Draw => (state.pool_a, state.pool_b, state.pool_draw + amount),
         };
         let hypo_total = state.total_pool + amount;
         let winning_pool = match side {
             BetSide::FighterA => hypo_a,
             BetSide::FighterB => hypo_b,
-            BetSide::Draw     => hypo_draw,
+            BetSide::Draw => hypo_draw,
         };
         if winning_pool == 0 {
             return 0;
@@ -1343,8 +1391,11 @@ impl Market {
 
     /// Returns the number of unique bettors in this market.
     pub fn get_bettor_count(env: Env) -> u32 {
-        let list: Vec<Address> =
-            env.storage().persistent().get(&BETTOR_LIST).unwrap_or_else(|| Vec::new(&env));
+        let list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&BETTOR_LIST)
+            .unwrap_or_else(|| Vec::new(&env));
         list.len()
     }
 
@@ -1352,8 +1403,11 @@ impl Market {
     /// `limit` is capped at 50. Returns an empty vec if no bets exist.
     pub fn get_all_bets(env: Env, offset: u32, limit: u32) -> Vec<BetRecord> {
         let cap: u32 = if limit > 50 { 50 } else { limit };
-        let bettor_list: Vec<Address> =
-            env.storage().persistent().get(&BETTOR_LIST).unwrap_or_else(|| Vec::new(&env));
+        let bettor_list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&BETTOR_LIST)
+            .unwrap_or_else(|| Vec::new(&env));
 
         let mut all: Vec<BetRecord> = Vec::new(&env);
         for addr in bettor_list.iter() {
@@ -1532,15 +1586,18 @@ impl Market {
     /// Returns `0` if no position exists.
     pub fn get_lp_claimable_fees(env: Env, _market_id: u64, _provider: Address) -> i128 {
         let lp_fee_per_share: i128 = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&soroban_sdk::Symbol::new(&env, "lp_fee_per_share"))
             .unwrap_or(0);
         let position: Option<(i128, i128)> = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&soroban_sdk::Symbol::new(&env, "lp_position"));
         match position {
-            Some((lp_shares, lp_fee_debt)) =>
-                boxmeout_shared::calc_claimable_lp_fees(lp_fee_per_share, lp_fee_debt, lp_shares),
+            Some((lp_shares, lp_fee_debt)) => {
+                boxmeout_shared::calc_claimable_lp_fees(lp_fee_per_share, lp_fee_debt, lp_shares)
+            }
             None => 0,
         }
     }
@@ -1550,7 +1607,8 @@ impl Market {
     pub fn emergency_pause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if admin != factory {
@@ -1564,7 +1622,8 @@ impl Market {
     pub fn emergency_unpause(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if admin != factory {
@@ -1578,16 +1637,22 @@ impl Market {
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the factory admin
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env
-            .storage().persistent()
+            .storage()
+            .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
         if admin != factory {
             return Err(ContractError::NotAdmin);
         }
-        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
         boxmeout_shared::emit_contract_upgraded(&env, new_wasm_hash);
         Ok(())
     }
