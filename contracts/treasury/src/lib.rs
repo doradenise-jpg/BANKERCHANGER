@@ -123,6 +123,16 @@ const AUDIT_NEXT_ID: &str                 = "AUDIT_NEXT_ID";               // u6
 const WITHDRAWAL_IN_PROGRESS: &str        = "WITHDRAWAL_IN_PROGRESS";      // reentrancy guard
 const MIN_WITHDRAWAL: i128                = 10_000_000;                    // 1 XLM in stroops
 
+const APPROVED_MARKETS: &str        = "APPROVED_MARKETS";
+const WITHDRAWAL_LIMIT: &str        = "WITHDRAWAL_LIMIT";
+const DAILY_WITHDRAWN: &str         = "DAILY_WITHDRAWN";
+const WITHDRAWALS_PAUSED: &str      = "WITHDRAWALS_PAUSED";
+const AUDIT_LOG: &str               = "AUDIT_LOG";          // Vec<AuditEntry> (append-only)
+const AUDIT_NEXT_ID: &str           = "AUDIT_NEXT_ID";      // u64 monotonically increasing
+const WITHDRAWAL_IN_PROGRESS: &str  = "WITHDRAWAL_IN_PROGRESS"; // reentrancy guard
+const WITHDRAWAL_NONCE: &str        = "WITHDRAWAL_NONCE";   // u64 monotonically increasing
+const MIN_WITHDRAWAL: i128          = 10_000_000; // 1 XLM in stroops
+
 #[contract]
 pub struct Treasury;
 
@@ -444,6 +454,8 @@ impl Treasury {
         env.storage()
             .persistent()
             .set(&WITHDRAWAL_IN_PROGRESS, &false);
+
+        env.storage().persistent().set(&WITHDRAWAL_NONCE, &0_u64);
         Ok(())
     }
 
@@ -1065,6 +1077,8 @@ impl Treasury {
         let paused: bool = env.storage().persistent().get(&WITHDRAWALS_PAUSED).unwrap_or(false);
         if paused {
             Self::clear_guard(&env);
+
+            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
             return Err(ContractError::WithdrawalsPaused);
         }
 
@@ -1206,6 +1220,14 @@ impl Treasury {
         by_token.set(token.clone(), token_daily);
         env.storage().persistent().set(&DAILY_WITHDRAWN_BY_TOKEN, &by_token);
 
+        // Prune DAILY_WITHDRAWN — keep only current and previous day bucket
+        Self::prune_daily_withdrawn(&env, &mut daily, bucket);
+        env.storage().persistent().set(&DAILY_WITHDRAWN, &daily);
+
+        // Increment the withdrawal nonce so nonce-guarded withdrawals stay in sync.
+        let nonce: u64 = env.storage().persistent().get(&WITHDRAWAL_NONCE).unwrap_or(0);
+        env.storage().persistent().set(&WITHDRAWAL_NONCE, &(nonce + 1));
+
         // AUDIT — immutable ledger entry (completed withdrawals only)
         Self::record_audit(&env, AuditAction::FeeWithdrawn, token.clone(), amount, destination.clone());
 
@@ -1287,6 +1309,12 @@ impl Treasury {
             .get(&APPROVED_MARKETS)
             .unwrap_or_else(|| Vec::new(&env));
         markets.contains(market_address)
+    }
+
+    /// Returns true if the address is an approved market (alias of
+    /// `is_registered_market`, provided for query compatibility).
+    pub fn is_market_approved(env: Env, market_address: Address) -> bool {
+        Self::is_registered_market(env, market_address)
     }
 
     /// Returns the accumulated fees for a specific token.
@@ -1626,6 +1654,172 @@ impl Treasury {
     }
 
     // ── Query helpers ─────────────────────────────────────────────────────
+
+    /// Pauses all withdrawals. While paused, `withdraw_fees` and
+    /// `withdraw_fees_with_nonce` return `WithdrawalsPaused`.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    pub fn pause_withdrawals(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&WITHDRAWALS_PAUSED, &true);
+        boxmeout_shared::emit_config_updated(
+            &env,
+            soroban_sdk::String::from_str(&env, "withdrawals_paused"),
+            1,
+        );
+        Ok(())
+    }
+
+    /// Resumes withdrawals previously paused via `pause_withdrawals`.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    pub fn unpause_withdrawals(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&WITHDRAWALS_PAUSED, &false);
+        boxmeout_shared::emit_config_updated(
+            &env,
+            soroban_sdk::String::from_str(&env, "withdrawals_paused"),
+            0,
+        );
+        Ok(())
+    }
+
+    /// Returns the current withdrawal nonce (number of withdrawals executed).
+    /// Callers pass the current nonce to `withdraw_fees_with_nonce` to prevent
+    /// fee double-withdrawals under high concurrency.
+    pub fn get_withdrawal_nonce(env: Env) -> u64 {
+        env.storage().persistent().get(&WITHDRAWAL_NONCE).unwrap_or(0)
+    }
+
+    /// Withdraws accumulated fees guarded by a strict monotonic nonce.
+    ///
+    /// `expected_nonce` must equal the current withdrawal nonce. Because each
+    /// successful withdrawal increments the nonce, two racing withdrawals can
+    /// never both succeed — the second one sees a stale nonce and is rejected.
+    /// Combined with the reentrancy guard and CEI ordering, this prevents
+    /// double-withdrawals of the same fees under high concurrency.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    /// - `BelowMinimum`: Withdrawal amount is below minimum (1 XLM)
+    /// - `WithdrawalsPaused`: Withdrawals are paused
+    /// - `DailyWithdrawalLimitExceeded`: Withdrawal exceeds limits or nonce is stale
+    /// - `InsufficientBalance`: Not enough fees accumulated
+    /// - `ReentrancyGuard`: A withdrawal is already in progress
+    ///
+    /// # Security (CEI)
+    /// 1. CHECKS: require_auth, nonce, guard, limits, balance
+    /// 2. EFFECTS: decrement fees + increment daily tracker + increment nonce + audit
+    /// 3. INTERACTIONS: token transfer last
+    pub fn withdraw_fees_with_nonce(
+        env: Env,
+        admin: Address,
+        token: Address,
+        amount: i128,
+        destination: Address,
+        expected_nonce: u64,
+    ) -> Result<(), ContractError> {
+        // CHECKS
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        // Strict nonce check — rejects replayed or racing duplicate withdrawals.
+        let nonce: u64 = env.storage().persistent().get(&WITHDRAWAL_NONCE).unwrap_or(0);
+        if expected_nonce != nonce {
+            return Err(ContractError::DailyWithdrawalLimitExceeded);
+        }
+
+        // Reentrancy guard — blocks re-entrant double-withdrawal.
+        let guard: bool = env.storage().persistent().get(&WITHDRAWAL_IN_PROGRESS).unwrap_or(false);
+        if guard {
+            return Err(ContractError::ReentrancyGuard);
+        }
+        env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &true);
+
+        // Check minimum withdrawal amount
+        if amount < MIN_WITHDRAWAL {
+            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            return Err(ContractError::BelowMinimum);
+        }
+
+        // Check paused flag
+        let paused: bool = env.storage().persistent().get(&WITHDRAWALS_PAUSED).unwrap_or(false);
+        if paused {
+            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            return Err(ContractError::WithdrawalsPaused);
+        }
+
+        let limit: i128 = env.storage().persistent().get(&WITHDRAWAL_LIMIT).unwrap_or(0);
+        if amount > limit {
+            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            return Err(ContractError::DailyWithdrawalLimitExceeded);
+        }
+
+        let bucket = Self::day_bucket(&env);
+        let mut daily: Map<u64, i128> =
+            env.storage().persistent().get(&DAILY_WITHDRAWN).unwrap_or_else(|| Map::new(&env));
+        let today_total = daily.get(bucket).unwrap_or(0);
+        // Enforce a strict daily cap: running total may never exceed `limit`.
+        if today_total + amount > limit {
+            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            return Err(ContractError::DailyWithdrawalLimitExceeded);
+        }
+
+        let mut fees: Map<Address, i128> =
+            env.storage().persistent().get(&ACCUMULATED_FEES).unwrap_or_else(|| Map::new(&env));
+        let balance = fees.get(token.clone()).unwrap_or(0);
+        if balance < amount {
+            env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        // EFFECTS
+        fees.set(token.clone(), balance - amount);
+        env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
+        daily.set(bucket, today_total + amount);
+
+        // Prune DAILY_WITHDRAWN — keep only current and previous day bucket
+        Self::prune_daily_withdrawn(&env, &mut daily, bucket);
+        env.storage().persistent().set(&DAILY_WITHDRAWN, &daily);
+
+        // Increment the withdrawal nonce — invalidates any stale expected_nonce.
+        env.storage().persistent().set(&WITHDRAWAL_NONCE, &(nonce + 1));
+
+        // AUDIT — immutable ledger entry (completed withdrawals only)
+        Self::record_audit(&env, AuditAction::FeeWithdrawn, token.clone(), amount, destination.clone());
+
+        // INTERACTIONS
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &destination, &amount);
+
+        // Clear the reentrancy guard only after the interaction completes.
+        env.storage().persistent().set(&WITHDRAWAL_IN_PROGRESS, &false);
+
+        boxmeout_shared::emit_fee_withdrawn(&env, token, amount, destination);
+        Ok(())
+    }
+
+    /// Emergency drain of all accumulated fees for a token.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    ///
+    /// # Security (CEI)
+    /// 1. CHECKS: require_auth, admin check
+    /// 2. EFFECTS: zero ACCUMULATED_FEES[token]
+    /// 3. INTERACTIONS: token transfer last
+    pub fn emergency_drain(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), ContractError> {
+        // CHECKS
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
 
     /// Returns the accumulated fees for a specific token.
     pub fn get_accumulated_fees(env: Env, token: Address) -> i128 {
@@ -2886,7 +3080,7 @@ mod task11_treasury_contract_integrity_tests {
 }
 
 // Issues #498 + #499 — New feature tests
-// =====================================================
+// ==============================================
 #[cfg(test)]
 mod treasury_audit_tests {
     use soroban_sdk::{
@@ -3520,6 +3714,26 @@ mod task13_treasury_multi_asset_integrity_tests {
             timestamp: 200_000,
             protocol_version: 20,
             sequence_number: 2_000,
+// ============================================================
+// ISSUES #496 & #497: Gratuity fee extraction & daily
+// withdrawal pruning / concurrency & immutable audit trail
+// ============================================================
+#[cfg(test)]
+mod treasury_task17_18_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+    use boxmeout_shared::types::AuditEntry;
+    use crate::{Treasury, TreasuryClient};
+
+    fn setup(env: &Env, limit: i128) -> (TreasuryClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 100_000,
+            protocol_version: 20,
+            sequence_number: 1_000,
             network_id: Default::default(),
             base_reserve: 1,
             min_temp_entry_ttl: 16,
@@ -3645,7 +3859,7 @@ mod task13_treasury_multi_asset_integrity_tests {
     }
 }
 
-// ============================================================
+// =====================================================
 // ISSUE #481 — Module 2: Daily Limits & Audit Log
 // Tests: daily limit enforcement, audit log immutability, per-token
 //        daily cap.
@@ -3873,7 +4087,7 @@ mod issue_481_daily_limits_audit_tests {
     }
 }
 
-// ============================================================
+// =====================================================
 // ISSUE #482 — Module 3: Reentrancy Guard & Audit Monotonicity
 // Tests: reentrancy guard blocks concurrent withdrawal, audit
 //        entry IDs always increase, paused error variant.
@@ -4391,3 +4605,178 @@ mod issue_483_pause_pruning_fee_conservation_tests {
         );
     }
 }
+        client.initialize(&admin, &token, &factory, &limit);
+        (client, admin, market, token)
+    }
+
+    fn seed_fees(client: &TreasuryClient<'static>, admin: &Address, market: &Address, token: &Address, amount: i128, env: &Env) {
+        let mut token_client = StellarAssetClient::new(env, token);
+        token_client.mint(market, &amount);
+        client.approve_market(admin, market);
+        client.deposit_fees(market, token, &amount);
+    }
+
+    // ── Daily withdrawal cap ─────────────────────────────────────
+    #[test]
+    fn test_daily_cap_blocks_excess_withdrawals() {
+        let env = Env::default();
+        let limit = 30_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 100_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        // First withdrawal of the full daily limit succeeds.
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // A second withdrawal that would exceed the daily cap is rejected.
+        let result = client.try_withdraw_fees(&admin, &token, &10_000_000i128, &dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_daily_cap_resets_across_days() {
+        let env = Env::default();
+        let limit = 30_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 300_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        let day_secs = 86_400u64;
+        let set_ledger_time = |ts: u64| {
+            env.ledger().set(LedgerInfo {
+                timestamp: ts,
+                protocol_version: 20,
+                sequence_number: 2_000,
+                network_id: Default::default(),
+                base_reserve: 1,
+                min_temp_entry_ttl: 16,
+                min_persistent_entry_ttl: 4096,
+                max_entry_ttl: 6_311_520,
+            });
+        };
+
+        // Day 1: withdraw full daily limit.
+        set_ledger_time(day_secs);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // Day 2: the cap resets, allowing a withdrawal again.
+        set_ledger_time(day_secs * 2);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        // Day 2 total tracks the new day only.
+        assert_eq!(client.get_daily_withdrawal_amount(), limit);
+    }
+
+    // ── Concurrency: withdrawal nonce ────────────────────────────
+    #[test]
+    fn test_withdraw_fees_with_nonce_rejects_stale_nonce() {
+        let env = Env::default();
+        let limit = 50_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 100_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        // Nonce starts at 0.
+        assert_eq!(client.get_withdrawal_nonce(), 0);
+
+        // Withdraw using the current nonce (0) succeeds.
+        client.withdraw_fees_with_nonce(&admin, &token, &limit, &dest, &0);
+
+        // Nonce is now 1.
+        assert_eq!(client.get_withdrawal_nonce(), 1);
+
+        // Replaying the same nonce (0) is rejected — prevents double-withdrawal.
+        let replay = client.try_withdraw_fees_with_nonce(&admin, &token, &limit, &dest, &0);
+        assert!(replay.is_err());
+    }
+
+    #[test]
+    fn test_withdraw_fees_with_nonce_success_sequence() {
+        let env = Env::default();
+        // Daily cap == limit. Withdraw 3 small slices (each well under the cap).
+        let limit = 50_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 200_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        let slice = 10_000_000i128;
+        for n in 0..3u64 {
+            client.withdraw_fees_with_nonce(&admin, &token, &slice, &dest, &n);
+            assert_eq!(client.get_withdrawal_nonce(), n + 1);
+        }
+        assert_eq!(client.get_audit_log_count(), 1 + 3); // 1 deposit + 3 withdrawals
+    }
+
+    // ── Pause / unpause withdrawals ──────────────────────────────
+    #[test]
+    fn test_pause_withdrawals_blocks_and_unpause_resumes() {
+        let env = Env::default();
+        let limit = 50_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 100_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        client.pause_withdrawals(&admin);
+        let blocked = client.try_withdraw_fees(&admin, &token, &limit, &dest);
+        assert!(blocked.is_err());
+
+        client.unpause_withdrawals(&admin);
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+        assert_eq!(soroban_sdk::token::Client::new(&env, &token).balance(&dest), limit);
+    }
+
+    #[test]
+    fn test_pause_requires_admin() {
+        let env = Env::default();
+        let limit = 50_000_000i128;
+        let (client, _admin, _market, _token) = setup(&env, limit);
+        let non_admin = Address::generate(&env);
+        let err = client.try_pause_withdrawals(&non_admin);
+        assert!(err.is_err());
+    }
+
+    // ── Immutable audit log ──────────────────────────────────────
+    #[test]
+    fn test_audit_log_is_append_only_and_ordered() {
+        let env = Env::default();
+        let limit = 50_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 100_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        // One deposit (from seed_fees) plus one withdrawal.
+        client.withdraw_fees(&admin, &token, &limit, &dest);
+
+        let count = client.get_audit_log_count();
+        assert_eq!(count, 2); // deposit + withdrawal
+
+        // Entries are readable in insertion order with ascending ids.
+        let entry0: AuditEntry = client.get_audit_entry(&0).unwrap();
+        assert_eq!(entry0.id, 0);
+        let entry1: AuditEntry = client.get_audit_entry(&1).unwrap();
+        assert_eq!(entry1.id, 1);
+
+        // Out-of-range access returns None.
+        assert!(client.get_audit_entry(&count).is_none());
+        assert!(client.get_audit_entry(&999).is_none());
+    }
+
+    #[test]
+    fn test_withdrawal_nonce_and_audit_record_consistency() {
+        let env = Env::default();
+        let limit = 50_000_000i128;
+        let (client, admin, market, token) = setup(&env, limit);
+        seed_fees(&client, &admin, &market, &token, 150_000_000i128, &env);
+        let dest = Address::generate(&env);
+
+        client.withdraw_fees_with_nonce(&admin, &token, &limit, &dest, &0);
+        assert_eq!(client.get_withdrawal_nonce(), 1);
+
+        // A stale nonce must not mutate the ledger.
+        let stale = client.try_withdraw_fees_with_nonce(&admin, &token, &limit, &dest, &0);
+        assert!(stale.is_err());
+        assert_eq!(client.get_withdrawal_nonce(), 1);
+        assert_eq!(client.get_audit_log_count(), 2); // deposit + 1 successful withdraw
+    }
+}
+
