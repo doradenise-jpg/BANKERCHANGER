@@ -22,6 +22,9 @@ use boxmeout_shared::{
         BetRecord, BetSide, ClaimReceipt, Config, FightDetails, MarketConfig,
         MarketState, MarketStatus, OptionalMarketTier, OptionalOracleRole, OptionalOutcome,
         Outcome, OracleReport, OracleRole,
+
+        BetRecord, BetSide, ClaimReceipt, Config, FightDetails, LiquidityPosition, MarketConfig,
+        MarketState, MarketStatus, OptionalOracleRole, OptionalOutcome, Outcome, OracleReport, OracleRole,
     },
 };
 
@@ -42,6 +45,14 @@ const PAUSED: &str       = "PAUSED";
 /// Pending oracle reports for 2-of-3 consensus
 const PENDING_REPORTS: &str = "PENDING_REPORTS";
 const REPORT_TTL: u64 = 172_800;
+/// Total LP shares outstanding for this market pool
+const LP_TOTAL_SHARES: &str = "LP_TOTAL_SHARES";
+/// Prefix for per-provider LP position: (LP_PREFIX, provider) -> LiquidityPosition
+const LP_PREFIX: &str       = "LP";
+/// Accumulated fee-per-LP-share in micro-units (scaled by 1_000_000)
+const LP_FEE_PER_SHARE: &str = "LP_FEE_PER_SHARE";
+/// Seed liquidity minimum — 1 XLM per pool side
+const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
 
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
 /// Maximum TTL for market data (30 days in ledger entries)
@@ -138,6 +149,26 @@ impl Market {
     fn extend_market_ttl(env: &Env) {
         env.storage().persistent().extend_ttl(&STATE, MAX_TTL, MAX_TTL);
         env.storage().persistent().extend_ttl(&BETTOR_LIST, MAX_TTL, MAX_TTL);
+    }
+
+    fn lp_key(env: &Env, provider: &Address) -> (Symbol, Address) {
+        (Symbol::new(env, LP_PREFIX), provider.clone())
+    }
+
+    fn load_lp_position(env: &Env, provider: &Address) -> Option<LiquidityPosition> {
+        let key = Self::lp_key(env, provider);
+        env.storage().persistent().get(&key)
+    }
+
+    fn save_lp_position(env: &Env, provider: &Address, position: &LiquidityPosition) {
+        let key = Self::lp_key(env, provider);
+        env.storage().persistent().set(&key, position);
+        env.storage().persistent().extend_ttl(&key, MAX_TTL, MAX_TTL);
+    }
+
+    fn remove_lp_position(env: &Env, provider: &Address) {
+        let key = Self::lp_key(env, provider);
+        env.storage().persistent().remove(&key);
     }
 }
 
@@ -304,6 +335,17 @@ impl Market {
                 if shares_out < min_shares_out {
                     return Err(ContractError::SlippageExceeded);
                 }
+                // Emit real-time odds update for frontend
+                // Note: state.pool_* values are the CURRENT (pre-bet) pool sizes
+                boxmeout_shared::emit_odds_computed(
+                    &env,
+                    state.market_id,
+                    state.pool_a,
+                    state.pool_b,
+                    state.pool_draw,
+                    shares_out,
+                    impact_bps,
+                );
             }
         }
 
@@ -426,6 +468,234 @@ impl Market {
         }
 
         Ok(bet)
+    }
+
+    // =========================================================================
+    // ADD LIQUIDITY  — fund-moving
+    // =========================================================================
+    /// Seeds or adds liquidity to the three-way AMM pool.
+    ///
+    /// The provider supplies equal-value collateral for all three outcome sides.
+    /// LP shares are minted proportional to the provider's contribution relative
+    /// to the existing pool size.
+    ///
+    /// # Errors
+    /// - `MarketNotOpen`: Market is not accepting liquidity
+    /// - `BelowMinimum`: Seed liquidity amounts are below minimum
+    /// - `SlippageExceeded`: Shares minted are below `min_lp_shares_out`
+    ///
+    /// # Security (CEI)
+    /// 1. CHECKS: require_auth, pause guard, status, minimums, slippage
+    /// 2. EFFECTS: update pool sizes, mint LP shares
+    /// 3. INTERACTIONS: token transfers last
+    pub fn add_liquidity(
+        env: Env,
+        provider: Address,
+        amount_a: i128,
+        amount_b: i128,
+        amount_draw: i128,
+        token: Address,
+        min_lp_shares_out: i128,
+    ) -> Result<LiquidityPosition, ContractError> {
+        // ── CHECKS ────────────────────────────────────────────────────────────
+        provider.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let mut state = Self::load_state(&env)?;
+        if state.status != MarketStatus::Open {
+            return Err(ContractError::MarketNotOpen);
+        }
+
+        // All three sides must meet minimum seed amount
+        if amount_a < MIN_SEED_LIQUIDITY || amount_b < MIN_SEED_LIQUIDITY || amount_draw < MIN_SEED_LIQUIDITY {
+            return Err(ContractError::BelowMinimum);
+        }
+
+        let total_in = amount_a
+            .checked_add(amount_b)
+            .and_then(|v| v.checked_add(amount_draw))
+            .ok_or(ContractError::InsufficientAmount)?;
+
+        // Compute LP shares to mint
+        let total_shares: i128 = env.storage().persistent()
+            .get(&LP_TOTAL_SHARES)
+            .unwrap_or(0);
+        let fee_per_share: i128 = env.storage().persistent()
+            .get(&LP_FEE_PER_SHARE)
+            .unwrap_or(0);
+
+        let lp_shares = if total_shares == 0 || state.total_pool == 0 {
+            // First liquidity: mint shares equal to total input (1:1 seed)
+            total_in
+        } else {
+            // Subsequent liquidity: proportional to existing pool
+            total_in
+                .checked_mul(total_shares)
+                .and_then(|v| v.checked_div(state.total_pool))
+                .ok_or(ContractError::InsufficientAmount)?
+        };
+
+        if lp_shares < min_lp_shares_out {
+            return Err(ContractError::SlippageExceeded);
+        }
+
+        // ── EFFECTS ───────────────────────────────────────────────────────────
+        state.pool_a = state.pool_a.saturating_add(amount_a);
+        state.pool_b = state.pool_b.saturating_add(amount_b);
+        state.pool_draw = state.pool_draw.saturating_add(amount_draw);
+        state.total_pool = state.total_pool.saturating_add(total_in);
+        Self::save_state(&env, &state);
+
+        // Mint LP shares
+        let new_total_shares = total_shares.saturating_add(lp_shares);
+        env.storage().persistent().set(&LP_TOTAL_SHARES, &new_total_shares);
+
+        // Create or update provider's LP position
+        let position = LiquidityPosition {
+            provider: provider.clone(),
+            market_id: state.market_id,
+            lp_shares,
+            fee_debt: fee_per_share,
+            entered_at: env.ledger().timestamp(),
+        };
+        Self::save_lp_position(&env, &provider, &position);
+        Self::extend_market_ttl(&env);
+
+        // ── INTERACTIONS ──────────────────────────────────────────────────────
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&provider, &env.current_contract_address(), &total_in);
+
+        boxmeout_shared::emit_liquidity_added(
+            &env,
+            state.market_id,
+            provider,
+            amount_a,
+            amount_b,
+            amount_draw,
+            lp_shares,
+        );
+
+        Ok(position)
+    }
+
+    // =========================================================================
+    // REMOVE LIQUIDITY  — fund-moving
+    // =========================================================================
+    /// Redeems LP shares and withdraws proportional pool collateral plus accrued fees.
+    ///
+    /// # Errors
+    /// - `MarketNotOpen`: Market is not open (liquidity withdrawal only during Open phase)
+    /// - `NoBetsFound`: Provider has no LP position
+    /// - `BelowMinimum`: lp_shares_to_burn is zero or negative
+    /// - `InsufficientBalance`: Provider doesn't have enough LP shares
+    ///
+    /// # Security (CEI)
+    /// 1. CHECKS: require_auth, pause guard, status, position exists, shares
+    /// 2. EFFECTS: burn shares, reduce pools
+    /// 3. INTERACTIONS: token transfer last
+    pub fn remove_liquidity(
+        env: Env,
+        provider: Address,
+        lp_shares_to_burn: i128,
+        token: Address,
+    ) -> Result<i128, ContractError> {
+        // ── CHECKS ────────────────────────────────────────────────────────────
+        provider.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let mut state = Self::load_state(&env)?;
+        if state.status != MarketStatus::Open {
+            return Err(ContractError::MarketNotOpen);
+        }
+
+        if lp_shares_to_burn <= 0 {
+            return Err(ContractError::BelowMinimum);
+        }
+
+        let mut position = Self::load_lp_position(&env, &provider)
+            .ok_or(ContractError::NoBetsFound)?;
+
+        if lp_shares_to_burn > position.lp_shares {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        let total_shares: i128 = env.storage().persistent()
+            .get(&LP_TOTAL_SHARES)
+            .unwrap_or(0);
+        let fee_per_share: i128 = env.storage().persistent()
+            .get(&LP_FEE_PER_SHARE)
+            .unwrap_or(0);
+
+        // Compute proportional withdrawal amounts
+        let share_ratio_num = lp_shares_to_burn;
+        let share_ratio_den = total_shares;
+
+        let withdraw_a = if share_ratio_den > 0 {
+            state.pool_a.checked_mul(share_ratio_num)
+                .and_then(|v| v.checked_div(share_ratio_den))
+                .unwrap_or(0)
+        } else { 0 };
+        let withdraw_b = if share_ratio_den > 0 {
+            state.pool_b.checked_mul(share_ratio_num)
+                .and_then(|v| v.checked_div(share_ratio_den))
+                .unwrap_or(0)
+        } else { 0 };
+        let withdraw_draw = if share_ratio_den > 0 {
+            state.pool_draw.checked_mul(share_ratio_num)
+                .and_then(|v| v.checked_div(share_ratio_den))
+                .unwrap_or(0)
+        } else { 0 };
+        let total_out = withdraw_a
+            .saturating_add(withdraw_b)
+            .saturating_add(withdraw_draw);
+
+        // Compute accrued fees using fee-per-share accumulator
+        let fees_claimed = boxmeout_shared::amm::calc_claimable_lp_fees(
+            fee_per_share,
+            position.fee_debt,
+            lp_shares_to_burn,
+        );
+
+        // ── EFFECTS ───────────────────────────────────────────────────────────
+        state.pool_a = state.pool_a.saturating_sub(withdraw_a);
+        state.pool_b = state.pool_b.saturating_sub(withdraw_b);
+        state.pool_draw = state.pool_draw.saturating_sub(withdraw_draw);
+        state.total_pool = state.total_pool.saturating_sub(total_out);
+        Self::save_state(&env, &state);
+
+        let new_total_shares = total_shares.saturating_sub(lp_shares_to_burn);
+        env.storage().persistent().set(&LP_TOTAL_SHARES, &new_total_shares);
+
+        // Update or remove provider's position
+        let remaining_shares = position.lp_shares - lp_shares_to_burn;
+        if remaining_shares == 0 {
+            Self::remove_lp_position(&env, &provider);
+        } else {
+            position.lp_shares = remaining_shares;
+            position.fee_debt = fee_per_share; // reset debt to current accumulator
+            Self::save_lp_position(&env, &provider, &position);
+        }
+        Self::extend_market_ttl(&env);
+
+        // ── INTERACTIONS ──────────────────────────────────────────────────────
+        let payout = total_out.saturating_add(fees_claimed);
+        if payout > 0 {
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&env.current_contract_address(), &provider, &payout);
+        }
+
+        boxmeout_shared::emit_liquidity_removed(
+            &env,
+            state.market_id,
+            provider,
+            lp_shares_to_burn,
+            withdraw_a,
+            withdraw_b,
+            withdraw_draw,
+            fees_claimed,
+        );
+
+        Ok(payout)
     }
 
     // =========================================================================
@@ -582,6 +852,9 @@ impl Market {
         };
 
         let outcome_byte: u32 = match report.outcome {
+
+        // Emit structured event for real-time frontend progress updates
+        let outcome_index: u32 = match report.outcome {
             Outcome::FighterA  => 0,
             Outcome::FighterB  => 1,
             Outcome::Draw      => 2,
@@ -600,6 +873,17 @@ impl Market {
         // Resolve if we have 2 matching reports (2-of-3 consensus, issues #473–#476).
         let consensus_threshold = boxmeout_shared::amm::tier_oracle_consensus_threshold(tier_byte);
         if matching_count >= consensus_threshold {
+
+        boxmeout_shared::emit_oracle_report_submitted(
+            &env,
+            state.market_id,
+            oracle.clone(),
+            outcome_index,
+            matching_count,
+        );
+
+        // Resolve if we have 2 matching reports
+        if matching_count >= 2 {
             state.outcome = OptionalOutcome::Some(report.outcome.clone());
             state.status = MarketStatus::Resolved;
             state.resolved_at = env.ledger().timestamp();
@@ -1137,6 +1421,18 @@ impl Market {
                 OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier14) => 14,
                 OptionalMarketTier::None => 0,
             },
+
+    /// Returns the market tier configured at initialization.
+    ///
+    /// The tier determines the pool depth requirements and per-bet slippage
+    /// tolerance for this market instance (e.g. 18 = Tier 18, 20 = Tier 20).
+    /// Returns 0 if the market has not been initialized or uses the default tier.
+    ///
+    /// Indexers and the frontend use this to group markets by tier and apply
+    /// tier-specific UI parameters (bet limits, display labels, etc.).
+    pub fn get_market_tier(env: Env) -> u32 {
+        match Self::load_state(&env) {
+            Ok(s) => s.config.tier,
             Err(_) => 0,
         }
     }
@@ -1170,6 +1466,10 @@ impl Market {
             None => (0, 0),
         }
     }
+
+    // =========================================================================
+    // ADMIN CONFIG FUNCTIONS
+    // =========================================================================
 
     /// Sets the dispute window duration.
     ///

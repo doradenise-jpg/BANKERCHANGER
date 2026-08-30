@@ -329,6 +329,103 @@ pub fn emit_pool_initialized(
 ) {
     let topics = (Symbol::new(env, "pool_initialized"), market_id);
     env.events().publish(topics, (tier, pool_a, pool_b, pool_draw));
+
+/// Emits a `withdrawal_limit_updated` event when the admin updates the daily withdrawal limit.
+///
+/// Topics: `(Symbol("withdrawal_limit_updated"),)`
+/// Data:   `(old_limit, new_limit)`
+pub fn emit_withdrawal_limit_updated(env: &Env, old_limit: i128, new_limit: i128) {
+    let topics = (Symbol::new(env, "withdrawal_limit_updated"),);
+    env.events().publish(topics, (old_limit, new_limit));
+}
+
+/// Emits a `withdrawal_audit_log` event on every successful fee withdrawal.
+/// This provides an immutable on-chain audit trail of all fund movements.
+///
+/// Topics: `(Symbol("withdrawal_audit_log"),)`
+/// Data:   `AuditEntry`
+pub fn emit_withdrawal_audit_log(env: &Env, entry: crate::types::AuditEntry) {
+    let topics = (Symbol::new(env, "withdrawal_audit_log"),);
+    env.events().publish(topics, entry);
+}
+
+/// Emits a `liquidity_added` event when an LP provides liquidity to a market pool.
+///
+/// Topics: `(Symbol("liquidity_added"), market_id)`
+/// Data:   `(provider, amount_a, amount_b, amount_draw, lp_shares)`
+pub fn emit_liquidity_added(
+    env: &Env,
+    market_id: u64,
+    provider: Address,
+    amount_a: i128,
+    amount_b: i128,
+    amount_draw: i128,
+    lp_shares: i128,
+) {
+    let topics = (Symbol::new(env, "liquidity_added"), market_id);
+    env.events().publish(topics, (provider, amount_a, amount_b, amount_draw, lp_shares));
+}
+
+/// Emits a `liquidity_removed` event when an LP redeems shares from a market pool.
+///
+/// Topics: `(Symbol("liquidity_removed"), market_id)`
+/// Data:   `(provider, lp_shares_burned, amount_a, amount_b, amount_draw, fees_claimed)`
+pub fn emit_liquidity_removed(
+    env: &Env,
+    market_id: u64,
+    provider: Address,
+    lp_shares_burned: i128,
+    amount_a: i128,
+    amount_b: i128,
+    amount_draw: i128,
+    fees_claimed: i128,
+) {
+    let topics = (Symbol::new(env, "liquidity_removed"), market_id);
+    env.events().publish(topics, (provider, lp_shares_burned, amount_a, amount_b, amount_draw, fees_claimed));
+}
+
+/// Emits an `oracle_report_submitted` event when an oracle submits a resolution report.
+/// Provides real-time frontend visibility into the 2-of-3 consensus progress.
+///
+/// Topics: `(Symbol("oracle_report_submitted"), market_id)`
+/// Data:   `(oracle_address, outcome_index, matching_count)`
+/// Note: outcome_index is u32 for Soroban Val compatibility (0=FighterA, 1=FighterB, 2=Draw, 3=NoContest)
+pub fn emit_oracle_report_submitted(
+    env: &Env,
+    market_id: u64,
+    oracle_address: Address,
+    outcome_index: u32,
+    matching_count: u32,
+) {
+    let topics = (Symbol::new(env, "oracle_report_submitted"), market_id);
+    env.events().publish(topics, (oracle_address, outcome_index, matching_count));
+}
+
+/// Emits an `odds_computed` event after a bet is placed, broadcasting current pool
+/// state and odds for real-time frontend updates.
+///
+/// Topics: `(Symbol("odds_computed"), market_id)`
+/// Data:   `(pool_a, pool_b, pool_draw, shares_out, price_impact_bps)`
+pub fn emit_odds_computed(
+    env: &Env,
+    market_id: u64,
+    pool_a: i128,
+    pool_b: i128,
+    pool_draw: i128,
+    shares_out: i128,
+    price_impact_bps: i128,
+) {
+    let topics = (Symbol::new(env, "odds_computed"), market_id);
+    env.events().publish(topics, (pool_a, pool_b, pool_draw, shares_out, price_impact_bps));
+}
+
+/// Emits a `withdrawals_paused` event when the treasury pause flag changes.
+///
+/// Topics: `(Symbol("withdrawals_paused"),)`
+/// Data:   `paused: bool`
+pub fn emit_withdrawals_paused(env: &Env, paused: bool) {
+    let topics = (Symbol::new(env, "withdrawals_paused"),);
+    env.events().publish(topics, paused);
 }
 
 #[cfg(test)]

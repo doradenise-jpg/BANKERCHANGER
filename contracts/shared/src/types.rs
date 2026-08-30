@@ -107,6 +107,10 @@ pub struct MarketConfig {
     pub lock_before_secs: u64,
     /// Seconds after scheduled_at within which oracle must resolve
     pub resolution_window: u64,
+    /// Market tier — determines pool depth requirements and slippage tolerance.
+    /// e.g. 18 = Tier 18 (mid-range), 20 = Tier 20 (high-stakes).
+    /// Tier 0 means untiered / default.
+    pub tier: u32,
 }
 
 /// Configuration passed to MarketFactory on initialization.

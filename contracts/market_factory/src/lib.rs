@@ -99,6 +99,7 @@ impl MarketFactory {
             fee_bps: config.default_fee_bps,
             lock_before_secs: config.default_lock_before_secs,
             resolution_window: config.default_resolution_window,
+            tier: 0,
         };
         env.storage().persistent().set(&DEFAULT_CONFIG, &default_config);
 
@@ -159,6 +160,8 @@ impl MarketFactory {
         if config.max_bet < config.min_bet_amount {
             return Err(ContractError::InvalidMarketParameters);
         }
+        // Tier 0 = untiered/default; any positive u32 is valid (e.g. 18, 20, etc.)
+        // No upper bound enforced — factory admin is responsible for tier assignments.
 
         // Resolve effective fee: use override if provided (capped at 1000 bps), else config value
         let effective_fee_bps = match fee_bps {
@@ -598,6 +601,7 @@ mod tests {
             default_fee_bps: 200,
             default_lock_before_secs: 3600,
             default_resolution_window: 86400,
+            tier: 0,
         }
     }
 
@@ -620,6 +624,7 @@ mod tests {
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
+            tier: 0,
         }
     }
 
@@ -829,6 +834,7 @@ mod admin_transfer_tests {
             default_fee_bps: 200,
             default_lock_before_secs: 3_600,
             default_resolution_window: 86_400,
+            tier: 0,
         });
         (env, client, admin)
     }
