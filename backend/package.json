@@ -19,6 +19,8 @@
     "drizzle:pull": "drizzle-kit introspect:pg",
     "drizzle:studio": "drizzle-kit studio",
     "schema:verify": "node scripts/verify-schema.js",
+    "openapi:validate": "node scripts/validate-openapi.js",
+    "openapi:postman": "node scripts/generate-postman.js",
     "test": "jest --passWithNoTests",
     "test:integration": "jest --passWithNoTests --testPathPatterns=tests/integration"
   },
