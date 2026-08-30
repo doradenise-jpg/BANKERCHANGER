@@ -75,6 +75,8 @@ pub trait FactoryInterface {
     fn get_oracles(env: Env) -> Vec<Address>;
     fn get_oracle_key(env: Env, oracle: Address) -> Option<BytesN<32>>;
     fn is_paused(env: Env) -> bool;
+    /// Returns the registered admin address of the factory.
+    fn get_admin(env: Env) -> Address;
 }
 
 #[contract]
@@ -1638,7 +1640,12 @@ impl Market {
         Ok(())
     }
 
-    /// Upgrades the contract WASM. Only callable by the factory (admin).
+    /// Upgrades the contract WASM. Only callable by the factory's registered admin.
+    ///
+    /// Cross-calls `factory.get_admin()` to retrieve the authoritative admin address
+    /// and rejects the call if `admin` does not match. This prevents any address
+    /// (including the factory contract itself) from triggering an upgrade without
+    /// holding the factory's registered admin key.
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the factory admin
@@ -1647,13 +1654,22 @@ impl Market {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
+
+    /// - `NotFactory`: Factory address not found in storage
+    /// - `NotAdmin`: Caller is not the factory's registered admin
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env
             .storage()
             .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        if admin != factory {
+        // Cross-call the factory to retrieve its authoritative admin address.
+        // Comparing against the factory CONTRACT address (as before) is insufficient —
+        // the factory's admin is a separate account that the factory tracks internally.
+        let factory_client = FactoryClient::new(&env, &factory);
+        let factory_admin = factory_client.get_admin();
+        if admin != factory_admin {
             return Err(ContractError::NotAdmin);
         }
         env.deployer()

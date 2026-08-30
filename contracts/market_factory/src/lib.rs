@@ -572,6 +572,16 @@ impl MarketFactory {
         env.storage().persistent().get(&PAUSED).unwrap_or(false)
     }
 
+    /// Returns the registered admin address of the factory.
+    ///
+    /// Used by market contracts to cross-call and verify upgrade authorization.
+    /// Returns the current admin (not the pending admin nominee).
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().persistent()
+            .get(&ADMIN)
+            .expect("factory not initialized")
+    }
+
     /// Returns all market IDs currently tracked as open.
     pub fn get_all_market_ids(env: Env) -> Vec<u64> {
         env.storage()
