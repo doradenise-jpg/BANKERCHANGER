@@ -260,12 +260,20 @@ pub struct ClaimReceipt {
 pub enum AuditAction {
     /// A market deposited fees into the treasury.
     FeeDeposited,
-    /// Fees were received from a registered market (per-market breakdown).
+    /// Fees were received from a registered market.
     FeeReceived,
     /// The admin withdrew accumulated fees.
     FeeWithdrawn,
     /// The admin emergency-drained all fees for a token.
     FeeDrained,
+    /// Admin withdrew accumulated fees to a destination address.
+    FeeWithdrawal,
+    /// Admin performed an emergency drain of all fees for a token.
+    EmergencyDrain,
+    /// A market deposited fees into the treasury.
+    FeeDeposit,
+    /// Daily withdrawal cap was reached for the current day bucket.
+    DailyCapReached,
 }
 
 /// An immutable, append-only entry in the treasury audit ledger.
@@ -275,7 +283,7 @@ pub enum AuditAction {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuditEntry {
-    /// Monotonically increasing entry id (1-based).
+    /// Monotonically increasing entry id (1-based) or sequence number.
     pub id: u64,
     /// The action that produced this entry.
     pub action: AuditAction,
@@ -287,66 +295,10 @@ pub struct AuditEntry {
     pub actor: Address,
     /// Ledger timestamp when the entry was recorded.
     pub timestamp: u64,
-
-// ─── Treasury Audit ───────────────────────────────────────────────────────────
-
-/// Immutable audit-log entry written to ledger storage every time fees are
-/// withdrawn.  Entries are keyed by a monotonically-increasing sequence number
-/// (`AUDIT_LOG_SEQ`) so they can never be overwritten.
-///
-/// The entry is stored in TEMPORARY storage (survives for `min_temp_entry_ttl`
-/// ledgers) and simultaneously emitted as an `audit_log_entry` event so
-/// off-chain indexers can capture it durably.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct AuditEntry {
-    /// Monotonically-increasing sequence number (1-based).
-    pub seq: u64,
-    /// Stellar address of the admin who initiated the withdrawal.
-    pub admin: Address,
-    /// Token that was withdrawn.
-    pub token: Address,
-    /// Amount withdrawn in stroops.
-    pub amount: i128,
-    /// Destination address that received the tokens.
-    pub destination: Address,
-    /// Ledger timestamp when the withdrawal executed.
-    pub timestamp: u64,
-    /// Day bucket (timestamp / 86400) — matches the DAILY_WITHDRAWN key.
-
-/// Classifies the action recorded in an audit log entry.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum AuditAction {
-    /// Admin withdrew accumulated fees to a destination address.
-    FeeWithdrawal,
-    /// Admin performed an emergency drain of all fees for a token.
-    EmergencyDrain,
-    /// A market deposited fees into the treasury.
-    FeeDeposit,
-    /// Daily withdrawal cap was reached for the current day bucket.
-    DailyCapReached,
-}
-
-/// An immutable record appended to the treasury's on-chain audit log.
-///
-/// Stored as a `Vec<AuditEntry>` under the `AUDIT_LOG` persistent key.
-/// Entries are append-only; none are ever removed or modified.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct AuditEntry {
-    /// Ledger timestamp (seconds since Unix epoch) when the action occurred.
-    pub timestamp: u64,
-    /// Which type of treasury action this entry records.
-    pub action: AuditAction,
-    /// The token involved in the transaction (fee token address).
-    pub token: Address,
-    /// The amount involved (stroops).
-    pub amount: i128,
-    /// The actor who initiated the action (admin or market address).
-    pub actor: Address,
     /// Day bucket (timestamp / 86400) for daily-limit queries.
     pub day_bucket: u64,
+    /// Destination address that received the tokens.
+    pub destination: Address,
 }
 
 /// A volume tier boundary and basis point rate for dynamic fee calculation.
@@ -359,4 +311,5 @@ pub struct FeeTier {
     /// Platform fee in basis points (e.g. 200 = 2.00%, 150 = 1.50%, 100 = 1.00%).
     pub fee_bps: u32,
 }
+
 

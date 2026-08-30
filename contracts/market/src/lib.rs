@@ -19,15 +19,9 @@ use soroban_sdk::{
 use boxmeout_shared::{
     errors::ContractError,
     types::{
-        BetRecord, BetSide, ClaimReceipt, Config, FightDetails, MarketConfig,
-        MarketState, MarketStatus, OptionalMarketTier, OptionalOracleRole, OptionalOutcome,
-        Outcome, OracleReport, OracleRole,
-
         BetRecord, BetSide, ClaimReceipt, Config, FightDetails, LiquidityPosition, MarketConfig,
-        MarketState, MarketStatus, OptionalOracleRole, OptionalOutcome, Outcome, OracleReport, OracleRole,
-
-        BetRecord, BetSide, ClaimReceipt, Config, FightDetails, MarketConfig, MarketState,
-        MarketStatus, OptionalOracleRole, OptionalOutcome, OracleReport, OracleRole, Outcome,
+        MarketState, MarketStatus, OptionalMarketTier, OptionalOracleRole, OptionalOutcome,
+        OracleReport, OracleRole, Outcome,
     },
 };
 
@@ -1487,6 +1481,9 @@ impl Market {
                 OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier14) => 14,
                 OptionalMarketTier::None => 0,
             },
+            Err(_) => 0,
+        }
+    }
 
     /// Returns the market tier configured at initialization.
     ///
@@ -1654,12 +1651,6 @@ impl Market {
     ///
     /// # Errors
     /// - `Unauthorized`: Caller is not the factory admin
-    pub fn upgrade(
-        env: Env,
-        admin: Address,
-        new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-
     /// - `NotFactory`: Factory address not found in storage
     /// - `NotAdmin`: Caller is not the factory's registered admin
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
