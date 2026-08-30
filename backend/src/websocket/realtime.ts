@@ -21,8 +21,12 @@ export type ActivityEvent =
 
   | { type: 'cancelled'; marketId: string };
 
+  | { type: 'leaderboard_rank_update'; userId: string; rank: number; currentStreak: number; timestamp: string };
+
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
+
+export type LeaderboardChannel = 'global' | 'referrals';
 
 // ---------------------------------------------------------------------------
 // Rate limiter — token bucket, max 20 events/sec per market
@@ -53,6 +57,8 @@ export class ActivityFeed {
   private wss: WebSocketServer;
   // marketId → set of subscribed sockets
   private subscriptions = new Map<string, Set<WebSocket>>();
+  // sockets subscribed to the global leaderboard channel
+  private leaderboardSubscriptions = new Set<WebSocket>();
   private rateLimiter = new MarketRateLimiter();
   // Track authenticated connections
   private authenticated = new WeakSet<WebSocket>();
@@ -123,7 +129,13 @@ export class ActivityFeed {
     }
 
     // Authenticated: handle subscription messages
-    const { type, marketId } = msg as SubscribeMsg;
+    const subMsg = msg as SubscribeMsg & { channel?: LeaderboardChannel };
+    if (subMsg.type === 'subscribe_leaderboard') {
+      this.leaderboardSubscriptions.add(ws);
+      return;
+    }
+
+    const { type, marketId } = subMsg;
     if (type !== 'subscribe_activity' || typeof marketId !== 'string') return;
 
     if (!this.subscriptions.has(marketId)) {
@@ -147,6 +159,7 @@ export class ActivityFeed {
         this.subscriptions.delete(marketId);
       }
     }
+    this.leaderboardSubscriptions.delete(ws);
   }
 
   /** Publish an activity event to all subscribers of the market. */
@@ -159,6 +172,28 @@ export class ActivityFeed {
 
     const payload = JSON.stringify(event);
     for (const ws of sockets) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+  }
+
+  /** Broadcast a leaderboard rank update to all sockets subscribed to the leaderboard channel. */
+  publishLeaderboardUpdate(update: {
+    userId: string;
+    rank: number;
+    currentStreak: number;
+  }): void {
+    if (this.leaderboardSubscriptions.size === 0) return;
+
+    const event: ActivityEvent = {
+      type: 'leaderboard_rank_update',
+      userId: update.userId,
+      rank: update.rank,
+      currentStreak: update.currentStreak,
+      timestamp: new Date().toISOString(),
+    };
+
+    const payload = JSON.stringify(event);
+    for (const ws of this.leaderboardSubscriptions) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
     }
   }
