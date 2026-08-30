@@ -55,6 +55,13 @@ export interface LeaderboardRankEvent {
   timestamp: string;
 }
 
+/** Pushed to leaderboard subscribers whenever one or more ranks change. */
+export interface LeaderboardRankEvent {
+  type: 'leaderboard_rank_update';
+  updates: RankUpdate[];
+  timestamp: string;
+}
+
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg = { type: 'subscribe_activity'; marketId: string };
 type LeaderboardSubMsg = { type: 'subscribe_leaderboard' | 'unsubscribe_leaderboard' };
@@ -297,6 +304,24 @@ export class ActivityFeed {
     const payload = JSON.stringify(event);
     for (const ws of this.leaderboardSubscriptions) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+
+  /**
+   * Broadcast leaderboard rank changes to every subscribed client.
+   * Called by the engagement service's rank-update listener.
+   */
+  emitLeaderboardRankUpdate(updates: RankUpdate[]): void {
+    if (!updates.length || !this.leaderboardSubs.size) return;
+
+    const payload: LeaderboardRankEvent = {
+      type: 'leaderboard_rank_update',
+      updates,
+      timestamp: new Date().toISOString(),
+    };
+    const raw = JSON.stringify(payload);
+    for (const ws of this.leaderboardSubs) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(raw);
+    }
+  }
 
   /**
    * Broadcast leaderboard rank changes to every subscribed client.
