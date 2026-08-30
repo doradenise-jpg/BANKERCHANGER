@@ -190,3 +190,181 @@ export async function buildTradesCsv(from?: string, to?: string): Promise<string
     rows.map((r) => csvRow([r.id, r.market_id, r.bettor_address, r.side, r.amount, r.placed_at, r.claimed, r.payout, r.tx_hash])).join('')
   );
 }
+
+// ---------------------------------------------------------------------------
+// User History Tax and Audit Report Export
+// ---------------------------------------------------------------------------
+
+export interface UserHistoryExportFilter {
+  address: string;
+  format: 'csv' | 'json';
+  startDate?: string;
+  endDate?: string;
+}
+
+export async function streamUserHistoryReport(
+  res: Response,
+  filter: UserHistoryExportFilter,
+): Promise<void> {
+  const { address, format, startDate, endDate } = filter;
+  const filename = `audit-history-${address}-${Date.now()}.${format}`;
+
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.write('Timestamp (UTC),Transaction Hash,Market ID,Market Title,Action Type,Outcome Picked,Amount (XLM),Payout (XLM),Net PnL (XLM)\n');
+  } else {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.write('[\n');
+  }
+
+  let cursorId = 0;
+  const batchSize = FETCH_SIZE;
+  let isFirstJson = true;
+
+  try {
+    while (true) {
+      const conds: string[] = ['b.bettor_address = $1', 'b.id > $2'];
+      const vals: unknown[] = [address, cursorId];
+
+      if (startDate) {
+        conds.push(`b.placed_at >= $${vals.push(startDate)}`);
+      }
+      if (endDate) {
+        conds.push(`b.placed_at <= $${vals.push(endDate)}`);
+      }
+
+      const query = `
+        SELECT 
+          b.id,
+          b.market_id,
+          b.bettor_address,
+          b.side,
+          b.amount,
+          b.amount_xlm,
+          b.placed_at,
+          b.claimed,
+          b.claimed_at,
+          b.payout,
+          b.tx_hash,
+          m.fighter_a,
+          m.fighter_b,
+          m.match_id,
+          m.status AS market_status,
+          m.outcome AS market_outcome
+        FROM bets b
+        LEFT JOIN markets m ON b.market_id = m.market_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY b.id ASC
+        LIMIT ${batchSize}
+      `;
+
+      const { rows } = await pool.query(query, vals);
+      if (rows.length === 0) break;
+
+      for (const r of rows) {
+        cursorId = Number(r.id);
+
+        const amountXlm = r.amount_xlm != null ? Number(r.amount_xlm) : Number(r.amount) / 10_000_000;
+        const marketTitle = r.fighter_a && r.fighter_b ? `${r.fighter_a} vs ${r.fighter_b}` : (r.match_id || r.market_id || 'Unknown Market');
+        const outcomePicked = r.side === 'fighter_a' ? (r.fighter_a || 'Fighter A') : r.side === 'fighter_b' ? (r.fighter_b || 'Fighter B') : (r.side === 'draw' ? 'Draw' : r.side);
+
+        // Action 1: BET placement record
+        const betTimestamp = new Date(r.placed_at).toISOString();
+        const betItem = {
+          timestamp: betTimestamp,
+          transactionHash: r.tx_hash,
+          marketId: r.market_id,
+          marketTitle,
+          actionType: 'BET',
+          outcomePicked,
+          amountXlm,
+          payoutXlm: 0,
+          netPnlXlm: -amountXlm,
+          'Timestamp (UTC)': betTimestamp,
+          'Transaction Hash': r.tx_hash,
+          'Market ID': r.market_id,
+          'Market Title': marketTitle,
+          'Action Type': 'BET',
+          'Outcome Picked': outcomePicked,
+          'Amount (XLM)': amountXlm,
+          'Payout (XLM)': 0,
+          'Net PnL (XLM)': -amountXlm,
+        };
+
+        const items = [betItem];
+
+        // Action 2: CLAIM / REFUND record if claimed
+        if (r.claimed) {
+          const rawPayout = Number(r.payout) || 0;
+          const payoutXlm = rawPayout > 100_000 ? rawPayout / 10_000_000 : rawPayout;
+          const actionType = r.market_status === 'cancelled' ? 'REFUND' : 'CLAIM';
+          const netPnlXlm = payoutXlm - amountXlm;
+          const claimTimestamp = new Date(r.claimed_at || r.placed_at).toISOString();
+
+          const claimItem = {
+            timestamp: claimTimestamp,
+            transactionHash: r.tx_hash,
+            marketId: r.market_id,
+            marketTitle,
+            actionType,
+            outcomePicked,
+            amountXlm: 0,
+            payoutXlm,
+            netPnlXlm,
+            'Timestamp (UTC)': claimTimestamp,
+            'Transaction Hash': r.tx_hash,
+            'Market ID': r.market_id,
+            'Market Title': marketTitle,
+            'Action Type': actionType,
+            'Outcome Picked': outcomePicked,
+            'Amount (XLM)': 0,
+            'Payout (XLM)': payoutXlm,
+            'Net PnL (XLM)': netPnlXlm,
+          };
+          items.push(claimItem);
+        }
+
+        for (const item of items) {
+          if (format === 'csv') {
+            const line = [
+              item['Timestamp (UTC)'],
+              item['Transaction Hash'],
+              item['Market ID'],
+              item['Market Title'],
+              item['Action Type'],
+              item['Outcome Picked'],
+              item['Amount (XLM)'],
+              item['Payout (XLM)'],
+              item['Net PnL (XLM)'],
+            ];
+            const ok = res.write(csvRow(line));
+            if (!ok) await new Promise<void>((resolve) => res.once('drain', resolve));
+          } else {
+            const chunk = (isFirstJson ? '  ' : ',\n  ') + JSON.stringify(item);
+            isFirstJson = false;
+            const ok = res.write(chunk);
+            if (!ok) await new Promise<void>((resolve) => res.once('drain', resolve));
+          }
+        }
+      }
+
+      if (rows.length < batchSize) break;
+    }
+
+    if (format === 'json') {
+      res.write('\n]\n');
+    }
+    res.end();
+  } catch (err) {
+    logger.error({ msg: 'User history export error', err });
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    } else {
+      res.end();
+    }
+  }
+}
