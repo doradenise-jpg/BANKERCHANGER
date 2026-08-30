@@ -187,5 +187,12 @@ export function getActivityFeed(): ActivityFeed {
  * without also hosting the HTTP/WebSocket server, or in unit tests).
  */
 export function tryGetActivityFeed(): ActivityFeed | null {
+
+ * Same as getActivityFeed, but returns null instead of throwing when the
+ * feed hasn't been initialised (e.g. standalone scripts, tests) — for
+ * callers like the indexer that should degrade gracefully rather than fail
+ * event ingestion just because nothing is subscribed yet.
+ */
+export function getActivityFeedIfInitialized(): ActivityFeed | null {
   return _feed;
 }

@@ -26,6 +26,19 @@ function publishActivity(event: Parameters<ReturnType<typeof getActivityFeed>['p
     getActivityFeed().publish(event);
   } catch (err) {
     console.warn('[Indexer] Could not publish to ActivityFeed:', err instanceof Error ? err.message : err);
+
+import { getActivityFeedIfInitialized, type ActivityEvent } from '../websocket/realtime';
+
+/**
+ * Publishes to the WebSocket activity feed, if one has been initialised.
+ * Ingestion must not fail just because no server has wired up a feed yet
+ * (e.g. standalone backfill scripts, tests).
+ */
+function publishActivity(event: ActivityEvent): void {
+  try {
+    getActivityFeedIfInitialized()?.publish(event);
+  } catch (err) {
+    console.error('[Indexer] Failed to publish activity event:', err instanceof Error ? err.message : err);
   }
 }
 
@@ -92,6 +105,34 @@ function calculatePollBackoff(consecutiveFailures: number): number {
   const backoff = POLL_MIN_BACKOFF_MS * Math.pow(POLL_BACKOFF_MULTIPLIER, consecutiveFailures - 1);
   const capped = Math.min(backoff, POLL_MAX_BACKOFF_MS);
   return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
+
+
+// ── Exponential backoff for the ledger-polling fallback loop ────────────────
+// RPC errors (rate limits, transient 5xxs, connection drops) are common
+// against public Soroban RPC endpoints and must not crash the indexer.
+const POLL_MIN_BACKOFF_MS = 1_000;
+const POLL_MAX_BACKOFF_MS = 60_000;
+
+export function calculatePollBackoff(consecutiveFailures: number): number {
+  const backoff = POLL_MIN_BACKOFF_MS * Math.pow(2, consecutiveFailures - 1);
+  const capped = Math.min(backoff, POLL_MAX_BACKOFF_MS);
+  // Jitter to avoid every replica retrying in lockstep: range [0.5x, 1x] of capped.
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
+}
+
+// ── Re-org / missing-ledger handling ─────────────────────────────────────────
+// How far to rewind the checkpoint when the RPC node's head ledger is found
+// behind our last-processed checkpoint (see startIndexer's poll loop).
+const REORG_REWIND_LEDGERS = 5;
+
+// Public Soroban RPC nodes only retain a rolling window of recent ledgers;
+// requesting one outside that window fails permanently, never on retry.
+const LEDGER_UNAVAILABLE_PATTERN = /ledger.*(not found|out.?of.?range|outside the range|before the oldest|retention window)/i;
+
+export function isLedgerUnavailableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return LEDGER_UNAVAILABLE_PATTERN.test(message);
 }
 
 export async function startIndexer(): Promise<void> {
@@ -175,6 +216,8 @@ export async function startIndexer(): Promise<void> {
   // network re-org, and trusting it would rewind lastProcessed and cause the
   // same ledgers to be reprocessed out of order.
   let highestSeenLedger = lastProcessed;
+
+  let consecutivePollFailures = 0;
   while (true) {
     try {
       const next = await pollOnce(lastProcessed);
@@ -200,6 +243,20 @@ export async function startIndexer(): Promise<void> {
         continue;
       }
       highestSeenLedger = latestLedger;
+
+      if (latestLedger < lastProcessed) {
+        // The RPC node's head receded below our checkpoint — either a chain
+        // re-org or the node was reset/re-synced from an earlier snapshot.
+        // Rewind past the affected range so events are re-derived from the
+        // canonical chain; the ON CONFLICT upserts in processLedger's
+        // handlers make re-processing that overlap idempotent.
+        const rewoundTo = Math.max(latestLedger - REORG_REWIND_LEDGERS, 0);
+        console.warn(
+          `[Indexer] Re-org detected: RPC latest ledger ${latestLedger} is behind checkpoint ${lastProcessed}. Rewinding checkpoint to ${rewoundTo}.`,
+        );
+        lastProcessed = rewoundTo;
+        await saveCheckpoint(lastProcessed);
+      }
 
       if (latestLedger > lastProcessed) {
         for (let seq = lastProcessed + 1; seq <= latestLedger; seq++) {
@@ -235,6 +292,19 @@ export async function startIndexer(): Promise<void> {
       // Loop continues — a transient RPC/DB error no longer kills the process.
       // lastProcessed was not advanced past the failed ledger, so the same
       // sequence is retried once the backoff elapses.
+
+      consecutivePollFailures = 0;
+    } catch (err) {
+      // Transient RPC errors (rate limits, timeouts, dropped connections) must
+      // not kill the process — back off and retry instead of exiting, since a
+      // crash loop against a public RPC endpoint only makes rate limiting worse.
+      consecutivePollFailures++;
+      const backoffMs = calculatePollBackoff(consecutivePollFailures);
+      console.error(
+        `[Indexer] Poll error (consecutive failures: ${consecutivePollFailures}), retrying in ${backoffMs}ms:`,
+        err instanceof Error ? err.message : err,
+      );
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
   }
 }
@@ -563,6 +633,20 @@ export async function processLedger(ledger_sequence: number): Promise<void> {
 
     // Process the event
     await processEvent(rawEvent);
+
+    if (isLedgerUnavailableError(err)) {
+      // The ledger sequence is missing from the RPC node (pruned by its
+      // retention window, or never existed on this fork) — retrying it will
+      // never succeed, so skip cleanly and let the caller move the
+      // checkpoint past it instead of getting stuck forever.
+      console.warn(
+        `[Indexer] Ledger ${ledger_sequence} unavailable on RPC node, skipping:`,
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+    console.error(`Error processing ledger ${ledger_sequence}:`, err);
+    throw err;
   }
 }
 
@@ -745,6 +829,16 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
   } finally {
     client.release();
   }
+
+  publishActivity({
+    type: 'trade',
+    marketId: String(p.market_id ?? ''),
+    outcomeId: String(p.side ?? ''),
+    side: String(p.side ?? ''),
+    sharesAmount: Number(p.amount ?? 0),
+    priceBps: 0,
+    timestamp: (p.placed_at as string) ?? new Date().toISOString(),
+  });
 }
 
 export async function handleMarketLocked(event: RawStellarEvent): Promise<void> {
@@ -829,6 +923,12 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   if (marketId) {
     publishActivity({ type: 'resolved', marketId, winningOutcomeId: outcome ?? '' });
   }
+
+  publishActivity({
+    type: 'resolved',
+    marketId: marketId ?? '',
+    winningOutcomeId: typeof p.outcome === 'string' ? p.outcome : '',
+  });
 }
 
 export async function handleMarketCancelled(event: RawStellarEvent): Promise<void> {
@@ -869,6 +969,8 @@ export async function handleMarketCancelled(event: RawStellarEvent): Promise<voi
   if (typeof p.market_id === 'string') {
     publishActivity({ type: 'cancelled', marketId: p.market_id });
   }
+
+  publishActivity({ type: 'cancelled', marketId: String(p.market_id ?? '') });
 }
 
 export async function handleWinningsClaimed(event: RawStellarEvent): Promise<void> {
@@ -934,7 +1036,16 @@ export async function backfillLedgerRange(
     const batchEnd = Math.min(batchStart + batch_size - 1, to_ledger);
 
     for (let seq = batchStart; seq <= batchEnd; seq++) {
-      await processLedger(seq);
+      try {
+        await processLedger(seq);
+      } catch (err) {
+        // Don't let one bad ledger abort a multi-thousand-ledger backfill —
+        // log it and move on; the checkpoint below tracks how far we got.
+        console.error(
+          `[Backfill] Failed to process ledger ${seq}, skipping:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
       processed++;
 
       if (processed % 1_000 === 0) {
