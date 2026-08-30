@@ -2132,6 +2132,35 @@ impl Treasury {
             .unwrap_or_else(|| Vec::new(&env));
         log.len()
 
+    /// Pauses fee withdrawals.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    pub fn pause_withdrawals(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&WITHDRAWALS_PAUSED, &true);
+        Ok(())
+    }
+
+    /// Unpauses fee withdrawals.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the admin
+    pub fn unpause_withdrawals(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&WITHDRAWALS_PAUSED, &false);
+        Ok(())
+    }
+
+    /// Returns true if the address is an approved market.
+    pub fn is_market_approved(env: Env, market_address: Address) -> bool {
+        let markets: Vec<Address> =
+            env.storage().persistent().get(&APPROVED_MARKETS).unwrap_or_else(|| Vec::new(&env));
+        markets.contains(market_address)
+    }
+
     /// Returns the audit entry at `index` (0-based insertion order), or None if
     /// the index is out of range.  Entries are immutable and never mutated or
     /// removed after they are appended.
