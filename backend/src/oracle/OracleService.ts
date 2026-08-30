@@ -60,27 +60,50 @@ async function sendAlert(market_id: string, match_id: string): Promise<void> {
   }
 
   const alertSentKey = `${ALERT_SENT_KEY_PREFIX}${market_id}`;
+  const payload = {
+    title: 'Oracle Resolution Failure Alert',
+    message: `Market ${market_id} (match ${match_id}) has failed to resolve ${FAILURE_THRESHOLD} times consecutively. User funds may be locked.`,
+    market_id,
+    match_id,
+    timestamp: new Date().toISOString(),
+  };
 
-  try {
-    const payload = {
-      title: 'Oracle Resolution Failure Alert',
-      message: `Market ${market_id} (match ${match_id}) has failed to resolve ${FAILURE_THRESHOLD} times consecutively. User funds may be locked.`,
-      market_id,
-      match_id,
-      timestamp: new Date().toISOString(),
-    };
+  const MAX_RETRIES = 3;
+  let lastError: unknown = null;
 
-    await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
 
-    await redis.set(alertSentKey, '1', 'EX', 7 * 24 * 60 * 60);
-    logger.info({ market_id, match_id }, 'sendAlert: Alert sent successfully');
-  } catch (err) {
-    logger.error({ err, market_id, match_id }, 'sendAlert: Failed to send alert');
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+      }
+
+      await redis.set(alertSentKey, '1', 'EX', 7 * 24 * 60 * 60);
+      logger.info({ market_id, match_id, attempt }, 'sendAlert: Alert sent successfully');
+      return;
+    } catch (err) {
+      lastError = err;
+      logger.warn(
+        { err, market_id, match_id, attempt, maxRetries: MAX_RETRIES },
+        `sendAlert: Attempt ${attempt}/${MAX_RETRIES} failed`,
+      );
+
+      if (attempt < MAX_RETRIES) {
+        const backoffMs = Math.pow(2, attempt - 1) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
   }
+
+  logger.fatal(
+    { err: lastError, market_id, match_id, retries: MAX_RETRIES },
+    'sendAlert: CRITICAL - All retry attempts to send alert webhook failed',
+  );
 }
 
 // Shape of a single fight entry returned by the external boxing API
