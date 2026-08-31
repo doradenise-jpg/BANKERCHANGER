@@ -34,6 +34,31 @@ pub fn emit_market_resolved(env: &Env, market_id: u64, outcome: Outcome, oracle_
     env.events().publish(topics, (outcome, oracle_address));
 }
 
+/// Emits a `market_resolution_pending` event when oracle consensus is reached
+/// but the dispute cooldown window is still active.
+///
+/// Topics: `(Symbol("market_resolution_pending"), market_id)`
+/// Data:   `(outcome_byte: u8, cooldown_end_ledger: u32)`
+pub fn emit_market_resolution_pending(
+    env: &Env,
+    market_id: u64,
+    outcome_byte: u8,
+    cooldown_end_ledger: u32,
+) {
+    let topics = (Symbol::new(env, "market_resolution_pending"), market_id);
+    env.events().publish(topics, (outcome_byte, cooldown_end_ledger));
+}
+
+/// Emits a `resolution_finalized` event when anyone successfully calls
+/// `finalize_resolution` after the cooldown window has elapsed.
+///
+/// Topics: `(Symbol("resolution_finalized"), market_id)`
+/// Data:   `(outcome_byte: u8)`
+pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u8) {
+    let topics = (Symbol::new(env, "resolution_finalized"), market_id);
+    env.events().publish(topics, outcome_byte);
+}
+
 /// Emits a `bet_placed` event when a bettor places a bet.
 ///
 /// Topics: `(Symbol("bet_placed"), market_id)`
