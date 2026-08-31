@@ -23,7 +23,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@babel/preset-env": "^7.29.2",
-    "@babel/preset-typescript": "^7.29.7",
+    "@babel/preset-typescript": "^8.0.1",
     "@next/bundle-analyzer": "16.2.9",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^14.3.1",
