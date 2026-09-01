@@ -42,6 +42,12 @@ const PAUSED: &str = "PAUSED";
 /// Pending oracle reports for 2-of-3 consensus
 const PENDING_REPORTS: &str = "PENDING_REPORTS";
 const REPORT_TTL: u64 = 172_800;
+/// Ledger number at which the dispute cooldown window expires for a ResolutionPending market.
+/// Written when consensus is reached and cleared when finalize_resolution completes.
+const COOLDOWN_END_LEDGER: &str = "COOLDOWN_END";
+/// Default dispute cooldown in ledgers when market config does not specify one.
+/// 720 ledgers × ~5 s/ledger ≈ 1 hour.
+const DEFAULT_DISPUTE_COOLDOWN_LEDGERS: u32 = 720;
 /// Total LP shares outstanding for this market pool
 const LP_TOTAL_SHARES: &str = "LP_TOTAL_SHARES";
 /// Prefix for per-provider LP position: (LP_PREFIX, provider) -> LiquidityPosition
@@ -919,20 +925,36 @@ impl Market {
             matching_count,
         );
 
-        // Resolve if we have 2 matching reports
+        // Circuit Breaker: when consensus is reached, enter ResolutionPending
+        // instead of immediately resolving. This gives admins a configurable
+        // cooldown window to raise a dispute before payouts are unlocked.
         if matching_count >= 2 {
             state.outcome = OptionalOutcome::Some(report.outcome.clone());
-            state.status = MarketStatus::Resolved;
-            state.resolved_at = env.ledger().timestamp();
+
+            // Determine cooldown length (ledgers). Fall back to the default if
+            // the market was created before dispute_cooldown_ledgers was added.
+            let cooldown = if state.config.dispute_cooldown_ledgers > 0 {
+                state.config.dispute_cooldown_ledgers
+            } else {
+                DEFAULT_DISPUTE_COOLDOWN_LEDGERS
+            };
+
+            let cooldown_end_ledger = env.ledger().sequence().saturating_add(cooldown);
+
+            state.status = MarketStatus::ResolutionPending;
             state.oracle_used = OptionalOracleRole::Some(OracleRole::Primary);
             Self::save_state(&env, &state);
             Self::extend_market_ttl(&env);
 
-            // Clear pending reports
+            // Persist the cooldown end ledger so finalize_resolution can check it.
+            env.storage()
+                .persistent()
+                .set(&COOLDOWN_END_LEDGER, &cooldown_end_ledger);
+
+            // Clear pending reports — they are no longer needed.
             env.storage().persistent().set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
 
-            // Emit consensus_reached before market_resolved so subscribers
-            // can correlate the tier and report count with the resolution.
+            // Emit consensus_reached first so subscribers can correlate.
             boxmeout_shared::emit_consensus_reached(
                 &env,
                 state.market_id,
@@ -940,16 +962,15 @@ impl Market {
                 matching_count,
                 outcome_byte,
             );
-            
 
-            env.storage()
-                .persistent()
-                .set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
-
-
-            // Include the oracle address in the event so on-chain data is sufficient
-            // to audit oracle performance without relying on off-chain records.
-            boxmeout_shared::emit_market_resolved(&env, state.market_id, report.outcome, oracle);
+            // Emit market_resolution_pending — frontends display the cooldown
+            // countdown and dispute submission UI during this window.
+            boxmeout_shared::emit_market_resolution_pending(
+                &env,
+                state.market_id,
+                outcome_byte,
+                cooldown_end_ledger,
+            );
         } else if conflicting_count > 0 && matching_count == 1 {
             // Emit event for conflicting report, wait for third oracle
             boxmeout_shared::emit_conflicting_oracle_report(&env, state.market_id, oracle);
@@ -990,6 +1011,67 @@ impl Market {
 
         env.storage().persistent().set(&PENDING_REPORTS, &updated);
         Ok(cleared)
+    }
+
+    // =========================================================================
+    // FINALIZE RESOLUTION — callable by anyone after cooldown window
+    // =========================================================================
+    /// Finalizes a market that is in `ResolutionPending` state once the dispute
+    /// cooldown window has elapsed.
+    ///
+    /// This function is permissionless — any address can call it once the
+    /// `cooldown_end_ledger` has been passed, which avoids relying on a
+    /// privileged keeper bot.
+    ///
+    /// If the cooldown window is still active this function returns
+    /// `DisputeCooldownActive`. If the market has been moved to `Disputed`
+    /// (admin froze the resolution) this returns `ResolutionNotPending`.
+    ///
+    /// # Errors
+    /// - `ResolutionNotPending`: Market is not in ResolutionPending state
+    /// - `DisputeCooldownActive`: Cooldown window has not yet elapsed
+    pub fn finalize_resolution(env: Env) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+
+        let mut state = Self::load_state(&env)?;
+
+        // Only valid to call when the market is waiting for the cooldown to expire.
+        if state.status != MarketStatus::ResolutionPending {
+            return Err(ContractError::ResolutionNotPending);
+        }
+
+        // Check that the cooldown window has elapsed.
+        let cooldown_end_ledger: u32 = env
+            .storage()
+            .persistent()
+            .get(&COOLDOWN_END_LEDGER)
+            .unwrap_or(0);
+
+        if env.ledger().sequence() < cooldown_end_ledger {
+            return Err(ContractError::DisputeCooldownActive);
+        }
+
+        // ── EFFECTS ──────────────────────────────────────────────────────────
+        state.status = MarketStatus::Resolved;
+        state.resolved_at = env.ledger().timestamp();
+        Self::save_state(&env, &state);
+        Self::extend_market_ttl(&env);
+
+        // Clean up the cooldown ledger entry — no longer needed.
+        env.storage().persistent().remove(&COOLDOWN_END_LEDGER);
+
+        let outcome_byte: u8 = match &state.outcome {
+            OptionalOutcome::Some(o) => match o {
+                boxmeout_shared::types::Outcome::FighterA => 0,
+                boxmeout_shared::types::Outcome::FighterB => 1,
+                boxmeout_shared::types::Outcome::Draw => 2,
+                boxmeout_shared::types::Outcome::NoContest => 3,
+            },
+            OptionalOutcome::None => return Err(ContractError::InvalidOutcome),
+        };
+
+        boxmeout_shared::emit_resolution_finalized(&env, state.market_id, outcome_byte);
+        Ok(())
     }
 
     // =========================================================================
@@ -1273,7 +1355,10 @@ impl Market {
         }
 
         let mut state = Self::load_state(&env)?;
-        if state.status != MarketStatus::Resolved {
+        // Allow dispute during both Resolved and ResolutionPending states.
+        // ResolutionPending is the circuit breaker window — this is the primary
+        // use-case for the emergency pause path introduced by issue #562.
+        if state.status != MarketStatus::Resolved && state.status != MarketStatus::ResolutionPending {
             return Err(ContractError::InvalidMarketStatus);
         }
 

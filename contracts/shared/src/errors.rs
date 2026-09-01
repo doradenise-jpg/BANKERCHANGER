@@ -72,6 +72,10 @@ pub enum ContractError {
     ConflictingOracleReport = 32,
     /// Resolution was attempted before the scheduled fight start
     MarketNotStarted = 33,
+    /// finalize_resolution called before the dispute cooldown window has elapsed
+    DisputeCooldownActive = 34,
+    /// finalize_resolution called on a market not in ResolutionPending state
+    ResolutionNotPending = 35,
 
     // ── Treasury ───────────────────────────────────────────
     /// Fee withdrawals are temporarily paused

@@ -11,11 +11,12 @@ use soroban_sdk::{contracttype, Address, BytesN, String};
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum MarketStatus {
-    Open,      // Bets are being accepted
-    Locked,    // Fight has started; bets are closed
-    Resolved,  // Winner declared; claims are open
-    Cancelled, // Fight cancelled; full refunds available
-    Disputed,  // Outcome under admin review; claims frozen
+    Open,              // Bets are being accepted
+    Locked,            // Fight has started; bets are closed
+    ResolutionPending, // Oracle consensus reached; cooldown window active
+    Resolved,          // Winner declared; claims are open (cooldown elapsed)
+    Cancelled,         // Fight cancelled; full refunds available
+    Disputed,          // Outcome under admin review; claims frozen
 }
 
 /// Market tier classification for the AMM & Odds Calculation Pipeline.
@@ -111,6 +112,11 @@ pub struct MarketConfig {
     /// e.g. 18 = Tier 18 (mid-range), 20 = Tier 20 (high-stakes).
     /// Tier 0 means untiered / default.
     pub tier: u32,
+    /// Number of ledgers to wait after oracle consensus before resolution is
+    /// finalised. During this window an admin can raise a dispute.
+    /// At ~5 s per ledger, 720 ledgers ≈ 1 hour.
+    /// Set to 0 to disable the cooldown (immediate resolution).
+    pub dispute_cooldown_ledgers: u32,
 }
 
 /// Configuration passed to MarketFactory on initialization.
