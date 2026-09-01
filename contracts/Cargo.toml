@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-soroban-sdk = { version = "20.0.0" }
+soroban-sdk = { version = "27.0.6" }
 
 # Used by `cargo build --workspace` and `soroban contract build`
 [profile.release]
