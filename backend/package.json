@@ -78,7 +78,7 @@
     "@typescript-eslint/eslint-plugin": "^8.62.1",
 
     "@types/ws": "^8.18.1",
-    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/eslint-plugin": "^8.69.0",
     "@typescript-eslint/parser": "^7.13.0",
     "eslint": "^10.6.0",
 
