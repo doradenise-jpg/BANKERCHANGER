@@ -142,11 +142,62 @@ function parseEvent(event: any, ledgerSequence: number, batchId: number): Proces
   }
 }
 
+import { indexerQueueDepth, indexerQueueOverflowTotal } from "./metrics";
+
+// ─── Bounded In-Memory Broadcast Queue ──────────────────────────────────────
+
+export const DEFAULT_MAX_QUEUE_DEPTH = 10000;
+
+export function getMaxQueueDepth(): number {
+  const parsed = Number(process.env.MAX_QUEUE_DEPTH);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_QUEUE_DEPTH;
+}
+
+const eventBroadcastQueue: ProcessedEvent[] = [];
+
+/** Current queued events awaiting broadcast */
+export function getEventQueue(): ProcessedEvent[] {
+  return eventBroadcastQueue;
+}
+
+/** Number of events currently in the broadcast queue */
+export function getEventQueueDepth(): number {
+  return eventBroadcastQueue.length;
+}
+
+/** Clear the queue (useful in tests and during maintenance) */
+export function clearEventQueue(): void {
+  eventBroadcastQueue.length = 0;
+  indexerQueueDepth.set(0);
+}
+
+/**
+ * Enqueues a processed event for WebSocket broadcasting.
+ * If the queue exceeds MAX_QUEUE_DEPTH, drops the oldest event
+ * and emits the indexer_queue_overflow_total metric.
+ */
+export function enqueueBroadcastEvent(event: ProcessedEvent): boolean {
+  const maxDepth = getMaxQueueDepth();
+  let dropped = false;
+
+  if (eventBroadcastQueue.length >= maxDepth) {
+    eventBroadcastQueue.shift();
+    indexerQueueOverflowTotal.inc();
+    dropped = true;
+    logger.warn(
+      { queueDepth: eventBroadcastQueue.length, maxDepth },
+      "WebSocket event broadcast queue cap reached, dropping oldest event"
+    );
+  }
+
+  eventBroadcastQueue.push(event);
+  indexerQueueDepth.set(eventBroadcastQueue.length);
+  return !dropped;
+}
+
 // ─── Event Handlers ──────────────────────────────────────────────────────────
 
 async function handleEvent(event: ProcessedEvent): Promise<void> {
-  const { redis } = await import("./db");
-
   switch (event.eventType) {
     case "invoice_created":
       await upsertInvoice({
@@ -176,18 +227,28 @@ async function handleEvent(event: ProcessedEvent): Promise<void> {
       logger.debug({ eventType: event.eventType, batchId: event.batchId }, "Unknown event type");
   }
 
-  // Publish to WebSocket channel for real-time updates
-  await redis.publish(
-    "indexer_events",
-    JSON.stringify({
-      type: event.eventType,
-      contractId: event.contractId,
-      ledgerSequence: event.ledgerSequence,
-      value: event.value,
-      batchId: event.batchId,
-      timestamp: event.processedAt,
-    }),
-  );
+  // Push to bounded broadcast queue
+  enqueueBroadcastEvent(event);
+
+  // Publish to WebSocket channel for real-time updates if redis is configured
+  try {
+    const { redis } = await import("./db");
+    if (redis && typeof (redis as any).publish === "function") {
+      await (redis as any).publish(
+        "indexer_events",
+        JSON.stringify({
+          type: event.eventType,
+          contractId: event.contractId,
+          ledgerSequence: event.ledgerSequence,
+          value: event.value,
+          batchId: event.batchId,
+          timestamp: event.processedAt,
+        }),
+      );
+    }
+  } catch (err) {
+    logger.debug({ err }, "Redis publish unavailable");
+  }
 }
 
 // ─── Fault-Tolerant Batch Runner ─────────────────────────────────────────────
