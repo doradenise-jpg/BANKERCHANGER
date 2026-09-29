@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
-export type SortOption = 'newest' | 'ending_soon' | 'biggest_pool';
+// Values must match the backend vocabulary in `services/api.ts` → MarketFilters.sort
+export type SortOption = 'date_asc' | 'date_desc' | 'pool_desc';
 
 const WEIGHT_CLASSES = [
   '',
@@ -32,9 +33,9 @@ const STATUS_TABS = [
 ] as const;
 
 const SORT_OPTIONS: { label: string; value: SortOption }[] = [
-  { label: 'Newest',       value: 'newest' },
-  { label: 'Ending Soon',  value: 'ending_soon' },
-  { label: 'Biggest Pool', value: 'biggest_pool' },
+  { label: 'Newest',       value: 'date_desc' },
+  { label: 'Ending Soon',  value: 'date_asc' },
+  { label: 'Biggest Pool', value: 'pool_desc' },
 ];
 
 export interface MarketFilterValues {
@@ -52,10 +53,11 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const status     = searchParams.get('status')      ?? '';
-  const sort       = (searchParams.get('sort')       ?? 'newest') as SortOption;
-  const searchParam = searchParams.get('search')     ?? '';
-  const weightClass = searchParams.get('weightClass') ?? '';
+  const status      = searchParams.get('status')       ?? '';
+  const sort        = (searchParams.get('sort')        ?? 'date_desc') as SortOption;
+  const searchParam = searchParams.get('search')       ?? '';
+  // MUST match the param name read by app/page.tsx
+  const weightClass = searchParams.get('weight_class') ?? '';
 
   const [searchInput, setSearchInput] = useState(searchParam);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -116,7 +118,7 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
       {/* Weight class dropdown */}
       <select
         value={weightClass}
-        onChange={(e) => setParam({ weightClass: e.target.value || null })}
+        onChange={(e) => setParam({ weight_class: e.target.value || null })}
         aria-label="Filter by weight class"
         className="min-h-[44px] bg-gray-800 text-white text-sm rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-amber-500"
       >
