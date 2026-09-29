@@ -46,6 +46,8 @@ ORACLE_ADDRESSES="${ORACLE_ADDRESSES:-}"
 DEFAULT_FEE_BPS="${DEFAULT_FEE_BPS:-200}"
 WITHDRAWAL_LIMIT="${WITHDRAWAL_LIMIT:-1000000000}"
 
+source "${CONTRACTS_DIR}/scripts/verify-wasm-upload.sh"
+
 # Set RPC and Horizon URLs based on network, allow overrides via env vars
 if [[ "$NETWORK" == "testnet" ]]; then
     STELLAR_RPC_URL="${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}"
@@ -158,6 +160,8 @@ MARKET_WASM_HASH=$(SOROBAN_RPC_URL="$STELLAR_RPC_URL" stellar contract install \
     --network "$NETWORK" 2>&1 | grep -oE '[a-f0-9]{64}' | head -1)
 [[ -z "$MARKET_WASM_HASH" ]] && { echo "ERROR: Market wasm upload failed" >&2; exit 1; }
 echo "  Market wasm hash: $MARKET_WASM_HASH"
+
+verify_wasm_upload "$MARKET_WASM_HASH" "$NETWORK" "$STELLAR_RPC_URL"
 
 stellar_invoke "$MARKET_FACTORY_ADDRESS" update_market_wasm \
     --admin "$ADMIN_ADDRESS" \
