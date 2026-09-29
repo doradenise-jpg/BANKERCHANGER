@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { getConnectedAddress, voteProposal, executeProposal } from '@/services/wallet';
 import { TxStatusToast } from '@/components/ui/TxStatusToast';
+import { useProposalVoteUpdates } from '@/hooks/useProposalVoteUpdates';
 import type { Proposal, TxStatus, VoteType } from '@/types';
 
 // Using the same mock data for consistency
@@ -47,6 +48,20 @@ export default function ProposalDetail({ params }: { params: { id: string } }) {
     }
   }, [params.id, connectedAddress]);
 
+  // Real-time vote updates for this proposal. Merges external updates into
+  // local state so the bars reflect votes from other users without a reload.
+  useProposalVoteUpdates(params.id, (payload) => {
+    setProposal((prev) =>
+      prev
+        ? {
+            ...prev,
+            votesFor: payload.votesFor,
+            votesAgainst: payload.votesAgainst,
+            votesAbstain: payload.votesAbstain,
+          }
+        : prev,
+    );
+  });
   if (!proposal) {
     return <div className="p-8 text-center text-gray-400">Loading proposal...</div>;
   }
@@ -156,7 +171,7 @@ export default function ProposalDetail({ params }: { params: { id: string } }) {
                     <span className="text-gray-400">{proposal.votesFor.toLocaleString()} ({pctFor.toFixed(1)}%)</span>
                   </div>
                   <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-green-500" style={{ width: `${pctFor}%` }} />
+                    <div className="h-full bg-green-500 transition-[width] duration-300 ease-out" style={{ width: `${pctFor}%` }} />
                   </div>
                 </div>
                 <div>
@@ -165,7 +180,7 @@ export default function ProposalDetail({ params }: { params: { id: string } }) {
                     <span className="text-gray-400">{proposal.votesAgainst.toLocaleString()} ({pctAgainst.toFixed(1)}%)</span>
                   </div>
                   <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-red-500" style={{ width: `${pctAgainst}%` }} />
+                    <div className="h-full bg-red-500 transition-[width] duration-300 ease-out" style={{ width: `${pctAgainst}%` }} />
                   </div>
                 </div>
                 <div>
@@ -174,7 +189,7 @@ export default function ProposalDetail({ params }: { params: { id: string } }) {
                     <span className="text-gray-400">{proposal.votesAbstain.toLocaleString()} ({pctAbstain.toFixed(1)}%)</span>
                   </div>
                   <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-gray-500" style={{ width: `${pctAbstain}%` }} />
+                    <div className="h-full bg-gray-500 transition-[width] duration-300 ease-out" style={{ width: `${pctAbstain}%` }} />
                   </div>
                 </div>
               </div>
