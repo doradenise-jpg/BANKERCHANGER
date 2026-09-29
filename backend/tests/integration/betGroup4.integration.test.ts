@@ -33,7 +33,12 @@ jest.mock('../../src/services/redis-lua', () => ({
   incrWithExpire: jest.fn().mockResolvedValue(1),
 }));
 
+jest.mock('../../src/utils/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(null),
+}));
+
 const { pool } = require('../../src/config/db');
+const { acquireLock } = require('../../src/utils/distributedLock');
 
 describe('API Module Group 4: Betting Operations & Slippage Guard Endpoints', () => {
   const validStellarAddress = 'GBZXN7PIRZGNMHGA72YD2MKXT3MYMVGBLMHMT6A2R63FWIFKIIOHPSTA';
@@ -53,6 +58,8 @@ describe('API Module Group 4: Betting Operations & Slippage Guard Endpoints', ()
     };
 
     it('places bet successfully on open market', async () => {
+      const release = jest.fn().mockResolvedValue(undefined);
+      (acquireLock as jest.Mock).mockResolvedValueOnce({ release });
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
         .mockResolvedValueOnce({
@@ -71,6 +78,88 @@ describe('API Module Group 4: Betting Operations & Slippage Guard Endpoints', ()
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe(1);
+      expect(acquireLock).toHaveBeenCalledWith({ key: 'bet:market:mkt_1', ttl: 60 });
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps 50 concurrent bets consistent under the market row lock', async () => {
+      let totalPool = 10_000_000n;
+      let poolA = 10_000_000n;
+      let insertedBets = 0;
+      let rowLockTail = Promise.resolve();
+
+      (pool.connect as jest.Mock).mockImplementation(async () => {
+        let releaseTransactionLock: (() => void) | undefined;
+        const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+          if (sql === 'BEGIN') return {};
+
+          if (sql.includes('SELECT * FROM markets')) {
+            expect(sql).toMatch(/FOR UPDATE/i);
+            const previousLock = rowLockTail;
+            let releaseRowLock!: () => void;
+            rowLockTail = new Promise<void>((resolve) => {
+              releaseRowLock = resolve;
+            });
+            await previousLock;
+            releaseTransactionLock = releaseRowLock;
+            return {
+              rows: [{
+                market_id: 'mkt_1',
+                status: 'open',
+                total_pool: totalPool.toString(),
+                pool_a: poolA.toString(),
+              }],
+            };
+          }
+
+          if (sql.includes('INSERT INTO bets')) {
+            insertedBets += 1;
+            return {
+              rows: [{
+                id: insertedBets,
+                market_id: 'mkt_1',
+                amount: values[3],
+                side: 'fighter_a',
+              }],
+            };
+          }
+
+          if (sql.includes('UPDATE markets')) {
+            const amount = BigInt(String(values[0]));
+            totalPool += amount;
+            poolA += amount;
+            return {};
+          }
+
+          if (sql === 'COMMIT' || sql === 'ROLLBACK') {
+            releaseTransactionLock?.();
+            releaseTransactionLock = undefined;
+            return {};
+          }
+
+          throw new Error(`Unexpected query: ${sql}`);
+        });
+
+        return { query, release: jest.fn() };
+      });
+
+      const responses = await Promise.all(
+        Array.from({ length: 50 }, (_, index) =>
+          request(app)
+            .post('/api/v2/bets/place')
+            .send({
+              ...validBetPayload,
+              amount: '1000000',
+              idempotency_key: `concurrent-${index}`,
+            })
+        )
+      );
+
+      expect(responses.every((response) => response.status === 201)).toBe(true);
+      expect(insertedBets).toBe(50);
+      expect(totalPool).toBe(60_000_000n);
+      expect(poolA).toBe(60_000_000n);
+      expect(acquireLock).toHaveBeenCalledTimes(50);
     });
 
     it('rejects invalid Stellar address with 422', async () => {

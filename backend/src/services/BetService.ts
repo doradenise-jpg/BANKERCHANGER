@@ -9,6 +9,7 @@ import { cacheDelete, cacheDeletePattern } from './cache.service';
 import { AppError } from '../utils/AppError';
 import { Address, xdr } from '@stellar/stellar-sdk';
 import { invokeContract } from './StellarService';
+import { acquireLock } from '../utils/distributedLock';
 
 export interface BetWithMarket extends Bet {
   market_id: string;
@@ -55,11 +56,30 @@ export async function recordBet(
 
   const amount_xlm = Number(amount) / 10_000_000;
 
+  // ── Distributed Redis lock: second guard against concurrent bets on same market ──
+  // Prevents two backend instances from interleaving bet writes on the same market.
+  const lock = await acquireLock({ key: `bet:market:${market_id}`, ttl: 10 });
+  if (!lock) {
+    throw AppError.conflict('Market is currently processing another bet, please retry');
+  }
+
   const client = await pool.connect();
   let bet: any;
 
   try {
     await client.query('BEGIN');
+
+    // ── Row-level lock: prevents concurrent bets on same market reading stale state ──
+    // SELECT ... FOR UPDATE acquires an exclusive row lock for the duration of this
+    // transaction, so two concurrent bets cannot both read the same pool totals.
+    const marketLockResult = await client.query(
+      'SELECT market_id FROM markets WHERE market_id = $1 FOR UPDATE',
+      [market_id],
+    );
+    if (marketLockResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      throw AppError.notFound(`Market not found: ${market_id}`);
+    }
 
     const result = await client.query(
       `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
@@ -89,6 +109,7 @@ export async function recordBet(
     throw err;
   } finally {
     client.release();
+    await lock.release();
   }
 
   return {
