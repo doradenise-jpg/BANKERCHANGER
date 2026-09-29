@@ -1,9 +1,10 @@
 // ============================================================
 // BANKERCHANGER — usePortfolio Hook
+// Cursor-based paginated portfolio hook using React Query useInfiniteQuery
 // ============================================================
 
 import { useState, useEffect, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query';
 import type { Portfolio, TxStatus } from '../types';
 import { useWallet } from './useWallet';
 import { fetchPortfolio } from '../services/api';
@@ -18,6 +19,9 @@ export interface UsePortfolioResult {
   page: number;
   limit: number;
   total: number;
+  hasNextPage?: boolean;
+  isFetchingNextPage?: boolean;
+  fetchNextPage: () => Promise<any>;
   loadNextPage: () => Promise<void>;
   /** Submits claim_winnings for a market contract. Refreshes portfolio after. */
   claimWinnings: (market_contract_address: string) => Promise<void>;
@@ -25,25 +29,21 @@ export interface UsePortfolioResult {
   claimRefund: (market_contract_address: string) => Promise<void>;
 }
 
+const PAGE_SIZE = 25;
+
 /**
  * Fetches the portfolio for the currently connected wallet.
- * Returns null portfolio if no wallet is connected.
- * Supports paginated bets loading with loadNextPage().
- * 
- * Cache strategy: Portfolio data is stale for 30s and cached for 60s,
- * reducing redundant requests for expensive computation.
+ * Uses cursor-based pagination with 25 bets per page and React Query useInfiniteQuery.
  */
 export function usePortfolio(): UsePortfolioResult {
   const { address } = useWallet();
-  const [page, setPage] = useState(1);
-  const [limit] = useState(50);
   const [claimTxStatus, setClaimTxStatus] = useState<TxStatus>({
     hash: null,
     status: 'idle',
     error: null,
   });
 
-  // Query for portfolio data with caching
+  // Query for portfolio summary data with caching
   const {
     data: portfolio = null,
     isLoading: portfolioLoading,
@@ -53,43 +53,61 @@ export function usePortfolio(): UsePortfolioResult {
     queryKey: ['portfolio', address],
     queryFn: () => (address ? fetchPortfolio(address) : Promise.resolve(null)),
     enabled: !!address,
-    staleTime: 30_000, // 30 seconds
-    gcTime: 60_000, // 60 seconds (formerly cacheTime)
+    staleTime: 30_000,
+    gcTime: 60_000,
   });
 
-  // Query for bets with pagination
+  // Infinite query for bets using cursor-based pagination (25 per page)
   const {
-    data: betsData,
+    data: infiniteBetsData,
     isLoading: betsLoading,
     error: betsError,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
     refetch: refetchBets,
-  } = useQuery({
-    queryKey: ['bets', address, page, limit],
-    queryFn: async () => {
-      if (!address) return { bets: [], total: 0 };
-      const response = await fetch(`/api/bets/${address}?page=${page}&limit=${limit}`);
-      return response.json();
+  } = useInfiniteQuery({
+    queryKey: ['bets', 'infinite', address],
+    queryFn: async ({ pageParam = 0 }) => {
+      if (!address) return { bets: [], total: 0, nextCursor: null };
+      const res = await fetch(`/api/bets/${address}?cursor=${pageParam}&limit=${PAGE_SIZE}`);
+      const data = await res.json();
+      const betsList = data.bets ?? [];
+      const totalCount = data.total ?? (betsList.length);
+      const nextCursor = data.nextCursor !== undefined ? data.nextCursor : (betsList.length === PAGE_SIZE ? Number(pageParam) + PAGE_SIZE : null);
+      return {
+        bets: betsList,
+        total: totalCount,
+        nextCursor,
+      };
     },
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => (lastPage.nextCursor !== null ? lastPage.nextCursor : undefined),
     enabled: !!address,
     staleTime: 30_000,
     gcTime: 60_000,
   });
 
-  const bets = betsData?.bets ?? [];
-  const total = betsData?.total ?? 0;
+  const bets = infiniteBetsData?.pages.flatMap((page) => page.bets) ?? [];
+  const total = infiniteBetsData?.pages[0]?.total ?? bets.length;
   const isLoading = portfolioLoading || betsLoading;
   const error = portfolioError ?? betsError ?? null;
 
   // Refresh portfolio on claim success event
   useEffect(() => {
-    const handler = () => { refetchPortfolio(); };
+    const handler = () => {
+      refetchPortfolio();
+      refetchBets();
+    };
     window.addEventListener('bankerchanger:claim_success', handler);
     return () => window.removeEventListener('bankerchanger:claim_success', handler);
-  }, [refetchPortfolio]);
+  }, [refetchPortfolio, refetchBets]);
 
   const loadNextPage = useCallback(async () => {
-    setPage(prev => prev + 1);
-  }, []);
+    if (hasNextPage && !isFetchingNextPage) {
+      await fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const runClaim = useCallback(async (fn: () => Promise<string>) => {
     setClaimTxStatus({ hash: null, status: 'signing', error: null });
@@ -97,10 +115,11 @@ export function usePortfolio(): UsePortfolioResult {
       const hash = await fn();
       setClaimTxStatus({ hash, status: 'success', error: null });
       await refetchPortfolio();
+      await refetchBets();
     } catch (e: any) {
       setClaimTxStatus({ hash: null, status: 'error', error: e?.message ?? String(e) });
     }
-  }, [refetchPortfolio]);
+  }, [refetchPortfolio, refetchBets]);
 
   const claimWinnings = useCallback(
     (market_contract_address: string) =>
@@ -120,9 +139,12 @@ export function usePortfolio(): UsePortfolioResult {
     isLoading,
     error,
     claimTxStatus,
-    page,
-    limit,
+    page: 1,
+    limit: PAGE_SIZE,
     total,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
     loadNextPage,
     claimWinnings,
     claimRefund,
