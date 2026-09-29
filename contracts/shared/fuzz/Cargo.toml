@@ -1,0 +1,29 @@
+[package]
+name    = "boxmeout-shared-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# cargo-fuzz requires this exact package name format
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+boxmeout-shared = { path = "..", features = [] }
+
+# Silence the warning about unused test utils
+[dev-dependencies]
+
+# Each fuzz target is a separate binary.
+[[bin]]
+name = "amm_fuzz"
+path = "fuzz_targets/amm_fuzz.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "payout_fuzz"
+path = "fuzz_targets/payout_fuzz.rs"
+test = false
+doc  = false
