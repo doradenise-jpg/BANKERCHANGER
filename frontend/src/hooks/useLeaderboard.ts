@@ -5,8 +5,8 @@
 // ============================================================
 
 import { useEffect, useState, useCallback } from 'react';
-import type { Leaderboard, LeaderboardEntry } from '../types';
-import { fetchLeaderboard } from '../services/api';
+import type { Leaderboard, LeaderboardEntry, MyLeaderboardRank } from '../types';
+import { fetchLeaderboard, fetchMyLeaderboardRank } from '../services/api';
 
 type LeaderboardRankEvent = {
   type: 'leaderboard_rank';
@@ -34,6 +34,10 @@ function getActivityFeedUrl(baseUrl: string): string | null {
 
 export interface UseLeaderboardResult {
   leaderboard: Leaderboard | null;
+  /** The authenticated caller's own rank, when available. */
+  myRank: MyLeaderboardRank | null;
+  /** True when the caller's rank falls inside the visible top-N page. */
+  isMyRankInTopN: boolean;
   isLoading: boolean;
   error: Error | null;
   /** Call to trigger a manual refetch */
@@ -46,9 +50,13 @@ const POLL_INTERVAL = 60_000;
  * Fetches the engagement leaderboard, polling every 60s, and opens a
  * WebSocket subscription to the leaderboard feed so rank/score updates are
  * applied live without waiting for the next poll.
+ *
+ * Also fetches the authenticated caller's own rank so the UI can render a
+ * sticky "Your rank" card for users outside the visible top-N.
  */
 export function useLeaderboard(limit = 50): UseLeaderboardResult {
   const [leaderboard, setLeaderboard] = useState<Leaderboard | null>(null);
+  const [myRank, setMyRank] = useState<MyLeaderboardRank | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
@@ -67,11 +75,25 @@ export function useLeaderboard(limit = 50): UseLeaderboardResult {
     }
   }, [limit]);
 
+  const loadMyRank = useCallback(async () => {
+    try {
+      const data = await fetchMyLeaderboardRank();
+      setMyRank(data);
+    } catch {
+      // Not authenticated, or rank not yet established — leave the card hidden.
+      setMyRank(null);
+    }
+  }, []);
+
   useEffect(() => {
     load();
-    const id = setInterval(load, POLL_INTERVAL);
+    loadMyRank();
+    const id = setInterval(() => {
+      load();
+      loadMyRank();
+    }, POLL_INTERVAL);
     return () => clearInterval(id);
-  }, [load, tick]);
+  }, [load, loadMyRank, tick]);
 
   // Live WebSocket updates.
   useEffect(() => {
@@ -113,5 +135,8 @@ export function useLeaderboard(limit = 50): UseLeaderboardResult {
     return () => socket.close();
   }, [limit]);
 
-  return { leaderboard, isLoading, error, refetch };
+  const isMyRankInTopN =
+    myRank !== null && leaderboard !== null ? myRank.rank <= leaderboard.entries.length : false;
+
+  return { leaderboard, myRank, isMyRankInTopN, isLoading, error, refetch };
 }
