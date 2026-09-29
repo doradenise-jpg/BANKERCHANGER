@@ -3,8 +3,7 @@ import cors from 'cors';
 import { Server } from 'http';
 import { getInvoices, getInvoiceById } from './db';
 import { getPollerHealth } from './poller';
-import { isLive, isReady, getReadinessDetails } from './health';
-import { logger } from './logger';
+import { isLive, isReady, getReadinessDetails, getHealthResponse } from './health';
 
 const app = express();
 
@@ -116,6 +115,9 @@ app.get('/healthz/ready', (req: Request, res: Response) => {
     res.status(statusCode).json({
       status: ready ? 'ready' : 'not_ready',
       ready,
+      ledger_lag: details.ledger_lag,
+      last_processed_ledger: details.last_processed_ledger,
+      latest_network_ledger: details.latest_network_ledger,
       lastLedger: details.lastLedger,
       cursorAge: details.cursorAge,
       maxCursorAge: details.maxCursorAge,
@@ -132,16 +134,25 @@ app.get('/healthz/ready', (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Unified health endpoint (Issue #695)
+ * Returns { status, ledger_lag, last_processed_ledger, latest_network_ledger }
+ * alongside detailed poller health metrics.
+ */
 app.get('/health', (req: Request, res: Response) => {
   try {
     const health = getPollerHealth();
     const ready = isReady();
+    const healthSummary = getHealthResponse();
     
     const statusCode = (health.isRunning && ready) ? 200 : 503;
     
     res.status(statusCode).json({
       success: statusCode === 200,
-      status: (health.isRunning && ready) ? 'healthy' : 'unhealthy',
+      status: healthSummary.status,
+      ledger_lag: healthSummary.ledger_lag,
+      last_processed_ledger: healthSummary.last_processed_ledger,
+      latest_network_ledger: healthSummary.latest_network_ledger,
       ready,
       poller: {
         isRunning: health.isRunning,
