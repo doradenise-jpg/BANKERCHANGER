@@ -110,4 +110,8 @@ pub enum ContractError {
     // ── Slippage ────────────────────────────────────────────
     /// Computed shares out are below the caller's min_shares_out tolerance
     SlippageExceeded = 61,
+
+    // ── Reserve ────────────────────────────────────────────
+    /// Withdrawal would bring the treasury balance below the configured minimum reserve
+    InsufficientReserve = 62,
 }

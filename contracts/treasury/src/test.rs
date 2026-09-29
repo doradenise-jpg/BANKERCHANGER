@@ -176,3 +176,102 @@ fn test_set_fee_tiers_with_excessive_bps_fails() {
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
 }
+
+// ── Issue #19 — Minimum Reserve Tests ─────────────────────────────────────────
+
+/// Helper that sets up treasury, mints tokens to a market, and deposits fees.
+/// Returns (env, client, admin, market, token).
+fn funded_treasury(
+    fund: i128,
+) -> (Env, TreasuryClient<'static>, Address, Address, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, Treasury);
+    let client = TreasuryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let factory = Address::generate(&env);
+    let market = Address::generate(&env);
+    // Initialize with a large per-tx withdrawal limit so it does not interfere.
+    client.initialize(&admin, &token_addr, &factory, &1_000_000_000_000_i128);
+    client.approve_market(&admin, &market);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_addr).mint(&market, &fund);
+    client.deposit_fees(&market, &token_addr, &fund);
+    (env, client, admin, market, token_addr)
+}
+
+#[test]
+fn test_withdraw_below_reserve_fails() {
+    // Treasury has 500 XLM; reserve is 100 XLM (default = 1_000_000_000 stroops).
+    // Trying to withdraw 401 XLM should fail (500 - 401 = 99 < 100).
+    let fund: i128 = 5_000_000_000; // 500 XLM
+    let (env, client, admin, _market, token) = funded_treasury(fund);
+
+    // Set reserve to 100 XLM explicitly.
+    client.set_minimum_reserve(&admin, &1_000_000_000_i128);
+
+    let dest = Address::generate(&env);
+    // 401 XLM = 4_010_000_000 stroops; leaves 990_000_000 < 1_000_000_000
+    let result = client.try_withdraw_fees(&admin, &token, &4_010_000_000_i128, &dest);
+    assert!(
+        result.is_err(),
+        "withdrawal leaving balance below reserve should fail"
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        Ok(ContractError::InsufficientReserve)
+    );
+}
+
+#[test]
+fn test_withdraw_leaving_exactly_reserve_succeeds() {
+    // Treasury has 500 XLM; reserve is 100 XLM.
+    // Withdrawing exactly 400 XLM leaves balance == reserve — should succeed.
+    let fund: i128 = 5_000_000_000; // 500 XLM
+    let (env, client, admin, _market, token) = funded_treasury(fund);
+
+    client.set_minimum_reserve(&admin, &1_000_000_000_i128); // 100 XLM
+
+    let dest = Address::generate(&env);
+    // 400 XLM = 4_000_000_000 stroops; leaves exactly 1_000_000_000 == reserve
+    client.withdraw_fees(&admin, &token, &4_000_000_000_i128, &dest);
+    assert_eq!(
+        client.get_accumulated_fees(&token),
+        1_000_000_000_i128,
+        "balance after withdrawal should equal the reserve"
+    );
+}
+
+#[test]
+fn test_admin_can_update_minimum_reserve() {
+    let (env, client, admin, _market, token) = funded_treasury(5_000_000_000);
+    // Default reserve is 1_000_000_000 (100 XLM).
+    assert_eq!(client.get_minimum_reserve(), 1_000_000_000_i128);
+
+    // Admin sets reserve to 50 XLM.
+    client.set_minimum_reserve(&admin, &500_000_000_i128);
+    assert_eq!(client.get_minimum_reserve(), 500_000_000_i128);
+}
+
+#[test]
+fn test_non_admin_cannot_set_minimum_reserve() {
+    let (env, client, _admin, _market, _token) = funded_treasury(5_000_000_000);
+    let non_admin = Address::generate(&env);
+    let result = client.try_set_minimum_reserve(&non_admin, &0_i128);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::Unauthorized));
+}
+
+#[test]
+fn test_set_minimum_reserve_to_zero_disables_check() {
+    // With reserve = 0 the admin should be able to withdraw everything.
+    let fund: i128 = 5_000_000_000; // 500 XLM
+    let (env, client, admin, _market, token) = funded_treasury(fund);
+
+    client.set_minimum_reserve(&admin, &0_i128);
+
+    let dest = Address::generate(&env);
+    // Withdraw almost everything (leave 1 XLM for MIN_WITHDRAWAL check to pass)
+    client.withdraw_fees(&admin, &token, &4_990_000_000_i128, &dest);
+    assert_eq!(client.get_accumulated_fees(&token), 10_000_000_i128);
+}

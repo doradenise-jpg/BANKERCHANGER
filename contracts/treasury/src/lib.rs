@@ -46,6 +46,10 @@ const AUDIT_LOG: &str                    = "AUDIT_LOG";                    // Ve
 const AUDIT_NEXT_ID: &str                = "AUDIT_NEXT_ID";                // u64 monotonically increasing
 const FEE_TIERS: &str                    = "FEE_TIERS";                    // Vec<FeeTier>
 const MIN_WITHDRAWAL: i128               = 10_000_000;                     // 1 XLM in stroops
+const MINIMUM_RESERVE: &str              = "MINIMUM_RESERVE";               // i128 minimum balance to retain
+/// Default minimum reserve: 100 XLM in stroops.
+/// Prevents the treasury from being drained to zero while markets have pending payouts.
+const DEFAULT_MINIMUM_RESERVE: i128      = 1_000_000_000;
 
 // ── Action symbols for events ────────────────────────────────────────────────
 const SYM_FEE_WITHDRAW: &str             = "fee_wthdrl";
@@ -172,6 +176,7 @@ impl Treasury {
         env.storage().persistent().set(&FEE_LOCK, &false);
         env.storage().persistent().set(&AUDIT_LOG, &Vec::<AuditEntry>::new(&env));
         env.storage().persistent().set(&AUDIT_NEXT_ID, &0u64);
+        env.storage().persistent().set(&MINIMUM_RESERVE, &DEFAULT_MINIMUM_RESERVE);
 
         let mut default_tiers = Vec::<FeeTier>::new(&env);
         default_tiers.push_back(FeeTier { volume_threshold: 100_000_000, fee_bps: 200 }); // <= 10 XLM: 200 bps (2%)
@@ -328,6 +333,17 @@ impl Treasury {
             return Err(ContractError::InsufficientBalance);
         }
 
+        // ── Minimum Reserve Check ─────────────────────────────────────────────
+        let min_reserve: i128 = env
+            .storage()
+            .persistent()
+            .get(&MINIMUM_RESERVE)
+            .unwrap_or(DEFAULT_MINIMUM_RESERVE);
+        if current - amount < min_reserve {
+            Self::release_fee_lock(&env);
+            return Err(ContractError::InsufficientReserve);
+        }
+
         fees.set(token.clone(), current - amount);
         env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
 
@@ -419,6 +435,30 @@ impl Treasury {
 
     pub fn get_withdrawal_limit(env: Env) -> i128 {
         env.storage().persistent().get(&WITHDRAWAL_LIMIT).unwrap_or(0)
+    }
+
+    /// Sets the minimum reserve the treasury must retain after any withdrawal.
+    /// Only the admin can call this. Set to 0 to disable the check.
+    pub fn set_minimum_reserve(
+        env: Env,
+        admin: Address,
+        reserve: i128,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if reserve < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        env.storage().persistent().set(&MINIMUM_RESERVE, &reserve);
+        Ok(())
+    }
+
+    /// Returns the currently configured minimum reserve amount in stroops.
+    pub fn get_minimum_reserve(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&MINIMUM_RESERVE)
+            .unwrap_or(DEFAULT_MINIMUM_RESERVE)
     }
 
     pub fn set_token_daily_cap(
@@ -582,6 +622,7 @@ impl Treasury {
         env.storage().persistent().extend_ttl(&FEE_LOCK, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&AUDIT_LOG, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&AUDIT_NEXT_ID, 518_400, 518_400);
+        env.storage().persistent().extend_ttl(&MINIMUM_RESERVE, 518_400, 518_400);
     }
 
     pub fn upgrade(
