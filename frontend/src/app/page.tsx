@@ -20,20 +20,17 @@ export default function HomePage(): JSX.Element {
   const searchParams = useSearchParams();
 
   const weightClass = searchParams.get('weight_class') ?? 'All Weight Classes';
-  const status = searchParams.get('status') ?? 'All';
-  const sort = searchParams.get('sort') ?? 'date_desc';
-  const page = Number(searchParams.get('page') ?? '1');
+  const status      = searchParams.get('status')       ?? 'All';
+  const sort        = searchParams.get('sort')         ?? 'date_desc';
+  const search      = searchParams.get('search')       ?? '';
+  const page        = Number(searchParams.get('page') ?? '1');
 
-  const setParam = useCallback(
-    (key: string, value: string | null) => {
+  // Only pagination writes params from this component now; MarketFilters
+  // owns filter params and writes them directly.
+  const setPage = useCallback(
+    (next: number) => {
       const params = new URLSearchParams(searchParams.toString());
-      if (value === null) {
-        params.delete(key);
-      } else {
-        params.set(key, value);
-      }
-      // Reset to page 1 on filter/sort change
-      if (key !== 'page') params.delete('page');
+      params.set('page', String(next));
       router.replace(`?${params.toString()}`);
     },
     [router, searchParams],
@@ -44,6 +41,7 @@ export default function HomePage(): JSX.Element {
       weight_class: weightClass === 'All Weight Classes' ? undefined : weightClass,
       status: status === 'All' ? undefined : status.toLowerCase(),
       sort: sort as 'date_asc' | 'date_desc' | 'pool_desc',
+      search: search || undefined,
     },
     { page, limit: LIMIT },
   );
@@ -58,29 +56,17 @@ export default function HomePage(): JSX.Element {
         <p className="text-gray-400 text-sm mt-1">Decentralized boxing prediction markets on Stellar</p>
       </div>
 
-      {/* Stats Banner */}
       <StatsBanner />
 
-      {/* Filter bar */}
-      <MarketFilters
-        weightClass={weightClass}
-        status={status}
-        sort={sort}
-        onWeightClassChange={(value) =>
-          setParam('weight_class', value === 'All Weight Classes' ? null : value)
-        }
-        onStatusChange={(value) => setParam('status', value === 'All' ? null : value.toLowerCase())}
-        onSortChange={(value) => setParam('sort', value)}
-      />
+      {/* MarketFilters reads and writes URL params directly — no prop wiring needed. */}
+      <MarketFilters />
 
-      {/* Error banner */}
       {error && (
         <p className="text-red-400 text-sm bg-red-900/20 rounded-lg px-4 py-2">
           Failed to load markets: {error.message}
         </p>
       )}
 
-      {/* Market grid */}
       {showSkeleton ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 12 }).map((_, i) => (
@@ -99,12 +85,11 @@ export default function HomePage(): JSX.Element {
         </div>
       )}
 
-      {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-4 pt-2">
           <button
             disabled={page <= 1}
-            onClick={() => setParam('page', String(page - 1))}
+            onClick={() => setPage(page - 1)}
             className="px-4 py-2 text-sm rounded-lg bg-gray-800 text-white disabled:opacity-40 hover:bg-gray-700 disabled:cursor-not-allowed"
           >
             ← Prev
@@ -114,7 +99,7 @@ export default function HomePage(): JSX.Element {
           </span>
           <button
             disabled={page >= totalPages}
-            onClick={() => setParam('page', String(page + 1))}
+            onClick={() => setPage(page + 1)}
             className="px-4 py-2 text-sm rounded-lg bg-gray-800 text-white disabled:opacity-40 hover:bg-gray-700 disabled:cursor-not-allowed"
           >
             Next →
