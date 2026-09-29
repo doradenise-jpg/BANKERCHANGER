@@ -6,6 +6,33 @@
 
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+// ─── Valid Market Categories (Weight Classes) ─────────────────────────────────
+//
+// These are the only values accepted by `create_market` for `fight.weight_class`.
+// Any other value will cause the call to return `ContractError::InvalidCategory`.
+//
+// Off-chain tools (indexer, frontend) rely on this fixed set to display
+// category filters correctly. Storing an arbitrary string in contract storage
+// would cause data inconsistency and break off-chain assumptions.
+
+pub const CATEGORY_HEAVYWEIGHT: &str        = "Heavyweight";
+pub const CATEGORY_CRUISERWEIGHT: &str      = "Cruiserweight";
+pub const CATEGORY_LIGHT_HEAVYWEIGHT: &str  = "Light Heavyweight";
+pub const CATEGORY_SUPER_MIDDLEWEIGHT: &str = "Super Middleweight";
+pub const CATEGORY_MIDDLEWEIGHT: &str       = "Middleweight";
+pub const CATEGORY_SUPER_WELTERWEIGHT: &str = "Super Welterweight";
+pub const CATEGORY_WELTERWEIGHT: &str       = "Welterweight";
+pub const CATEGORY_SUPER_LIGHTWEIGHT: &str  = "Super Lightweight";
+pub const CATEGORY_LIGHTWEIGHT: &str        = "Lightweight";
+pub const CATEGORY_SUPER_FEATHERWEIGHT: &str = "Super Featherweight";
+pub const CATEGORY_FEATHERWEIGHT: &str      = "Featherweight";
+pub const CATEGORY_SUPER_BANTAMWEIGHT: &str = "Super Bantamweight";
+pub const CATEGORY_BANTAMWEIGHT: &str       = "Bantamweight";
+pub const CATEGORY_SUPER_FLYWEIGHT: &str    = "Super Flyweight";
+pub const CATEGORY_FLYWEIGHT: &str          = "Flyweight";
+pub const CATEGORY_LIGHT_FLYWEIGHT: &str    = "Light Flyweight";
+pub const CATEGORY_MINIMUMWEIGHT: &str      = "Minimumweight";
+
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 #[contracttype]
