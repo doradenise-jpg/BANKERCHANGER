@@ -53,7 +53,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@apidevtools/swagger-parser": "^12.1.0",
+    "@apidevtools/swagger-parser": "^13.1.0",
     "@stellar/stellar-sdk": "^15.0.1",
     "@types/bad-words": "^3.0.3",
     "@types/cors": "^2.8.19",
