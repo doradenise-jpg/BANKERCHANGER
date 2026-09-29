@@ -50,7 +50,7 @@ pub enum ContractError {
     BetTooLow = 20,
     /// Transfer amount is insufficient for the requested operation
     InsufficientAmount = 21,
-    /// Bettor has already placed a bet in this market
+    /// Legacy error code retained for compatibility; multiple bets are now allowed
     AlreadyBet = 22,
     /// Bettor has already claimed winnings or refund
     AlreadyClaimed = 23,
@@ -62,6 +62,8 @@ pub enum ContractError {
     BelowMinimum = 26,
     /// Amount must be positive and non-zero
     InvalidAmount = 27,
+    /// Bet would exceed the bettor's configured share of the market pool
+    BetLimitExceeded = 28,
 
     // ── Oracle / Resolution ────────────────────────────────
     /// Oracle signature verification failed

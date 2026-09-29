@@ -102,6 +102,7 @@ impl MarketFactory {
         let default_config = MarketConfig {
             min_bet_amount: config.default_min_bet,
             max_bet: config.default_max_bet,
+            max_bet_share_bps: 2_000,
             fee_bps: config.default_fee_bps,
             lock_before_secs: config.default_lock_before_secs,
             resolution_window: config.default_resolution_window,
@@ -172,6 +173,9 @@ impl MarketFactory {
             return Err(ContractError::BelowMinimum);
         }
         if config.max_bet < config.min_bet_amount {
+            return Err(ContractError::InvalidMarketParameters);
+        }
+        if config.max_bet_share_bps == 0 || config.max_bet_share_bps > 10_000 {
             return Err(ContractError::InvalidMarketParameters);
         }
         // Tier 0 = untiered/default; any positive u32 is valid (e.g. 18, 20, etc.)
@@ -650,6 +654,9 @@ impl MarketFactory {
     ) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        if new_config.max_bet_share_bps == 0 || new_config.max_bet_share_bps > 10_000 {
+            return Err(ContractError::InvalidMarketParameters);
+        }
         env.storage().persistent().set(&DEFAULT_CONFIG, &new_config);
         Ok(())
     }
@@ -775,6 +782,7 @@ mod tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 2_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1004,6 +1012,7 @@ mod scheduled_at_validation_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 2_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1534,6 +1543,7 @@ mod task12_factory_market_integrity_tests {
         let valid_config = MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 2_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
