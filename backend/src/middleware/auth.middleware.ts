@@ -21,12 +21,21 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
 
     const userId = payload.sub as string;
     const sessionVersion: number = payload.sv ?? 0;
+    const passwordVersion: number | undefined = payload.password_version ?? payload.pv;
 
-    const revoked = await authService.isSessionRevoked(userId, sessionVersion);
+    const revoked = await authService.isSessionRevoked(userId, sessionVersion, passwordVersion);
     if (revoked) throw new AppError(401, 'Session has been invalidated');
+
+    if (passwordVersion !== undefined) {
+      const stale = await authService.isPasswordVersionStale(userId, passwordVersion);
+      if (stale) throw new AppError(401, 'Session has been invalidated');
+    }
 
     (req as unknown as Record<string, unknown>).userId = userId;
     (req as unknown as Record<string, unknown>).sessionVersion = sessionVersion;
+    if (passwordVersion !== undefined) {
+      (req as unknown as Record<string, unknown>).passwordVersion = passwordVersion;
+    }
     next();
   } catch (err) {
     next(err instanceof AppError ? err : new AppError(401, 'Invalid or expired token'));

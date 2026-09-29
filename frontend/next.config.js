@@ -1,4 +1,10 @@
 /** @type {import('next').NextConfig} */
+if (!process.env.NEXT_PUBLIC_API_URL) {
+  throw new Error(
+    'NEXT_PUBLIC_API_URL must be set. See frontend/.env.example for details.',
+  );
+}
+
 const nextConfig = {
   async headers() {
     const cspHeader = `

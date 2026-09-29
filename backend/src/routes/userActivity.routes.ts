@@ -64,9 +64,33 @@ const router = Router();
  *       422:
  *         description: Validation error
  */
+import jwt from 'jsonwebtoken';
+import { getEnv } from '../config/env';
+
+export const PRIVATE_ACTIONS = new Set([
+  'login',
+  'logout',
+  '2fa_enabled',
+  '2fa_disabled',
+  'password_change',
+  'failed_login',
+  'session_revoked',
+]);
+
+/** Determine whether an activity action is public or private (Issue #684) */
+export function getActivityVisibility(action: string): 'public' | 'private' {
+  return PRIVATE_ACTIONS.has(action) ? 'private' : 'public';
+}
+
+/**
+ * @swagger
+ * /api/v1/user-activity:
+ *   get:
+ *     summary: Get user activity log with privacy filtering (Issue #684)
+ *     tags: [UserActivity]
+ */
 router.get(
   '/',
-  requireAuth,
   validate(getUserActivityQuery, 'query'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -79,23 +103,87 @@ router.get(
         limit: number;
       };
 
-      // Placeholder: In production, query from audit_logs or user_activity table
-      const activities = [
+      // Determine authenticated user from Bearer token if present
+      let authenticatedUserId: string | null = (req as any).user?.id || (req as any).userId || null;
+      const authHeader = req.headers.authorization;
+      if (!authenticatedUserId && authHeader?.startsWith('Bearer ')) {
+        try {
+          const token = authHeader.slice(7);
+          const env = getEnv();
+          const payload = jwt.verify(token, env.JWT_ACCESS_SECRET || env.JWT_SECRET) as any;
+          authenticatedUserId = payload.sub || payload.userId || null;
+        } catch {
+          // Unauthenticated or expired token
+        }
+      }
+
+      const targetUserId = query.userId || 'system';
+      const isOwnerOrAdmin =
+        authenticatedUserId !== null &&
+        (authenticatedUserId === targetUserId || (req as any).user?.role === 'admin');
+
+      // Sample activity events tagged with visibility: 'public' | 'private'
+      const allActivities = [
         {
           id: '1',
-          userId: query.userId || 'system',
-          action: query.action || 'login',
-          timestamp: new Date().toISOString(),
+          userId: targetUserId,
+          action: 'bet_placed',
+          visibility: 'public' as const,
+          timestamp: new Date(Date.now() - 3600_000).toISOString(),
+          metadata: { amount: 100, marketId: 'mkt-1' },
+        },
+        {
+          id: '2',
+          userId: targetUserId,
+          action: 'login',
+          visibility: 'private' as const,
+          timestamp: new Date(Date.now() - 1800_000).toISOString(),
           metadata: { ip: req.ip, userAgent: req.headers['user-agent'] },
+        },
+        {
+          id: '3',
+          userId: targetUserId,
+          action: '2fa_enabled',
+          visibility: 'private' as const,
+          timestamp: new Date(Date.now() - 1200_000).toISOString(),
+          metadata: { method: 'totp' },
+        },
+        {
+          id: '4',
+          userId: targetUserId,
+          action: 'bet_claimed',
+          visibility: 'public' as const,
+          timestamp: new Date().toISOString(),
+          metadata: { payout: 185 },
         },
       ];
 
+      // If specific action is requested, tag it dynamically
+      let filtered = allActivities;
+      if (query.action) {
+        filtered = [
+          {
+            id: 'custom-1',
+            userId: targetUserId,
+            action: query.action,
+            visibility: getActivityVisibility(query.action),
+            timestamp: new Date().toISOString(),
+            metadata: {},
+          },
+        ];
+      }
+
+      // Filter: Unauthenticated or non-owner requests receive ONLY public events
+      if (!isOwnerOrAdmin) {
+        filtered = filtered.filter((act) => act.visibility === 'public');
+      }
+
       res.json({
-        data: activities,
+        data: filtered,
         pagination: {
           page: query.page,
           limit: query.limit,
-          total: activities.length,
+          total: filtered.length,
           totalPages: 1,
         },
       });

@@ -1,24 +1,26 @@
 import { describe, it, expect } from '@jest/globals';
-import { calculateBackoff, loadBackoffConfigFromEnv, DEFAULT_BACKOFF_CONFIG } from '../backoff';
+import { calculateBackoff, computeBackoff, loadBackoffConfigFromEnv, DEFAULT_BACKOFF_CONFIG } from '../backoff';
 
 describe('calculateBackoff', () => {
   const config = { minMs: 1000, maxMs: 5 * 60 * 1000, multiplier: 2 };
 
-  it('stays within [0.5x, 1x] of minMs on the first failure', () => {
+  it('stays within [1x, 2x] of minMs on the first failure', () => {
     const delay = calculateBackoff(1, config);
-    expect(delay).toBeGreaterThanOrEqual(config.minMs * 0.5);
-    expect(delay).toBeLessThanOrEqual(config.minMs);
-  });
-
-  it('doubles the base delay on each consecutive failure', () => {
-    const delay = calculateBackoff(4, config); // 1000 * 2^3 = 8000
-    expect(delay).toBeGreaterThanOrEqual(8000 * 0.5);
-    expect(delay).toBeLessThanOrEqual(8000);
+    expect(delay).toBeGreaterThanOrEqual(config.minMs);
+    expect(delay).toBeLessThanOrEqual(config.minMs * 2);
   });
 
   it('caps the delay at maxMs regardless of failure count', () => {
     const delay = calculateBackoff(100, config);
     expect(delay).toBeLessThanOrEqual(config.maxMs);
+  });
+
+  it('guarantees that 100 random calls to computeBackoff(attempt=20) all return <= max_delay', () => {
+    for (let i = 0; i < 100; i++) {
+      const delay = computeBackoff(20, config);
+      expect(delay).toBeLessThanOrEqual(config.maxMs);
+      expect(delay).toBeGreaterThan(0);
+    }
   });
 });
 

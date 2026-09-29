@@ -9,6 +9,7 @@ updates:
       day: "monday"
     labels:
       - "dependencies"
+      - "security"
     reviewers:
       - "doradenise-jpg"
     open-pull-requests-limit: 10
@@ -17,6 +18,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      security:
+        patterns:
+          - "*security*"
+        update-types:
+          - "patch"
+    auto-merge: true
+    auto-merge-limit: 5
 
   # Frontend npm dependencies
   - package-ecosystem: "npm"
@@ -26,6 +34,7 @@ updates:
       day: "monday"
     labels:
       - "dependencies"
+      - "security"
     reviewers:
       - "doradenise-jpg"
     open-pull-requests-limit: 10
@@ -34,6 +43,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      security:
+        patterns:
+          - "*security*"
+        update-types:
+          - "patch"
+    auto-merge: true
+    auto-merge-limit: 5
 
   # Indexer npm dependencies
   - package-ecosystem: "npm"
@@ -43,6 +59,7 @@ updates:
       day: "monday"
     labels:
       - "dependencies"
+      - "security"
     reviewers:
       - "doradenise-jpg"
     open-pull-requests-limit: 5
@@ -51,6 +68,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      security:
+        patterns:
+          - "*security*"
+        update-types:
+          - "patch"
+    auto-merge: true
+    auto-merge-limit: 3
 
   # Rust / Cargo dependencies (Soroban contracts)
   - package-ecosystem: "cargo"
@@ -60,9 +84,19 @@ updates:
       day: "monday"
     labels:
       - "dependencies"
+      - "security"
     reviewers:
       - "doradenise-jpg"
     open-pull-requests-limit: 5
+    auto-merge:
+      enabled: true
+      update-types:
+        - "minor"
+        - "patch"
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -72,5 +106,6 @@ updates:
     labels:
       - "dependencies"
       - "ci-cd"
+      - "security"
     reviewers:
       - "doradenise-jpg"

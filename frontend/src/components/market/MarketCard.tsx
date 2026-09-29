@@ -13,9 +13,10 @@ import { ScheduledTimeDisplay } from '../ui/ScheduledTimeDisplay';
 
 interface MarketCardProps {
   market: Market;
+  isNew?: boolean;
 }
 
-export function MarketCard({ market }: MarketCardProps): JSX.Element {
+export function MarketCard({ market, isNew = false }: MarketCardProps): JSX.Element {
   const totalXlm = Math.floor(parseInt(market.total_pool, 10) / 1e7).toLocaleString();
 
   return (
@@ -33,6 +34,11 @@ export function MarketCard({ market }: MarketCardProps): JSX.Element {
       {/* Badges */}
       <div className="flex flex-wrap items-center gap-2">
         <MarketStatusBadge status={market.status} />
+        {isNew && (
+          <span className="text-xs text-green-300 bg-green-400/10 px-2 py-0.5 rounded-full">
+            New!
+          </span>
+        )}
         <span className="text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded-full">{market.weight_class}</span>
         {market.title_fight && (
           <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-full">🏆 Title Fight</span>

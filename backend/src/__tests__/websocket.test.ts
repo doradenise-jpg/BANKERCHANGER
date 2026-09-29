@@ -17,6 +17,14 @@ function makeToken(sub = 'test-user'): string {
   return jwt.sign({ sub, type: 'access' }, JWT_SECRET);
 }
 
+function makeActivityFeedToken(): string {
+  return jwt.sign({
+    sub: 'public-market-feed',
+    type: 'ws_activity',
+    scope: 'market_activity:read',
+  }, JWT_SECRET, { expiresIn: '5m' });
+}
+
 /** Open a WS connection and wait for the socket to be ready. */
 function connect(port: number): Promise<WebSocket> {
   return new Promise((resolve) => {
@@ -149,6 +157,30 @@ describe('WebSocket security — ActivityFeed', () => {
     ws.close();
   }, 5000);
 
+  it('broadcasts market:created events to global market subscribers', async () => {
+    const ws = await connect(port);
+    ws.send(JSON.stringify({ type: 'auth', token: makeActivityFeedToken() }));
+    await new Promise((r) => setImmediate(r));
+    ws.send(JSON.stringify({ type: 'subscribe_market_created' }));
+    await new Promise((r) => setImmediate(r));
+
+    const messagePromise = collectMessages(ws, 1);
+    feed.publishMarketCreated({
+      type: 'market:created',
+      marketId: 'new-market-001',
+      fighterA: 'Fighter A',
+      fighterB: 'Fighter B',
+    });
+
+    await expect(messagePromise).resolves.toEqual([{
+      type: 'market:created',
+      marketId: 'new-market-001',
+      fighterA: 'Fighter A',
+      fighterB: 'Fighter B',
+    }]);
+    ws.close();
+  }, 5000);
+
   // ── Memory leak: subscription cleanup on disconnect ───────────────────────
 
   it('removes all subscriptions from internal maps on disconnect', async () => {
@@ -202,6 +234,32 @@ describe('WebSocket security — ActivityFeed', () => {
     });
 
     expect(closedCode).toBe(4001);
+  }, 5000);
+
+  it('limits activity-feed tokens to market activity subscriptions', async () => {
+    const ws = await connect(port);
+    ws.send(JSON.stringify({ type: 'auth', token: makeActivityFeedToken() }));
+    await new Promise((r) => setImmediate(r));
+
+    const messagesPromise = collectMessages(ws, 2);
+    ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'resolved-market' }));
+    ws.send(JSON.stringify({ type: 'subscribe_leaderboard' }));
+    await new Promise((r) => setTimeout(r, 50));
+    feed.publish({ type: 'resolved', marketId: 'resolved-market', winningOutcomeId: 'fighter_a' });
+
+    const messages = await messagesPromise;
+    expect(messages).toContainEqual({
+      type: 'error',
+      code: 403,
+      message: 'INSUFFICIENT_SCOPE',
+    });
+    expect(messages).toContainEqual({
+      type: 'resolved',
+      marketId: 'resolved-market',
+      winningOutcomeId: 'fighter_a',
+    });
+
+    ws.close();
   }, 5000);
 
   // ── Auth timeout ───────────────────────────────────────────────────────────

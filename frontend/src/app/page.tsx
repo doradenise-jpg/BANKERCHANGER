@@ -39,7 +39,7 @@ export default function HomePage(): JSX.Element {
     [router, searchParams],
   );
 
-  const { markets, total, isLoading, error } = useMarkets(
+  const { markets, newMarketIds, total, isLoading, error } = useMarkets(
     {
       weight_class: weightClass === 'All Weight Classes' ? undefined : weightClass,
       status: status === 'All' ? undefined : status.toLowerCase(),
@@ -94,7 +94,7 @@ export default function HomePage(): JSX.Element {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {markets.map((m) => (
-            <MarketCard key={m.market_id} market={m} />
+            <MarketCard key={m.market_id} market={m} isNew={newMarketIds.has(m.market_id)} />
           ))}
         </div>
       )}

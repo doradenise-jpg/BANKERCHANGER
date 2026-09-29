@@ -10,13 +10,16 @@
  *  4. Filter by "Open" status shows only open markets
  */
 
-import { test, expect, Page } from '@playwright/test';
+import { afterAll, test, expect, Page } from '@playwright/test';
+import { cleanupE2eData } from './cleanup';
+
+afterAll(cleanupE2eData);
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const OPEN_MARKET = {
-  market_id: 'mkt-open-1',
-  match_id: 'match-open-1',
+  market_id: 'e2e_test_mkt-open-1',
+  match_id: 'e2e_test_match-open-1',
   fighter_a: 'Canelo Alvarez',
   fighter_b: 'Gennady Golovkin',
   weight_class: 'Super Middleweight',
@@ -37,8 +40,8 @@ const OPEN_MARKET = {
 
 const RESOLVED_MARKET = {
   ...OPEN_MARKET,
-  market_id: 'mkt-resolved-1',
-  match_id: 'match-resolved-1',
+  market_id: 'e2e_test_mkt-resolved-1',
+  match_id: 'e2e_test_match-resolved-1',
   fighter_a: 'Anthony Joshua',
   fighter_b: 'Tyson Fury',
   weight_class: 'Heavyweight',

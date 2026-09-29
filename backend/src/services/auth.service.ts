@@ -60,17 +60,47 @@ async function sendVerificationEmail(email: string, token: string, url: string):
 // ---------------------------------------------------------------------------
 // JWT helpers
 // ---------------------------------------------------------------------------
-function signAccess(userId: string, sessionVersion: number, role?: string): string {
+function signAccess(
+  userId: string,
+  sessionVersion: number,
+  role?: string,
+  passwordVersion: number = 0,
+): string {
   return jwt.sign(
-    { sub: userId, type: 'access', sv: sessionVersion, ...(role && { role }) },
+    {
+      sub: userId,
+      type: 'access',
+      sv: sessionVersion,
+      password_version: passwordVersion,
+      pv: passwordVersion,
+      ...(role && { role }),
+    },
     JWT_ACCESS_SECRET,
     { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions,
   );
 }
 
+export function createActivityFeedToken(): string {
+  return jwt.sign(
+    {
+      sub: 'public-market-feed',
+      type: 'ws_activity',
+      scope: 'market_activity:read',
+    },
+    JWT_ACCESS_SECRET,
+    { expiresIn: '5m' } as jwt.SignOptions,
+  );
+}
+
 function signRefresh(userId: string, sessionVersion: number): string {
   return jwt.sign(
-    { sub: userId, type: 'refresh', sv: sessionVersion },
+    {
+      sub: userId,
+      type: 'refresh',
+      sv: sessionVersion,
+      password_version: passwordVersion,
+      pv: passwordVersion,
+    },
     JWT_REFRESH_SECRET,
     { expiresIn: REFRESH_EXPIRES_IN } as jwt.SignOptions,
   );
@@ -140,13 +170,56 @@ async function blockOldSessions(userId: string, oldVersion: number): Promise<voi
 }
 
 /**
- * Returns true when the session version carried in a token has been revoked.
+ * Key pattern: `password_version:blocked:${userId}:${passwordVersion}`
+ * Blocks in-flight tokens carrying older password versions immediately upon password change.
+ */
+export async function blockOldPasswordVersions(userId: string, oldPasswordVersion: number): Promise<void> {
+  const SEVEN_DAYS = 7 * 24 * 60 * 60;
+  for (let v = 0; v <= oldPasswordVersion; v++) {
+    await redis.set(`password_version:blocked:${userId}:${v}`, '1', 'EX', SEVEN_DAYS);
+  }
+}
+
+/**
+ * Checks whether a token's password version is stale compared to user's current version (Issue #685).
+ */
+export async function isPasswordVersionStale(userId: string, tokenPasswordVersion?: number): Promise<boolean> {
+  const pv = tokenPasswordVersion ?? 0;
+  const key = `password_version:blocked:${userId}:${pv}`;
+  const blocked = await redis.get(key);
+  if (blocked !== null) return true;
+
+  try {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+    if (!user) return true;
+    const currentVersion = (user as any).password_version ?? 0;
+    return pv < currentVersion;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true when the session version or password version carried in a token has been revoked.
  * Call this in your auth middleware after verifying the JWT signature.
  */
-export async function isSessionRevoked(userId: string, sessionVersion: number): Promise<boolean> {
+export async function isSessionRevoked(
+  userId: string,
+  sessionVersion: number,
+  passwordVersion?: number,
+): Promise<boolean> {
   const key = `session:blocked:${userId}:${sessionVersion}`;
   const val = await redis.get(key);
-  return val !== null;
+  if (val !== null) return true;
+
+  if (passwordVersion !== undefined) {
+    const stale = await isPasswordVersionStale(userId, passwordVersion);
+    if (stale) return true;
+  }
+
+  return false;
 }
 
 /**
@@ -259,8 +332,9 @@ export async function login(
     return { requires2FA: true, tempToken: signTemp(user.id) };
   }
 
-  const accessToken = signAccess(user.id, user.session_version, user.role === 'admin' ? 'admin' : undefined);
-  const refreshToken = signRefresh(user.id, user.session_version);
+  const pv = (user as any).password_version ?? 0;
+  const accessToken = signAccess(user.id, user.session_version, user.role === 'admin' ? 'admin' : undefined, pv);
+  const refreshToken = signRefresh(user.id, user.session_version, pv);
   await storeRefreshToken(refreshToken);
 
   return { accessToken, refreshToken };
@@ -277,8 +351,9 @@ export async function refreshAccessToken(refreshToken: string): Promise<{ access
   const payload = verifyJwt(refreshToken, 'refresh');
   const userId = payload.sub as string;
   const sessionVersion: number = payload.sv ?? 0;
+  const passwordVersion: number | undefined = payload.password_version ?? payload.pv;
 
-  const revoked = await isSessionRevoked(userId, sessionVersion);
+  const revoked = await isSessionRevoked(userId, sessionVersion, passwordVersion);
   if (revoked) throw new AppError(401, 'Session has been invalidated');
 
   const active = await isRefreshTokenActive(refreshToken);
@@ -289,8 +364,9 @@ export async function refreshAccessToken(refreshToken: string): Promise<{ access
   });
   if (!user) throw new AppError(401, 'Invalid session');
 
+  const pv = (user as any).password_version ?? 0;
   return {
-    accessToken: signAccess(userId, sessionVersion, user.role === 'admin' ? 'admin' : undefined),
+    accessToken: signAccess(userId, sessionVersion, user.role === 'admin' ? 'admin' : undefined, pv),
   };
 }
 
@@ -411,18 +487,61 @@ export async function resetPassword(token: string, newPassword: string): Promise
   // 5. Hash the new password
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
-  // 6. Invalidate all existing sessions by bumping the session version
+  // 6. Invalidate all existing sessions by bumping the session version and password version (Issue #685)
   const oldVersion = user.session_version;
   const newVersion = oldVersion + 1;
+  const oldPasswordVersion = (user as any).password_version ?? 0;
+  const newPasswordVersion = oldPasswordVersion + 1;
 
   await db.update(users).set({
     password_hash: passwordHash,
     session_version: newVersion,
+    password_version: newPasswordVersion,
     updated_at: new Date(),
   }).where(eq(users.id, userId));
 
   // 7. Write tombstones to Redis so in-flight tokens are rejected immediately
   await blockOldSessions(userId, oldVersion);
+  await blockOldPasswordVersions(userId, oldPasswordVersion);
+}
+
+/**
+ * Changes user password, bumps password_version and session_version, invalidating all sessions (Issue #685).
+ */
+export async function changePassword(
+  userId: string,
+  oldPassword: string,
+  newPassword: string,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+  });
+  if (!user) throw new AppError(404, 'User not found');
+
+  const passwordValid = await bcrypt.compare(oldPassword, user.password_hash);
+  if (!passwordValid) throw new AppError(401, 'Invalid current password');
+
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+  const oldSessionVersion = user.session_version ?? 0;
+  const newSessionVersion = oldSessionVersion + 1;
+  const oldPasswordVersion = (user as any).password_version ?? 0;
+  const newPasswordVersion = oldPasswordVersion + 1;
+
+  await db.update(users).set({
+    password_hash: passwordHash,
+    session_version: newSessionVersion,
+    password_version: newPasswordVersion,
+    updated_at: new Date(),
+  }).where(eq(users.id, userId));
+
+  await blockOldSessions(userId, oldSessionVersion);
+  await blockOldPasswordVersions(userId, oldPasswordVersion);
+
+  const accessToken = signAccess(userId, newSessionVersion, user.role === 'admin' ? 'admin' : undefined, newPasswordVersion);
+  const refreshToken = signRefresh(userId, newSessionVersion, newPasswordVersion);
+  await storeRefreshToken(refreshToken);
+
+  return { accessToken, refreshToken };
 }
 
 // ---------------------------------------------------------------------------
@@ -505,8 +624,9 @@ export async function verify2FA(
   const secret = decrypt(user.two_factor_secret);
   if (!verifyToken(secret, otp)) throw new AppError(401, 'Invalid or expired OTP');
 
-  const accessToken = signAccess(userId, user.session_version, user.role === 'admin' ? 'admin' : undefined);
-  const refreshToken = signRefresh(userId, user.session_version);
+  const pv = (user as any).password_version ?? 0;
+  const accessToken = signAccess(userId, user.session_version, user.role === 'admin' ? 'admin' : undefined, pv);
+  const refreshToken = signRefresh(userId, user.session_version, pv);
   await storeRefreshToken(refreshToken);
 
   return { accessToken, refreshToken };

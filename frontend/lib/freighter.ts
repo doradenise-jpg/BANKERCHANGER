@@ -30,11 +30,30 @@ function getFreighter(): any {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Returns true if the Freighter extension is present in the browser.
+ * Returns true if the Freighter extension is installed and available in the browser.
  * Safe to call server-side (returns false).
  */
-export function isFreighterAvailable(): boolean {
+export function isFreighterInstalled(): boolean {
   return getFreighter() !== null;
+}
+
+export const isFreighterAvailable = isFreighterInstalled;
+
+/**
+ * Checks if Freighter is connected and authorized.
+ * Safely guards against Freighter not being installed without throwing TypeError.
+ */
+export async function isConnected(): Promise<boolean> {
+  const freighter = getFreighter();
+  if (!freighter) return false;
+  try {
+    if (typeof freighter.isConnected === 'function') {
+      return await freighter.isConnected();
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -43,9 +62,11 @@ export function isFreighterAvailable(): boolean {
  * Throws if the user rejects the connection request.
  */
 export async function connectFreighter(): Promise<string> {
-  const freighter = getFreighter();
-  if (!freighter) throw new FreighterNotInstalledError();
+  if (!isFreighterInstalled()) {
+    throw new FreighterNotInstalledError();
+  }
 
+  const freighter = getFreighter();
   await freighter.requestAccess();
   const { publicKey } = await freighter.getPublicKey();
   return publicKey;
@@ -60,9 +81,11 @@ export async function connectFreighter(): Promise<string> {
  * @returns Signed transaction XDR string
  */
 export async function signTransaction(xdr: string): Promise<string> {
-  const freighter = getFreighter();
-  if (!freighter) throw new FreighterNotInstalledError();
+  if (!isFreighterInstalled()) {
+    throw new FreighterNotInstalledError();
+  }
 
+  const freighter = getFreighter();
   const result = await freighter.signTransaction(xdr, {
     networkPassphrase: NETWORK_PASSPHRASE,
   });

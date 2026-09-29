@@ -38,7 +38,7 @@ function getDb(): Database.Database {
   // Enable WAL mode for better performance
   dbInstance.pragma('journal_mode = WAL');
 
-  // Initialize tables
+  // Initialize tables (Migration #697)
   dbInstance.exec(`
     CREATE TABLE IF NOT EXISTS invoices (
       id TEXT PRIMARY KEY,
@@ -48,9 +48,56 @@ function getDb(): Database.Database {
       due_date TEXT,
       status TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS indexer_cursor (
+      id TEXT PRIMARY KEY DEFAULT 'current_cursor',
+      paging_token TEXT,
+      last_ledger INTEGER,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   return dbInstance;
+}
+
+/**
+ * Persists event inserts and cursor update together within a single atomic database transaction.
+ * Ensures no partial state or duplicate processing on restart (#697).
+ */
+export function saveEventsAndCursorAtomic(
+  events: any[],
+  cursorData: { pagingToken: string; lastLedger?: number },
+): void {
+  const database = getDb();
+  const tx = database.transaction(() => {
+    for (const inv of events) {
+      database.prepare(`
+        INSERT INTO invoices (id, freelancer, payer, amount, due_date, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          freelancer = excluded.freelancer,
+          payer = excluded.payer,
+          amount = excluded.amount,
+          due_date = excluded.due_date,
+          status = excluded.status
+      `).run(inv.id, inv.freelancer, inv.payer, inv.amount, inv.due_date, inv.status);
+    }
+
+    database.prepare(`
+      INSERT INTO indexer_cursor (id, paging_token, last_ledger, updated_at)
+      VALUES ('current_cursor', ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        paging_token = excluded.paging_token,
+        last_ledger = excluded.last_ledger,
+        updated_at = excluded.updated_at
+    `).run(
+      cursorData.pagingToken,
+      cursorData.lastLedger ?? null,
+      new Date().toISOString(),
+    );
+  });
+
+  tx();
 }
 
 export function getDatabase(): Database.Database {
@@ -66,8 +113,18 @@ export const db = new Proxy({} as Database.Database, {
   },
 });
 
-// Async cursor persistence using file system
+// Async cursor persistence using database (with file system backup)
 export async function getCursor(): Promise<string | null> {
+  try {
+    const database = getDb();
+    const row = database.prepare('SELECT paging_token FROM indexer_cursor WHERE id = ?').get('current_cursor') as any;
+    if (row?.paging_token) {
+      return row.paging_token;
+    }
+  } catch {
+    // Fall back to file if table read fails
+  }
+
   try {
     const data = await fs.readFile(cursorFilePath, 'utf-8');
     const parsed = JSON.parse(data);
@@ -82,17 +139,32 @@ export async function getCursor(): Promise<string | null> {
 }
 
 export async function saveCursor(pagingToken: string, lastLedger?: number): Promise<void> {
-  try {
-    // Preserve lastLedger from a prior save when the caller doesn't supply one,
-    // so cursor and ledger-continuity tracking never drift apart on partial writes.
-    let existingLedger: number | undefined;
-    if (lastLedger === undefined) {
-      existingLedger = (await getLastKnownLedger()) ?? undefined;
-    }
+  // Preserve lastLedger from prior save if not supplied
+  let existingLedger: number | undefined;
+  if (lastLedger === undefined) {
+    existingLedger = (await getLastKnownLedger()) ?? undefined;
+  }
 
+  const effectiveLedger = lastLedger ?? existingLedger ?? null;
+
+  try {
+    const database = getDb();
+    database.prepare(`
+      INSERT INTO indexer_cursor (id, paging_token, last_ledger, updated_at)
+      VALUES ('current_cursor', ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        paging_token = excluded.paging_token,
+        last_ledger = excluded.last_ledger,
+        updated_at = excluded.updated_at
+    `).run(pagingToken, effectiveLedger, new Date().toISOString());
+  } catch (dbErr) {
+    console.error('Failed to save cursor to SQLite table:', dbErr);
+  }
+
+  try {
     const cursorData = {
       paging_token: pagingToken,
-      last_ledger: lastLedger ?? existingLedger ?? null,
+      last_ledger: effectiveLedger,
       updated_at: new Date().toISOString(),
     };
     await fs.writeFile(cursorFilePath, JSON.stringify(cursorData, null, 2), 'utf-8');
@@ -104,6 +176,16 @@ export async function saveCursor(pagingToken: string, lastLedger?: number): Prom
 
 /** Last ledger sequence that was successfully processed and persisted, used to detect re-orgs and gaps across restarts. */
 export async function getLastKnownLedger(): Promise<number | null> {
+  try {
+    const database = getDb();
+    const row = database.prepare('SELECT last_ledger FROM indexer_cursor WHERE id = ?').get('current_cursor') as any;
+    if (typeof row?.last_ledger === 'number') {
+      return row.last_ledger;
+    }
+  } catch {
+    // Fall back to file
+  }
+
   try {
     const data = await fs.readFile(cursorFilePath, 'utf-8');
     const parsed = JSON.parse(data);

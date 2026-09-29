@@ -27,6 +27,12 @@ const verifySchema = z.object({
   otp: z.string().min(1),
 });
 
+router.post('/activity-feed-token', (_req: Request, res: Response) => {
+  res
+    .set('Cache-Control', 'no-store')
+    .json({ accessToken: authService.createActivityFeedToken() });
+});
+
 // ---------------------------------------------------------------------------
 // POST /auth/login
 // ---------------------------------------------------------------------------

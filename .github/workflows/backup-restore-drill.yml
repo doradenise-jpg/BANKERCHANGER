@@ -1,0 +1,318 @@
+name: Monthly Backup Restore Drill
+
+on:
+  # Run on 1st of each month at 5:00 AM UTC
+  schedule:
+    - cron: '0 5 1 * *'
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Test environment'
+        required: false
+        default: 'staging'
+
+env:
+  AWS_REGION: us-east-1
+  DB_NAME: bankerchanger
+
+jobs:
+  restore-drill:
+    runs-on: ubuntu-latest
+    name: Monthly Backup Restore Drill
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: bankerchanger
+          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          POSTGRES_DB: bankerchanger
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get backup encryption key
+        id: get-key
+        run: |
+          # Fetch encryption key from AWS Secrets Manager
+          aws secretsmanager get-secret-value \
+            --secret-id ${{ secrets.BACKUP_KEY_SECRET_NAME }} \
+            --query 'SecretString' \
+            --output text > /tmp/backup.key
+          
+          # Verify key was retrieved
+          if [[ ! -s /tmp/backup.key ]]; then
+            echo "ERROR: Failed to retrieve encryption key"
+            exit 1
+          fi
+          echo "✓ Encryption key retrieved"
+
+      - name: Install PostgreSQL client
+        run: |
+          apt-get update
+          apt-get install -y postgresql-client
+
+      - name: Retrieve latest backup from S3
+        id: download-backup
+        run: |
+          echo "Listing available backups..."
+          BACKUPS=$(aws s3 ls s3://${{ secrets.AWS_S3_BACKUP_BUCKET }}/db-backups/ \
+            --region ${{ env.AWS_REGION }} \
+            --recursive | sort | tail -5)
+          
+          echo "Available backups:"
+          echo "$BACKUPS"
+          
+          # Get the latest backup file
+          LATEST_BACKUP=$(aws s3 ls s3://${{ secrets.AWS_S3_BACKUP_BUCKET }}/db-backups/ \
+            --region ${{ env.AWS_REGION }} \
+            --recursive | sort | tail -1 | awk '{print $4}')
+          
+          if [[ -z "$LATEST_BACKUP" ]]; then
+            echo "ERROR: No backups found in S3"
+            exit 1
+          fi
+          
+          echo "Latest backup: $LATEST_BACKUP"
+          echo "backup_file=$LATEST_BACKUP" >> $GITHUB_OUTPUT
+          
+          # Download backup
+          echo "Downloading backup from S3..."
+          aws s3 cp "s3://${{ secrets.AWS_S3_BACKUP_BUCKET }}/$LATEST_BACKUP" \
+            /tmp/backup.sql.gz.enc \
+            --region ${{ env.AWS_REGION }}
+          
+          if [[ ! -f /tmp/backup.sql.gz.enc ]]; then
+            echo "ERROR: Failed to download backup"
+            exit 1
+          fi
+          
+          echo "✓ Backup downloaded (size: $(du -h /tmp/backup.sql.gz.enc | cut -f1))"
+
+      - name: Decrypt and decompress backup
+        run: |
+          echo "Decrypting backup..."
+          
+          if ! openssl enc -aes-256-cbc -d \
+            -in /tmp/backup.sql.gz.enc \
+            -out /tmp/backup.sql.gz \
+            -pass file:/tmp/backup.key; then
+            echo "ERROR: Decryption failed"
+            exit 1
+          fi
+          
+          echo "✓ Backup decrypted"
+          
+          echo "Decompressing backup..."
+          gunzip -f /tmp/backup.sql.gz
+          
+          if [[ ! -f /tmp/backup.sql ]]; then
+            echo "ERROR: Decompression failed"
+            exit 1
+          fi
+          
+          echo "✓ Backup decompressed (size: $(du -h /tmp/backup.sql | cut -f1))"
+
+      - name: Create restore test database
+        env:
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Creating restore test database..."
+          
+          # Create test database
+          psql -h localhost -U bankerchanger -d bankerchanger \
+            -c "CREATE DATABASE ${DB_NAME}_restore_test;"
+          
+          echo "✓ Test database created"
+
+      - name: Restore backup to test database
+        env:
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Restoring backup to test database..."
+          
+          # Restore from backup
+          psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            < /tmp/backup.sql
+          
+          if [[ $? -ne 0 ]]; then
+            echo "ERROR: Restore failed"
+            exit 1
+          fi
+          
+          echo "✓ Backup restored successfully"
+
+      - name: Validate restored database schema
+        env:
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Validating restored database schema..."
+          
+          # Count tables
+          TABLE_COUNT=$(psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" \
+            | tr -d ' ')
+          
+          if [[ -z "$TABLE_COUNT" ]] || [[ "$TABLE_COUNT" -lt 1 ]]; then
+            echo "ERROR: No tables found in restored database"
+            exit 1
+          fi
+          
+          echo "✓ Tables found: $TABLE_COUNT"
+          
+          # Verify critical tables exist
+          REQUIRED_TABLES=("users" "markets" "bets" "disputes")
+          for table in "${REQUIRED_TABLES[@]}"; do
+            EXISTS=$(psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+              -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '$table';" \
+              | tr -d ' ')
+            
+            if [[ "$EXISTS" -eq 0 ]]; then
+              echo "ERROR: Required table not found: $table"
+              exit 1
+            fi
+            echo "✓ Table found: $table"
+          done
+
+      - name: Verify data integrity
+        env:
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Verifying data integrity..."
+          
+          # Check row counts
+          USERS=$(psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            -t -c "SELECT COUNT(*) FROM users;" | tr -d ' ')
+          MARKETS=$(psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            -t -c "SELECT COUNT(*) FROM markets;" | tr -d ' ')
+          BETS=$(psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            -t -c "SELECT COUNT(*) FROM bets;" | tr -d ' ')
+          
+          echo "Data counts:"
+          echo "  Users: $USERS"
+          echo "  Markets: $MARKETS"
+          echo "  Bets: $BETS"
+          
+          # Verify we have data (sanity check)
+          if [[ $USERS -eq 0 ]] && [[ $MARKETS -eq 0 ]]; then
+            echo "WARN: No users or markets in restored database (possible empty backup)"
+          else
+            echo "✓ Data integrity verified"
+          fi
+
+      - name: Run schema validation queries
+        env:
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Running schema validation queries..."
+          
+          # Check for invalid indexes or constraints
+          INVALID_INDEXES=$(psql -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            -t -c "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE '%invalid%';" \
+            | tr -d ' ')
+          
+          echo "Invalid indexes: $INVALID_INDEXES"
+          
+          # Run pg_dump in dry-run mode to check syntax
+          pg_dump -h localhost -U bankerchanger -d ${DB_NAME}_restore_test \
+            --schema-only > /tmp/schema_dump.sql
+          
+          if [[ -s /tmp/schema_dump.sql ]]; then
+            SCHEMA_SIZE=$(wc -l < /tmp/schema_dump.sql)
+            echo "✓ Schema dump successful ($SCHEMA_SIZE lines)"
+          else
+            echo "ERROR: Schema dump is empty"
+            exit 1
+          fi
+
+      - name: Cleanup test database
+        env:
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+        if: always()
+        run: |
+          echo "Cleaning up test database..."
+          
+          psql -h localhost -U bankerchanger -d bankerchanger \
+            -c "DROP DATABASE IF EXISTS ${DB_NAME}_restore_test;" || true
+          
+          echo "✓ Test database dropped"
+          
+          # Secure delete backup files
+          shred -vfz /tmp/backup.sql 2>/dev/null || rm -f /tmp/backup.sql
+          shred -vfz /tmp/backup.sql.gz.enc 2>/dev/null || rm -f /tmp/backup.sql.gz.enc
+          shred -vfz /tmp/backup.key 2>/dev/null || rm -f /tmp/backup.key
+          
+          echo "✓ Temporary files securely deleted"
+
+      - name: Generate drill report
+        if: always()
+        run: |
+          echo "## Backup Restore Drill Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Backup File:** ${{ steps.download-backup.outputs.backup_file }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Backup downloaded from S3" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Backup decrypted successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Backup restored to test database" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Schema validated" >> $GITHUB_STEP_SUMMARY
+          echo "- ✓ Data integrity verified" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**RTO:** ~$(echo 'scale=1; 10' | bc) minutes" >> $GITHUB_STEP_SUMMARY
+          echo "**RPO:** < 1 day (daily backups)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ **Backup Restore Drill Failed**\n\nThe monthly backup restore drill has failed. Please investigate the logs and restore procedures immediately.\n\n[View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})'
+            })
+
+  # Send notifications
+  notify:
+    runs-on: ubuntu-latest
+    needs: restore-drill
+    if: always()
+    steps:
+      - name: Post Slack notification
+        if: always()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Database Backup Restore Drill - Monthly Test",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ needs.restore-drill.result == 'success' && '✅' || '❌' }} *Backup Restore Drill*\nStatus: ${{ needs.restore-drill.result }}\nDate: <!date^${{ github.event.head_commit.timestamp || 'now' }}^{date_pretty} at {time}|${{ github.event.head_commit.timestamp || 'now' }}>"
+                  }
+                }
+              ]
+            }

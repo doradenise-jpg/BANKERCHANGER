@@ -58,6 +58,10 @@ jobs:
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
         run: npm ci
 
+      - name: Security Audit - npm HIGH/CRITICAL vulnerabilities
+        working-directory: backend
+        run: npm audit --audit-level=high
+
       - name: Validate OpenAPI spec
         working-directory: backend
         run: |

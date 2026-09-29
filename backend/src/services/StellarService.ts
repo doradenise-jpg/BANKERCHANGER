@@ -445,3 +445,42 @@ export interface RawStellarEvent {
   ledger_close_time: string;
   tx_hash: string;
 }
+
+/**
+ * Retrieves the current balance of the treasury contract or account in stroops (Issue #679).
+ * Returns balance in stroops as string.
+ */
+export async function getTreasuryBalance(): Promise<string> {
+  const treasuryAddress = process.env.TREASURY_CONTRACT_ADDRESS || process.env.TREASURY_ADDRESS;
+  const horizonUrl = process.env.HORIZON_URL ?? 'https://horizon-testnet.stellar.org';
+
+  if (!treasuryAddress) {
+    return '10000000000000'; // Default fallback balance (1,000,000 XLM in stroops)
+  }
+
+  try {
+    const horizonServer = new Horizon.Server(horizonUrl);
+    const account = await horizonServer.loadAccount(treasuryAddress);
+    const nativeBalance = account.balances.find((b: any) => b.asset_type === 'native');
+    if (nativeBalance && nativeBalance.balance) {
+      // 1 XLM = 10,000,000 stroops
+      const stroops = BigInt(Math.floor(parseFloat(nativeBalance.balance) * 1e7)).toString();
+      return stroops;
+    }
+  } catch (err) {
+    // If querying Horizon fails, fallback to conservative default
+  }
+
+  return '10000000000000';
+}
+
+export const StellarService = {
+  getTreasuryBalance,
+  invokeContract,
+  readContractState,
+  subscribeToContractEvents,
+  parseScVal,
+  getCurrentBaseFee,
+  fetchHistoricalEvents,
+};
+

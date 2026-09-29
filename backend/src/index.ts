@@ -73,15 +73,36 @@ app.use((req, res, next) => {
 });
 
 // Routes
+// Public health endpoint (Issue #682) — returns only { status, version, timestamp }
 app.get("/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
     await redis.ping();
     res.json({
-      status: "ok",
+      status: "healthy",
+      version,
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    res.status(503).json({
+      status: "unhealthy",
+      version,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Detailed health endpoint (Issue #682) — restricted to admin JWT
+app.get("/health/detailed", requireAdminJwt, async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    await redis.ping();
+    res.json({
+      status: "healthy",
+      version,
+      timestamp: new Date().toISOString(),
       db: "connected",
       redis: "connected",
-      version,
       dbPool: {
         totalCount: pool.totalCount,
         idleCount: pool.idleCount,
@@ -89,7 +110,11 @@ app.get("/health", async (_req, res) => {
       },
     });
   } catch {
-    res.status(503).json({ status: "error" });
+    res.status(503).json({
+      status: "unhealthy",
+      version,
+      timestamp: new Date().toISOString(),
+    });
   }
 });
 

@@ -26,6 +26,37 @@ const queryLimiter = rateLimit({ windowMs: 60_000, max: 60, keyBy: 'ip' });
 const mutationLimiter = rateLimit({ windowMs: 60_000, max: 20, keyBy: 'userId' });
 const claimLimiter = rateLimit({ windowMs: 60_000, max: 10, keyBy: 'userId' });
 
+// --- Liquidity Lock Period State & Helpers (Issue #675) ---
+export const DEFAULT_LOCK_PERIOD_SECONDS = 86400; // 24 hours
+
+const marketLockPeriods: Map<string, number> = new Map();
+const depositTimestamps: Map<string, number> = new Map(); // key: `${marketId}:${provider}`
+
+export function setMarketLockPeriod(marketId: string, seconds: number): void {
+  marketLockPeriods.set(marketId, seconds);
+}
+
+export function getMarketLockPeriod(marketId: string): number {
+  return marketLockPeriods.get(marketId) ?? DEFAULT_LOCK_PERIOD_SECONDS;
+}
+
+export function recordDeposit(
+  marketId: string,
+  provider: string,
+  timestamp: number = Math.floor(Date.now() / 1000)
+): void {
+  depositTimestamps.set(`${marketId}:${provider}`, timestamp);
+}
+
+export function getDepositTimestamp(marketId: string, provider: string): number | undefined {
+  return depositTimestamps.get(`${marketId}:${provider}`);
+}
+
+export function clearLiquidityLockState(): void {
+  marketLockPeriods.clear();
+  depositTimestamps.clear();
+}
+
 /**
  * @swagger
  * tags:
@@ -206,6 +237,9 @@ router.post(
         [updateRes.rows[0].id, userId, provider_address, mintedLpTokens]
       );
 
+      // Record deposit timestamp for withdrawal lock period enforcement (Issue #675)
+      recordDeposit(marketId, provider_address);
+
       res.status(200).json({
         success: true,
         message: 'Liquidity provided successfully',
@@ -213,6 +247,45 @@ router.post(
           market_id: marketId,
           lp_tokens_minted: mintedLpTokens,
           pool: updateRes.rows[0],
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/v2/liquidity/pools/{marketId}/lock-period:
+ *   put:
+ *     summary: Configure withdrawal lock period for a market
+ *     tags: [Liquidity Group 17]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put(
+  '/pools/:marketId/lock-period',
+  requireAuth,
+  mutationLimiter,
+  validateParams(getPoolGroup17ParamsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { marketId } = req.params as unknown as { marketId: string };
+      const { lock_period_seconds } = req.body;
+
+      if (typeof lock_period_seconds !== 'number' || lock_period_seconds < 0) {
+        throw AppError.badRequest('lock_period_seconds must be a non-negative number');
+      }
+
+      setMarketLockPeriod(marketId, lock_period_seconds);
+
+      res.status(200).json({
+        success: true,
+        message: `Lock period for market ${marketId} updated successfully`,
+        data: {
+          market_id: marketId,
+          lock_period_seconds,
         },
       });
     } catch (err) {
@@ -240,6 +313,31 @@ router.post(
     try {
       const { marketId } = req.params as unknown as { marketId: string };
       const { lp_tokens_to_burn, min_amount_a_stroops, min_amount_b_stroops, provider_address } = req.body;
+
+      // Check withdrawal lock period (Issue #675)
+      const lockPeriod = getMarketLockPeriod(marketId);
+      const depositTime = getDepositTimestamp(marketId, provider_address);
+      const nowSeconds = Math.floor(Date.now() / 1000);
+
+      if (depositTime !== undefined && nowSeconds < depositTime + lockPeriod) {
+        const unlockTime = depositTime + lockPeriod;
+        const unlockIso = new Date(unlockTime * 1000).toISOString();
+        res.setHeader('Unlock-Time', unlockIso);
+        res.status(423).json({
+          success: false,
+          error: 'Withdrawal locked',
+          message: `Liquidity withdrawal is locked until ${unlockIso}`,
+          data: {
+            market_id: marketId,
+            provider_address,
+            deposit_timestamp: depositTime,
+            lock_period_seconds: lockPeriod,
+            unlock_time: unlockIso,
+            remaining_seconds: unlockTime - nowSeconds,
+          },
+        });
+        return;
+      }
 
       const poolRes = await pool.query(
         'SELECT id, reserve_a_stroops, reserve_b_stroops, total_lp_tokens FROM liquidity_pools WHERE market_id = $1',

@@ -182,6 +182,7 @@ export const users = pgTable(
     two_factor_secret: text('two_factor_secret'), // AES-GCM encrypted
     role: text('role').default('user'), // 'user' | 'admin'
     session_version: integer('session_version').default(0),
+    password_version: integer('password_version').default(0),
     created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },

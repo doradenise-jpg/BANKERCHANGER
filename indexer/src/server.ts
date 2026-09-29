@@ -1,5 +1,6 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import { Server } from 'http';
 import { getInvoices, getInvoiceById } from './db';
 import { getPollerHealth } from './poller';
 import { isLive, isReady, getReadinessDetails, getHealthResponse } from './health';
@@ -9,11 +10,84 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ── In-Flight Request Tracking & Graceful Shutdown (#698) ────────────────────
+
+let activeRequestsCount = 0;
+let isShuttingDown = false;
+
+export const serverMetrics = {
+  indexer_graceful_shutdown_duration_seconds: 0,
+};
+
+export function getActiveRequestsCount(): number {
+  return activeRequestsCount;
+}
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (isShuttingDown) {
+    res.setHeader('Connection', 'close');
+    res.status(503).json({ error: 'Server is shutting down' });
+    return;
+  }
+
+  activeRequestsCount++;
+  const decrement = () => {
+    activeRequestsCount = Math.max(0, activeRequestsCount - 1);
+    res.removeListener('finish', decrement);
+    res.removeListener('close', decrement);
+  };
+
+  res.on('finish', decrement);
+  res.on('close', decrement);
+  next();
+});
+
 /**
- * Liveness probe: Is the process alive?
- * Returns 200 if process is running, 503 otherwise.
- * Used by Kubernetes to restart dead containers.
+ * Gracefully shuts down the HTTP server by waiting for in-flight requests to complete.
+ * Waits up to timeoutMs (default 30s).
  */
+export async function gracefulShutdown(
+  httpServer?: Server,
+  timeoutMs = 30000,
+): Promise<{ abortedRequests: number; durationSeconds: number }> {
+  isShuttingDown = true;
+  const startTime = Date.now();
+  let abortedRequests = 0;
+
+  logger.info({ activeRequests: activeRequestsCount, timeoutMs }, 'SIGTERM received: beginning graceful shutdown, stopping new connections');
+
+  if (httpServer) {
+    httpServer.close();
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (activeRequestsCount > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  if (activeRequestsCount > 0) {
+    abortedRequests = activeRequestsCount;
+    logger.warn({ abortedRequests, timeoutMs }, `Shutdown deadline reached: forced shutdown with ${abortedRequests} aborted requests`);
+  } else {
+    logger.info('All in-flight requests drained cleanly');
+  }
+
+  const durationSeconds = (Date.now() - startTime) / 1000;
+  serverMetrics.indexer_graceful_shutdown_duration_seconds = durationSeconds;
+  logger.info(
+    {
+      durationSeconds,
+      metric: 'indexer_graceful_shutdown_duration_seconds',
+      value: durationSeconds,
+    },
+    `Graceful shutdown completed in ${durationSeconds.toFixed(2)}s`,
+  );
+
+  return { abortedRequests, durationSeconds };
+}
+
+// ── Health Probes ─────────────────────────────────────────────────────────────
+
 app.get('/healthz/live', (req: Request, res: Response) => {
   try {
     const live = isLive();
@@ -32,15 +106,6 @@ app.get('/healthz/live', (req: Request, res: Response) => {
   }
 });
 
-/**
- * Readiness probe: Is the service ready to handle traffic?
- * Returns 200 if all dependencies healthy, 503 if not.
- * Checks:
- *  - Database connectivity
- *  - RPC connectivity
- *  - Cursor has advanced (recent activity)
- * Used by Kubernetes to add/remove from load balancer.
- */
 app.get('/healthz/ready', (req: Request, res: Response) => {
   try {
     const ready = isReady();
@@ -80,7 +145,6 @@ app.get('/health', (req: Request, res: Response) => {
     const ready = isReady();
     const healthSummary = getHealthResponse();
     
-    // Return 200 if poller is running and ready, 503 if not
     const statusCode = (health.isRunning && ready) ? 200 : 503;
     
     res.status(statusCode).json({
@@ -115,15 +179,12 @@ app.get('/health', (req: Request, res: Response) => {
 app.get('/invoices', (req: Request, res: Response) => {
   try {
     const { status, freelancer, payer, funder } = req.query;
-    
-    // Requirements say "?funder=" but the DB has "payer"
-    // We'll treat funder and payer as interchangeable for this query
     const filterPayer = (payer as string) || (funder as string);
 
     const invoices = getInvoices({
       status: status as string,
       freelancer: freelancer as string,
-      payer: filterPayer
+      payer: filterPayer,
     });
 
     res.json({ success: true, data: invoices });

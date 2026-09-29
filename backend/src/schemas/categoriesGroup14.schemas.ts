@@ -11,6 +11,15 @@ export const combatSportTypeEnum = z.enum([
 
 const slugRegex = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/[\s_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 export const createCategoryGroup14BodySchema = z.object({
   name: z
     .string()
@@ -22,7 +31,8 @@ export const createCategoryGroup14BodySchema = z.object({
     .trim()
     .min(2, 'Slug must be at least 2 characters long')
     .max(50, 'Slug cannot exceed 50 characters')
-    .regex(slugRegex, 'Slug must be lower-case kebab-case (e.g. heavyweight-boxing)'),
+    .regex(slugRegex, 'Slug must be lower-case kebab-case (e.g. heavyweight-boxing)')
+    .optional(),
   sport_type: combatSportTypeEnum,
   icon_url: z.string().trim().url('Icon URL must be a valid URL').optional(),
   description: z.string().trim().max(500, 'Description cannot exceed 500 characters').optional(),

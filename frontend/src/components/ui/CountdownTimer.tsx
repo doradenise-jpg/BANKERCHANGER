@@ -5,6 +5,7 @@
 // ============================================================
 
 import { useState, useEffect } from 'react';
+import { getSynchronizedNow } from '../../hooks/useMarketCountdown';
 
 interface CountdownTimerProps {
   /** ISO 8601 timestamp of target time */
@@ -25,11 +26,11 @@ function formatDDHHMMSS(ms: number): string {
 
 export function CountdownTimer({ targetDate, label }: CountdownTimerProps): JSX.Element {
   const targetMs = new Date(targetDate).getTime();
-  const [remaining, setRemaining] = useState(() => targetMs - Date.now());
+  const [remaining, setRemaining] = useState(() => targetMs - getSynchronizedNow());
 
   useEffect(() => {
     const id = setInterval(() => {
-      const r = targetMs - Date.now();
+      const r = targetMs - getSynchronizedNow();
       setRemaining(r);
       if (r <= 0) clearInterval(id);
     }, 1000);

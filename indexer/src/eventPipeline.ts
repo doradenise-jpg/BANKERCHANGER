@@ -15,7 +15,7 @@ interface EventBatchConfig {
   maxBackoffMs: number;
 }
 
-interface ProcessedEvent {
+export interface ProcessedEvent {
   type: string;
   contractId: string;
   ledgerSequence: number;
@@ -25,13 +25,75 @@ interface ProcessedEvent {
   batchId: number;
 }
 
-interface BatchResult {
+export interface BatchResult {
   batchId: number;
   startLedger: number;
   endLedger: number;
   eventsProcessed: number;
   errors: string[];
   durationMs: number;
+}
+
+export interface DeadLetterEntry {
+  event: ProcessedEvent;
+  error: string;
+  failedAt: string;
+  attempts: number;
+}
+
+// ─── Known Events & Metrics (#694, #699) ─────────────────────────────────────
+
+export const KNOWN_EVENT_TYPES = new Set([
+  "invoice_created",
+  "invoice_paid",
+  "market_created",
+  "bet_placed",
+  "market_resolved",
+  "liquidity_added",
+  "liquidity_removed",
+]);
+
+export const indexer_unknown_event_types_total: Record<string, number> = {};
+export const deadLetterLog: DeadLetterEntry[] = [];
+
+/**
+ * Distinguishes transient DB errors (connection timeouts, busy locks, deadlocks)
+ * from permanent non-transient errors (constraint violations, schema mismatch).
+ */
+export function isTransientDbError(error: any): boolean {
+  if (!error) return false;
+  const msg = (error.message || String(error)).toLowerCase();
+  const code = (error.code || "").toLowerCase();
+
+  // Non-transient errors
+  if (
+    msg.includes("unique") ||
+    msg.includes("constraint") ||
+    msg.includes("not null") ||
+    msg.includes("foreign key") ||
+    code === "sqlite_constraint"
+  ) {
+    return false;
+  }
+
+  // Transient errors
+  if (
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused") ||
+    msg.includes("etimedout") ||
+    msg.includes("connection") ||
+    msg.includes("deadlock") ||
+    msg.includes("serialization") ||
+    msg.includes("busy") ||
+    msg.includes("locked") ||
+    msg.includes("timeout") ||
+    code === "sqlite_busy" ||
+    code === "sqlite_locked"
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 // ─── Configuration by Batch ──────────────────────────────────────────────────
@@ -58,7 +120,6 @@ export async function processEventBatch(
   logger.info({ batchId, startLedger, batchSize: config.batchSize }, "Starting event batch processing");
 
   try {
-    // Fetch events for the batch range
     const endLedger = startLedger + config.batchSize - 1;
     const response = await server.getEvents({
       startLedger,
@@ -66,7 +127,6 @@ export async function processEventBatch(
       limit: 1000,
     });
 
-    // Process events in order
     for (const event of response.events) {
       try {
         const parsed = parseEvent(event, currentLedger, batchId);
@@ -82,7 +142,6 @@ export async function processEventBatch(
       currentLedger++;
     }
 
-    // Save cursor and update health
     await saveCursor(endLedger);
     await updateLastLedger(endLedger);
 
@@ -112,7 +171,7 @@ export async function processEventBatch(
 
 // ─── Event Parsing ───────────────────────────────────────────────────────────
 
-function parseEvent(event: any, ledgerSequence: number, batchId: number): ProcessedEvent | null {
+export function parseEvent(event: any, ledgerSequence: number, batchId: number): ProcessedEvent | null {
   try {
     const contractId = event.contractId;
     const eventType = event.type;
@@ -200,19 +259,23 @@ export function enqueueBroadcastEvent(event: ProcessedEvent): boolean {
 async function handleEvent(event: ProcessedEvent): Promise<void> {
   switch (event.eventType) {
     case "invoice_created":
-      await upsertInvoice({
-        contractId: event.contractId,
-        ledgerSequence: event.ledgerSequence,
-        data: event.value,
-      });
+      await writeWithTransientRetry(() =>
+        upsertInvoice({
+          contractId: event.contractId,
+          ledgerSequence: event.ledgerSequence,
+          data: event.value,
+        }),
+      );
       break;
 
     case "invoice_paid":
-      await upsertInvoice({
-        contractId: event.contractId,
-        ledgerSequence: event.ledgerSequence,
-        data: { ...event.value, status: "paid" },
-      });
+      await writeWithTransientRetry(() =>
+        upsertInvoice({
+          contractId: event.contractId,
+          ledgerSequence: event.ledgerSequence,
+          data: { ...event.value, status: "paid" },
+        }),
+      );
       break;
 
     case "market_created":
@@ -220,11 +283,7 @@ async function handleEvent(event: ProcessedEvent): Promise<void> {
     case "market_resolved":
     case "liquidity_added":
     case "liquidity_removed":
-      // These events are published for real-time updates
       break;
-
-    default:
-      logger.debug({ eventType: event.eventType, batchId: event.batchId }, "Unknown event type");
   }
 
   // Push to bounded broadcast queue

@@ -64,17 +64,15 @@ export function WalletButton(): JSX.Element {
     };
   }, []);
 
-  // Determine whether we should show the wallet picker modal.
-  // Show picker when more than one wallet is installed so the user can choose.
   const bothInstalled = availableWallets.freighter && availableWallets.albedo;
-  const noneInstalled = !availableWallets.freighter && !availableWallets.albedo;
+  const freighterMissing = !availableWallets.freighter;
 
   function handleConnectClick() {
-    if (bothInstalled) {
-      // Let the user pick which wallet to connect
+    if (freighterMissing || bothInstalled) {
+      // Show modal to offer Freighter install or Albedo fallback
       setShowWalletPicker(true);
     } else {
-      // Only one (or zero) wallets present — fall back to auto-detect
+      // Freighter is present and user clicked connect
       connect();
     }
   }
@@ -113,52 +111,57 @@ export function WalletButton(): JSX.Element {
             role="dialog"
             aria-modal="true"
             aria-label="Select a wallet to connect"
-            className="absolute left-0 mt-2 w-56 bg-gray-900 border border-gray-700 rounded-xl shadow-xl z-50 overflow-hidden"
+            className="absolute left-0 mt-2 w-72 bg-gray-900 border border-gray-700 rounded-xl shadow-xl z-50 overflow-hidden"
           >
-            <p className="px-4 pt-3 pb-1 text-xs text-gray-400 font-medium uppercase tracking-wide">
-              Choose wallet
-            </p>
-
-            {availableWallets.freighter && (
-              <button
-                aria-label="Connect Freighter wallet"
-                onClick={() => { setShowWalletPicker(false); connectByType('freighter'); }}
-                className="w-full min-h-[44px] px-4 text-left text-sm text-gray-200 hover:bg-gray-800 flex items-center gap-3"
-              >
-                <FreighterIcon />
-                Freighter
-              </button>
-            )}
-
-            {availableWallets.albedo && (
-              <button
-                aria-label="Connect Albedo wallet"
-                onClick={() => { setShowWalletPicker(false); connectByType('albedo'); }}
-                className="w-full min-h-[44px] px-4 text-left text-sm text-gray-200 hover:bg-gray-800 flex items-center gap-3"
-              >
-                <AlbedoIcon />
-                Albedo
-              </button>
-            )}
-
-            {noneInstalled && (
-              <p className="px-4 py-3 text-xs text-gray-400">
-                No wallet extension found.{' '}
+            {freighterMissing && (
+              <div className="p-4 border-b border-gray-800 bg-gray-900/90">
+                <p className="text-sm font-semibold text-white mb-1">
+                  Install Freighter to use BANKERCHANGER
+                </p>
+                <p className="text-xs text-gray-400 mb-3">
+                  Freighter is the recommended wallet extension for Stellar.
+                </p>
                 <a
                   href="https://freighter.app"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-amber-400 underline"
+                  className="inline-block px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-black text-xs font-semibold rounded-lg"
                 >
                   Install Freighter
                 </a>
-              </p>
+              </div>
             )}
+
+            <div className="p-2">
+              <p className="px-2 py-1 text-xs text-gray-400 font-medium uppercase tracking-wide">
+                {freighterMissing ? 'Or connect with:' : 'Choose wallet'}
+              </p>
+
+              {availableWallets.freighter && (
+                <button
+                  aria-label="Connect Freighter wallet"
+                  onClick={() => { setShowWalletPicker(false); connectByType('freighter'); }}
+                  className="w-full min-h-[44px] px-3 text-left text-sm text-gray-200 hover:bg-gray-800 rounded-lg flex items-center gap-3"
+                >
+                  <FreighterIcon />
+                  Freighter
+                </button>
+              )}
+
+              <button
+                aria-label="Connect Albedo wallet"
+                onClick={() => { setShowWalletPicker(false); connectByType('albedo'); }}
+                className="w-full min-h-[44px] px-3 text-left text-sm text-gray-200 hover:bg-gray-800 rounded-lg flex items-center gap-3"
+              >
+                <AlbedoIcon />
+                Albedo
+              </button>
+            </div>
 
             <button
               aria-label="Cancel wallet selection"
               onClick={() => setShowWalletPicker(false)}
-              className="w-full min-h-[44px] px-4 text-left text-xs text-gray-500 hover:bg-gray-800 border-t border-gray-800"
+              className="w-full min-h-[40px] px-4 text-center text-xs text-gray-500 hover:bg-gray-800 border-t border-gray-800"
             >
               Cancel
             </button>

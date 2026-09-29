@@ -204,7 +204,7 @@ export async function pollOnce(lastProcessed: number): Promise<number> {
     const missing = findMissingRanges(fromLedger + 1, latestLedger, ranges);
     for (const range of missing) {
       console.log(`[Indexer] Backfilling missing ledgers ${range.start}–${range.end}`);
-      await backfillAndRecord(range.start, range.end);
+      await backfillMissingLedgers(range.start, range.end, 100);
       lastProcessed = Math.max(lastProcessed, range.end);
     }
   } catch (err) {
@@ -228,11 +228,53 @@ export async function pollOnce(lastProcessed: number): Promise<number> {
   return lastProcessed;
 }
 
-async function backfillAndRecord(from: number, to: number): Promise<void> {
-  for (let seq = from; seq <= to; seq++) {
-    await processLedger(seq);
+/**
+ * Recovers missing ledgers across detected gaps (Issue #673).
+ * Fetches and processes missing ledgers in batches of 100, tracking progress
+ * incrementally in the database and emitting the indexer_gap_backfill_total metric.
+ */
+export async function backfillMissingLedgers(
+  from: number,
+  to: number,
+  batchSize: number = 100
+): Promise<number> {
+  let totalProcessed = 0;
+
+  for (let batchStart = from; batchStart <= to; batchStart += batchSize) {
+    const batchEnd = Math.min(batchStart + batchSize - 1, to);
+
+    for (let seq = batchStart; seq <= batchEnd; seq++) {
+      try {
+        await processLedger(seq);
+      } catch (err) {
+        if (isLedgerRangeError(err)) {
+          console.warn(`[Indexer] Ledger ${seq} unavailable during backfill, skipping`, err);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // Persist checkpoint and range incrementally so interrupted backfills resume from last batch
+    await recordProcessedRange(batchStart, batchEnd);
+    await saveCheckpoint(batchEnd);
+
+    const count = batchEnd - batchStart + 1;
+    totalProcessed += count;
+
+    try {
+      const { indexerGapBackfillTotal } = await import('../services/metrics.service');
+      indexerGapBackfillTotal.inc(count);
+    } catch {
+      // Metric service fallback
+    }
   }
-  await recordProcessedRange(from, to);
+
+  return totalProcessed;
+}
+
+async function backfillAndRecord(from: number, to: number): Promise<void> {
+  await backfillMissingLedgers(from, to, 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +502,15 @@ function broadcastIndexedEvent(event: RawStellarEvent): void {
   const p = parsePayload(event.data);
   const marketId = typeof p.market_id === 'string' ? p.market_id : '';
   if (!marketId) return;
+
+  if (event.event_type === 'market_created') {
+    feed.publishMarketCreated({
+      type: 'market:created',
+      marketId,
+      fighterA: String(p.fighter_a ?? ''),
+      fighterB: String(p.fighter_b ?? ''),
+    });
+  }
 
   let activityEvent: ActivityEvent;
   if (event.event_type === 'bet_placed') {

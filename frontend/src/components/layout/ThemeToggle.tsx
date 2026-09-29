@@ -4,7 +4,9 @@ import { useEffect, useState } from 'react';
 
 const LS_KEY = 'bankerchanger_theme';
 
-function getInitialTheme(): 'dark' | 'light' {
+type Theme = 'dark' | 'light';
+
+function getInitialTheme(): Theme {
   if (typeof window === 'undefined') return 'dark';
   const stored = localStorage.getItem(LS_KEY);
   if (stored === 'dark' || stored === 'light') return stored;
@@ -12,20 +14,29 @@ function getInitialTheme(): 'dark' | 'light' {
 }
 
 export function ThemeToggle(): JSX.Element {
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<Theme>('dark');
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     const initial = getInitialTheme();
     setTheme(initial);
     document.documentElement.classList.toggle('dark', initial === 'dark');
+    setMounted(true);
   }, []);
 
   const toggle = () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
+    const next: Theme = theme === 'dark' ? 'light' : 'dark';
     setTheme(next);
     localStorage.setItem(LS_KEY, next);
     document.documentElement.classList.toggle('dark', next === 'dark');
   };
+
+  // Until hydration completes, render a sized placeholder so the SSR HTML
+  // and the first client render match. Prevents a hydration warning and icon
+  // flicker on load when the persisted theme differs from the default.
+  if (!mounted) {
+    return <div className="w-9 h-9" aria-hidden="true" />;
+  }
 
   return (
     <button

@@ -16,9 +16,27 @@ import {
   LiveOddsQueryGroup14,
   BatchTagMarketsGroup14Body,
   SearchSuggestGroup14Query,
+  slugify,
 } from '../schemas/categoriesGroup14.schemas';
 
 const router = Router();
+
+// Track registered slugs for runtime uniqueness enforcement
+const registeredCategorySlugs = new Set<string>([
+  'heavyweight-boxing',
+  'ufc-mma',
+  'glory-kickboxing',
+]);
+
+/**
+ * Reset registered slugs (useful for test isolation)
+ */
+export function resetCategorySlugs(): void {
+  registeredCategorySlugs.clear();
+  registeredCategorySlugs.add('heavyweight-boxing');
+  registeredCategorySlugs.add('ufc-mma');
+  registeredCategorySlugs.add('glory-kickboxing');
+}
 
 /**
  * @swagger
@@ -88,15 +106,61 @@ router.post(
     try {
       const body = req.body as CreateCategoryGroup14Body;
 
+      // Auto-generate slug from name if not provided
+      const slug = body.slug ? body.slug.trim().toLowerCase() : slugify(body.name);
+
+      // Check unique constraint against in-memory registry
+      if (registeredCategorySlugs.has(slug)) {
+        res.status(409).json({
+          success: false,
+          error: `Category slug '${slug}' already exists`,
+        });
+        return;
+      }
+
+      // Check unique constraint against database if available
+      try {
+        const existing = await pool.query('SELECT id FROM categories WHERE slug = $1', [slug]);
+        if (existing.rows && existing.rows.length > 0) {
+          res.status(409).json({
+            success: false,
+            error: `Category slug '${slug}' already exists`,
+          });
+          return;
+        }
+      } catch {
+        // Table may not yet be provisioned in test / in-memory modes
+      }
+
+      registeredCategorySlugs.add(slug);
+
       const newCategory = {
         id: `cat-${Date.now()}`,
         name: body.name,
-        slug: body.slug,
+        slug,
         sport_type: body.sport_type,
         icon_url: body.icon_url || null,
         description: body.description || null,
         created_at: new Date().toISOString(),
       };
+
+      try {
+        await pool.query(
+          `INSERT INTO categories (id, name, slug, sport_type, icon_url, description, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            newCategory.id,
+            newCategory.name,
+            newCategory.slug,
+            newCategory.sport_type,
+            newCategory.icon_url,
+            newCategory.description,
+            newCategory.created_at,
+          ]
+        );
+      } catch {
+        // DB fallback
+      }
 
       res.status(201).json({
         success: true,

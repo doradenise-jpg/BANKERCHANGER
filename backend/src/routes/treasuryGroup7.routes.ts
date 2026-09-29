@@ -4,6 +4,7 @@ import { requireAdminJwt } from '../middleware/requireAdminJwt.middleware';
 import { rateLimit } from '../middleware/rate-limit.middleware';
 import { pool } from '../config/db';
 import { AppError } from '../utils/AppError';
+import * as StellarService from '../services/StellarService';
 import {
   withdrawTreasuryGroup7BodySchema,
   distributeFeesGroup7BodySchema,
@@ -78,6 +79,21 @@ router.post(
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const body = req.body as WithdrawTreasuryGroup7Body;
+
+      // Validate withdrawal amount against advisory treasury balance (Issue #679)
+      const currentBalance = await StellarService.getTreasuryBalance();
+      if (BigInt(body.amount_stroops) > BigInt(currentBalance)) {
+        res.status(400).json({
+          success: false,
+          error: 'Insufficient treasury balance',
+          message: 'Insufficient treasury balance',
+          data: {
+            requested_stroops: body.amount_stroops,
+            current_balance_stroops: currentBalance,
+          },
+        });
+        return;
+      }
 
       const client = await pool.connect().catch(() => null);
       let txRecord;

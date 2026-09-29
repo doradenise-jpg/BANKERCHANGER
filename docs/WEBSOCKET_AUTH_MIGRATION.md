@@ -95,6 +95,10 @@ function subscribeToMarket(marketId: string) {
 }
 ```
 
+Public market pages can obtain a short-lived activity-only JWT by posting to
+`/auth/activity-feed-token`. Send it in the initial `auth` frame, then subscribe
+to the market activity feed. This token cannot subscribe to leaderboard channels.
+
 ## Test Results
 
 All 7 integration tests passing:

@@ -2,13 +2,81 @@
  * Unit tests for useMarket hook using @testing-library/react and MSW.
  */
 
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { useMarket } from '../../hooks/useMarket';
-import { server } from '../mocks/handlers';
-import { openMarket, lockedMarket, resolvedMarket } from '../mocks/handlers';
+import { server } from '../../__tests__/mocks/handlers';
+import { openMarket, lockedMarket, resolvedMarket } from '../../__tests__/mocks/handlers';
 import { http, HttpResponse } from 'msw';
+import { queryClient } from '../../providers/QueryProvider';
+import { fetchActivityFeedToken } from '../../services/api';
+
+jest.mock('../../services/api', () => ({
+  ...jest.requireActual('../../services/api'),
+  fetchActivityFeedToken: jest.fn().mockResolvedValue('activity-token'),
+}));
+
+class MockWebSocket {
+  static instances: MockWebSocket[] = [];
+  public listeners: Record<string, Array<(event: MessageEvent) => void>> = {};
+  public sentMessages: string[] = [];
+  public close = jest.fn();
+
+  constructor(public readonly url: string) {
+    MockWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, handler: (event: MessageEvent) => void) {
+    this.listeners[type] = this.listeners[type] ?? [];
+    this.listeners[type].push(handler);
+  }
+
+  send(message: string) {
+    this.sentMessages.push(message);
+  }
+
+  emitMessage(payload: string) {
+    this.listeners.message?.forEach((handler) => handler({ data: payload } as MessageEvent));
+  }
+}
 
 describe('useMarket', () => {
+  it('reflects a websocket resolution event immediately and invalidates the market query', async () => {
+    const originalWebSocket = window.WebSocket;
+    const invalidateQueries = jest.spyOn(queryClient, 'invalidateQueries').mockResolvedValue();
+    MockWebSocket.instances = [];
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    server.use(
+      http.get('http://localhost:3001/api/markets/market-1', () => HttpResponse.json(openMarket)),
+    );
+
+    const { result, unmount } = renderHook(() => useMarket('market-1'));
+    await waitFor(() => expect(result.current.market?.status).toBe('open'));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+    socket.listeners.open?.forEach((handler) => handler({} as MessageEvent));
+    await waitFor(() => expect(socket.sentMessages).toEqual([
+      JSON.stringify({ type: 'auth', token: 'activity-token' }),
+      JSON.stringify({ type: 'subscribe_activity', marketId: 'market-1' }),
+    ]));
+
+    act(() => {
+      socket.emitMessage(JSON.stringify({
+        type: 'resolved',
+        marketId: 'market-1',
+        winningOutcomeId: 'fighter_a',
+      }));
+    });
+
+    expect(result.current.market?.status).toBe('resolved');
+    expect(result.current.market?.outcome).toBe('fighter_a');
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['market', 'market-1'] });
+    expect(fetchActivityFeedToken).toHaveBeenCalledTimes(1);
+
+    unmount();
+    window.WebSocket = originalWebSocket;
+    invalidateQueries.mockRestore();
+  });
+
   describe('Loading state transitions correctly', () => {
     it('should start with isLoading = true', () => {
       const { result } = renderHook(() => useMarket('market-1'));

@@ -81,4 +81,11 @@ export const cronBlockchainEventsDeleted = new Counter({
   help: 'Total processed blockchain_events rows deleted by cleanup cron',
 });
 
+// ── Indexer Gap Recovery Metrics (Issue #673) ─────────────────────────────────
+
+export const indexerGapBackfillTotal = new Counter({
+  name: 'indexer_gap_backfill_total',
+  help: 'Total missing ledgers backfilled during gap recovery',
+});
+
 export { register };

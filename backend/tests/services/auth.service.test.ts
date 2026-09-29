@@ -88,6 +88,23 @@ describe('AuthService', () => {
     db = drizzle(pool);
   });
 
+  describe('createActivityFeedToken', () => {
+    it('issues a short-lived token limited to market activity reads', () => {
+      mockJwt.sign.mockReturnValue('activity-token');
+
+      expect(authService.createActivityFeedToken()).toBe('activity-token');
+      expect(mockJwt.sign).toHaveBeenCalledWith(
+        {
+          sub: 'public-market-feed',
+          type: 'ws_activity',
+          scope: 'market_activity:read',
+        },
+        'test-jwt-secret',
+        { expiresIn: '5m' },
+      );
+    });
+  });
+
   // =========================================================================
   // USER REGISTRATION
   // =========================================================================

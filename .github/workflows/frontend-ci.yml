@@ -37,6 +37,10 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Security Audit - npm HIGH/CRITICAL vulnerabilities
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
       - name: Lint
         working-directory: frontend
         run: npm run lint
@@ -59,7 +63,11 @@ jobs:
         working-directory: frontend
         run: npm run build
         env:
-          NEXT_PUBLIC_API_URL: http://localhost:3001
+          # Use the repo secret when set. Falls back to localhost so PRs
+          # from forks (which don't receive secrets) still build. The
+          # build-time guard in next.config.js fails the build if this
+          # is ever empty, enforcing AC #4.
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL || 'http://localhost:3001' }}
           NEXT_PUBLIC_STELLAR_NETWORK: testnet
 
   e2e:
@@ -107,6 +115,11 @@ jobs:
         run: npx playwright test
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:3000
+
+      - name: Clean up E2E database records
+        if: always()
+        working-directory: frontend
+        run: npm run e2e:cleanup
 
       - name: Upload Playwright trace on failure
         if: failure()

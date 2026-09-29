@@ -1,12 +1,15 @@
 'use client';
 
-import { useState, FormEvent, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { getConnectedAddress } from '@/services/wallet';
 import { TxStatusToast } from '@/components/ui/TxStatusToast';
 import type { TxStatus } from '@/types';
 import { TX_PENDING_STATES } from '@/types';
 import { useCreateMarket } from '@/hooks/useCreateMarket';
+import { createMarketSchema, type CreateMarketFormData } from '@/schemas/createMarket.schema';
 
 const ADMIN_ADDRESSES = (process.env.NEXT_PUBLIC_ADMIN_ADDRESSES ?? '')
   .split(',')
@@ -28,10 +31,19 @@ export default function CreateMarketPage() {
   const connectedAddress = getConnectedAddress();
   const isAdmin = connectedAddress && ADMIN_ADDRESSES.includes(connectedAddress);
 
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<CreateMarketFormData>({
+    resolver: zodResolver(createMarketSchema),
+    mode: 'onSubmit',
+    reValidateMode: 'onChange',
+  });
+
   // Auth guard: redirect if wallet not connected or not an admin
   useEffect(() => {
     if (!connectedAddress) {
-      // Not connected - show message and redirect to home
       const timer = setTimeout(() => {
         router.push('/');
       }, 2000);
@@ -39,61 +51,18 @@ export default function CreateMarketPage() {
     }
 
     if (!isAdmin) {
-      // Connected but not admin - redirect to home
       const timer = setTimeout(() => {
         router.push('/');
       }, 2000);
       return () => clearTimeout(timer);
     }
 
-    // User is authorized
     setIsAuthorized(true);
     setIsLoading(false);
   }, [connectedAddress, isAdmin, router]);
 
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const data = new FormData(e.currentTarget);
-
-    const fighterA = data.get('fighterA') as string;
-    const fighterB = data.get('fighterB') as string;
-    const matchId = data.get('matchId') as string;
-    const startTime = data.get('startTime') as string;
-    const endTime = data.get('endTime') as string;
-
-    const feeBpsRaw = data.get('feeBps') as string | null;
-    const feeBps = feeBpsRaw ? Number(feeBpsRaw) : 0;
-
-    if (!fighterA || !fighterB || !matchId || !startTime || !endTime) {
-      setTxStatus({ hash: null, status: 'error', error: 'All required fields must be provided' });
-      return;
-    }
-
-    const startMs = new Date(startTime).getTime();
-    const endMs = new Date(endTime).getTime();
-    if (Number.isNaN(startMs) || Number.isNaN(endMs)) {
-      setTxStatus({ hash: null, status: 'error', error: 'Invalid date/time' });
-      return;
-    }
-    if (startMs < Date.now()) {
-      setTxStatus({ hash: null, status: 'error', error: 'Start Time must be in the future' });
-      return;
-    }
-    if (endMs <= startMs) {
-      setTxStatus({ hash: null, status: 'error', error: 'End Time must be after Start Time' });
-      return;
-    }
-    if (!Number.isFinite(feeBps) || feeBps < 0) {
-      setTxStatus({ hash: null, status: 'error', error: 'Fee BPS must be >= 0' });
-      return;
-    }
-
-    // NOTE: smart-contract call requires additional fields.
-    // We derive safe defaults from existing form semantics:
-    // - schedule_at uses Start Time
-    // - lockBeforeMinutes is computed from (Start - now)
-    // - min/max bet and weight/venue/titleFight are not part of this acceptance criteria,
-    //   but are required by createMarket() on-chain.
+  const onSubmit = async (values: CreateMarketFormData) => {
+    const startMs = new Date(values.startTime).getTime();
     const scheduledAtIso = new Date(startMs).toISOString();
     const lockBeforeMinutes = Math.max(0, Math.floor((startMs - Date.now()) / 60000));
 
@@ -101,22 +70,20 @@ export default function CreateMarketPage() {
 
     try {
       await createMarket({
-        matchId,
-        fighterA,
-        fighterB,
-        // Required by contract call; using placeholders until the acceptance criteria expands.
-        weightClass: 'Lightweight',
-        venue: 'TBA',
-        titleFight: false,
+        matchId: values.matchId,
+        fighterA: values.fighterA,
+        fighterB: values.fighterB,
+        weightClass: values.weightClass || 'Lightweight',
+        venue: values.venue || 'TBA',
+        titleFight: values.titleFight || false,
         scheduledAt: scheduledAtIso,
-        minBetXlm: 1,
-        maxBetXlm: 100,
-        feeBps: feeBps,
+        minBetXlm: values.minBetXlm || 1,
+        maxBetXlm: values.maxBetXlm || 100,
+        feeBps: values.feeBps || 0,
         lockBeforeMinutes,
       });
 
       setTxStatus({ hash: null, status: 'success', error: null });
-      // useCreateMarket() already redirects to the detail page after success.
     } catch (err: any) {
       setTxStatus({ hash: null, status: 'error', error: err?.message ?? String(err) });
     }
@@ -152,66 +119,89 @@ export default function CreateMarketPage() {
   return (
     <div className="max-w-2xl mx-auto p-8">
       <h1 className="text-3xl font-bold mb-6">Create Boxing Market</h1>
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
         <div>
           <label className="block text-sm font-medium mb-1">Match ID</label>
           <input
-            name="matchId"
+            {...register('matchId')}
             type="text"
-            required
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded"
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
           />
+          {errors.matchId && (
+            <p role="alert" className="text-red-400 text-xs mt-1">
+              {errors.matchId.message}
+            </p>
+          )}
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium mb-1">Fighter A</label>
             <input
-              name="fighterA"
+              {...register('fighterA')}
               type="text"
-              required
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
             />
+            {errors.fighterA && (
+              <p role="alert" className="text-red-400 text-xs mt-1">
+                {errors.fighterA.message}
+              </p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">Fighter B</label>
             <input
-              name="fighterB"
+              {...register('fighterB')}
               type="text"
-              required
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded"
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
             />
+            {errors.fighterB && (
+              <p role="alert" className="text-red-400 text-xs mt-1">
+                {errors.fighterB.message}
+              </p>
+            )}
           </div>
         </div>
         <div>
           <label className="block text-sm font-medium mb-1">Start Time</label>
           <input
-            name="startTime"
+            {...register('startTime')}
             type="datetime-local"
-            required
-            min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded"
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
           />
+          {errors.startTime && (
+            <p role="alert" className="text-red-400 text-xs mt-1">
+              {errors.startTime.message}
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-sm font-medium mb-1">End Time</label>
           <input
-            name="endTime"
+            {...register('endTime')}
             type="datetime-local"
-            required
-            min={new Date(Date.now() + 120_000).toISOString().slice(0, 16)}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded"
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
           />
+          {errors.endTime && (
+            <p role="alert" className="text-red-400 text-xs mt-1">
+              {errors.endTime.message}
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-sm font-medium mb-1">Fee BPS (optional)</label>
           <input
-            name="feeBps"
+            {...register('feeBps')}
             type="number"
             min="0"
             step="1"
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded"
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
             placeholder="e.g. 50 for 0.50%"
           />
+          {errors.feeBps && (
+            <p role="alert" className="text-red-400 text-xs mt-1">
+              {errors.feeBps.message}
+            </p>
+          )}
         </div>
 
         <button
