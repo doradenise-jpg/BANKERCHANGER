@@ -148,3 +148,6 @@ export interface UserNotification {
   read: boolean;
   created_at: string;
 }
+export interface MyLeaderboardRank {
+  rank: number;
+}

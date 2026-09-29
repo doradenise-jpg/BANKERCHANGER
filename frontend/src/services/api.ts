@@ -17,6 +17,7 @@ import type {
   ReferralSummary,
   ReferralPayoutResult,
   UserNotification,
+  MyLeaderboardRank,
 } from '../types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
@@ -234,4 +235,11 @@ export async function fetchNotifications(address: string, limit = 50): Promise<U
   return apiFetch<UserNotification[]>(
     `/api/engagement/notifications/${address}?limit=${limit}`,
   );
+}
+/**
+ * Calls GET /api/engagement/leaderboard/rank.
+ * Returns the authenticated caller's leaderboard rank.
+ */
+export async function fetchMyLeaderboardRank(): Promise<MyLeaderboardRank> {
+  return apiFetch<MyLeaderboardRank>('/api/engagement/leaderboard/rank');
 }
