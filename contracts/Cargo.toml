@@ -4,6 +4,7 @@ members = [
     "treasury",
     "market_factory",
     "market",
+    "shared/fuzz",
 ]
 resolver = "2"
 
