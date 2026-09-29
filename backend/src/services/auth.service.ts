@@ -92,9 +92,9 @@ export function createActivityFeedToken(): string {
   );
 }
 
-function signRefresh(userId: string, sessionVersion: number): string {
+function signRefresh(userId: string, sessionVersion: number, passwordVersion: number = 0): string {
   return jwt.sign(
-    { sub: userId, type: 'refresh', sv: sessionVersion, iat: Math.floor(Date.now() / 1000) },
+    { sub: userId, type: 'refresh', sv: sessionVersion, pv: passwordVersion, iat: Math.floor(Date.now() / 1000) },
     JWT_REFRESH_SECRET,
     { expiresIn: REFRESH_EXPIRES_IN } as jwt.SignOptions,
   );
@@ -359,7 +359,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<{ access
     throw new AppError(401, 'Refresh token has exceeded maximum lifetime (30 days)');
   }
 
-  const revoked = await isSessionRevoked(userId, sessionVersion, passwordVersion);
+  const revoked = await isSessionRevoked(userId, sessionVersion, payload.pv ?? 0);
   if (revoked) throw new AppError(401, 'Session has been invalidated');
 
   const active = await isRefreshTokenActive(refreshToken);
