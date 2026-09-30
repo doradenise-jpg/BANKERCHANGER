@@ -9,6 +9,8 @@ import { logger } from '../utils/logger';
 
 export { redis };
 
+import { cacheMissesTotal } from './metrics.service';
+
 /**
  * Get a value from cache by key.
  * Returns null if key doesn't exist or Redis is unavailable.
@@ -19,6 +21,7 @@ export async function get<T>(key: string): Promise<T | null> {
     return data ? (JSON.parse(data) as T) : null;
   } catch (err) {
     logger.warn({ err, key }, 'cache.get: Redis unavailable, bypassing cache');
+    cacheMissesTotal.inc({ reason: 'redis_unavailable' });
     return null;
   }
 }
@@ -95,6 +98,7 @@ export async function getOrSet<T>(
     return value;
   } catch (err) {
     logger.warn({ err, key }, 'cache.getOrSet: Error, computing without cache');
+    cacheMissesTotal.inc({ reason: 'redis_unavailable' });
     // If cache operations fail, just compute and return
     return compute();
   }

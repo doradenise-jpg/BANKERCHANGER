@@ -14,6 +14,11 @@ export function validate(schema: ZodSchema, target: Target = 'body') {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req[target]);
     if (!result.success) {
+      const isLimitError = result.error.issues.some(i => i.message === 'limit cannot exceed 100');
+      if (isLimitError) {
+        res.status(400).json({ error: 'limit cannot exceed 100' });
+        return;
+      }
       res.status(422).json({ errors: formatErrors(result.error) });
       return;
     }

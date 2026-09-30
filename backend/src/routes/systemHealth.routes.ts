@@ -34,21 +34,33 @@ interface ComponentHealth {
  * Never exposes environment variables, secrets, or internal database URLs.
  */
 const publicHealthHandler = async (_req: Request, res: Response): Promise<void> => {
+  let dbHealthy = false;
+  let redisHealthy = false;
+
   try {
     await pool.query('SELECT 1');
-    await redis.ping();
-    res.status(200).json({
-      status: 'healthy',
-      version: '2.0.0',
-      timestamp: new Date().toISOString(),
-    });
+    dbHealthy = true;
   } catch {
-    res.status(503).json({
-      status: 'unhealthy',
-      version: '2.0.0',
-      timestamp: new Date().toISOString(),
-    });
+    // DB failed
   }
+
+  try {
+    await redis.ping();
+    redisHealthy = true;
+  } catch {
+    // Redis failed
+  }
+
+  const overallStatus = dbHealthy && redisHealthy ? 'healthy' : (!dbHealthy ? 'unhealthy' : 'degraded');
+  const statusCode = dbHealthy ? 200 : 503;
+
+  res.status(statusCode).json({
+    status: overallStatus,
+    database: dbHealthy ? 'healthy' : 'unhealthy',
+    redis: redisHealthy ? 'healthy' : 'unhealthy',
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+  });
 };
 
 router.get('/', publicHealthHandler);
