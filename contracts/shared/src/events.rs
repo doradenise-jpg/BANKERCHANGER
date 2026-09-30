@@ -5,7 +5,7 @@
 
 use soroban_sdk::{Address, Env, String, Symbol};
 
-use crate::types::{AuditEntry, BetRecord, ClaimReceipt, Outcome};
+use crate::types::{AuditEntry, BetPlacedPayload, BetRecord, ClaimReceipt, OddsSnapshot, Outcome};
 
 /// Emits a `market_created` event when a new market is deployed.
 ///
@@ -59,13 +59,30 @@ pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u8) {
     env.events().publish(topics, outcome_byte);
 }
 
-/// Emits a `bet_placed` event when a bettor places a bet.
+/// Emits a legacy `bet_placed` event containing only the BetRecord.
 ///
 /// Topics: `(Symbol("bet_placed"), market_id)`
 /// Data:   `BetRecord`
 pub fn emit_bet_placed(env: &Env, market_id: u64, bet: BetRecord) {
     let topics = (Symbol::new(env, "bet_placed"), market_id);
     env.events().publish(topics, bet);
+}
+
+/// Emits a `bet_placed` event with the odds offered before the bet was added.
+pub fn emit_bet_placed_with_odds(
+    env: &Env,
+    market_id: u64,
+    bet: BetRecord,
+    odds_at_bet_time: OddsSnapshot,
+) {
+    let topics = (Symbol::new(env, "bet_placed"), market_id);
+    env.events().publish(
+        topics,
+        BetPlacedPayload {
+            bet,
+            odds_at_bet_time,
+        },
+    );
 }
 
 /// Emits a `winnings_claimed` event when a winner claims their payout.

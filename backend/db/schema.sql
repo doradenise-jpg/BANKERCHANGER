@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS bets (
   side             TEXT        NOT NULL,
   amount           NUMERIC     NOT NULL,
   amount_xlm       NUMERIC     NOT NULL DEFAULT 0,
+  odds_snapshot    JSONB,
   placed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   claimed          BOOLEAN     NOT NULL DEFAULT FALSE,
   claimed_at       TIMESTAMPTZ,

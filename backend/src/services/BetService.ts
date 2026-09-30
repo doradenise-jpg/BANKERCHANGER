@@ -138,7 +138,7 @@ export async function fetchBetsByAddress(
   const result = await pool.query(
     `SELECT 
        b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
-       b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+      b.odds_snapshot, b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
        m.fighter_a, m.fighter_b, m.status
      FROM bets b
      JOIN markets m ON b.market_id = m.market_id

@@ -46,6 +46,9 @@ jobs:
             | sudo tar xzf - -C /usr/local/bin stellar
           stellar version
 
+      - name: Test WASM upload verification
+        run: bash contracts/scripts/test-verify-wasm-upload.sh
+
       - name: Mask admin secret key in logs
         run: echo "::add-mask::${{ secrets.ADMIN_SECRET_KEY }}"
 

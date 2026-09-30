@@ -399,6 +399,20 @@ impl Market {
             claimed: false,
         };
 
+        let odds_at_bet_time = if state.total_pool > 0 {
+            boxmeout_shared::types::OddsSnapshot {
+                odds_a: (state.pool_a * 10_000 / state.total_pool) as u32,
+                odds_b: (state.pool_b * 10_000 / state.total_pool) as u32,
+                odds_draw: (state.pool_draw * 10_000 / state.total_pool) as u32,
+            }
+        } else {
+            boxmeout_shared::types::OddsSnapshot {
+                odds_a: 0,
+                odds_b: 0,
+                odds_draw: 0,
+            }
+        };
+
         let mut bets = Self::load_bets(&env, &bettor);
         if !bets.is_empty() {
             return Err(ContractError::AlreadyBet);
@@ -424,7 +438,12 @@ impl Market {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&bettor, &env.current_contract_address(), &amount);
 
-        boxmeout_shared::emit_bet_placed(&env, new_state.market_id, bet.clone());
+        boxmeout_shared::emit_bet_placed_with_odds(
+            &env,
+            new_state.market_id,
+            bet.clone(),
+            odds_at_bet_time,
+        );
 
         // ── AMM PIPELINE EVENTS (issues #473–#476) ────────────────────────────
         // Emit pool_initialized when all three pools are now non-zero for the
