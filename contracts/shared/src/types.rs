@@ -318,4 +318,20 @@ pub struct FeeTier {
     pub fee_bps: u32,
 }
 
+/// LP position held by a liquidity provider in a market pool.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityPosition {
+    /// Provider's Stellar address
+    pub provider: Address,
+    /// Market ID this position is for
+    pub market_id: u64,
+    /// Number of LP shares held
+    pub lp_shares: i128,
+    /// Fee-per-share accumulator snapshot at entry (for fee calculation)
+    pub fee_debt: i128,
+    /// Timestamp when the position was opened
+    pub entered_at: u64,
+}
+
 

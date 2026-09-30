@@ -22,6 +22,8 @@ pub enum ContractError {
     UnregisteredMarket = 6,
     /// Pending admin transfer proposal has expired
     PendingAdminExpired = 7,
+    /// Admin timelock is active; proposal cannot be accepted yet
+    AdminTimelockActive = 8,
 
     // ── Market State ───────────────────────────────────────
     /// Requested market ID does not exist

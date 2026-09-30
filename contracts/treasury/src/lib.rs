@@ -22,7 +22,7 @@ extern crate std;
 mod test;
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, token, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contractimpl, token, Address, BytesN, Env, Map, Symbol, Vec,
 };
 
 use boxmeout_shared::{
@@ -32,6 +32,12 @@ use boxmeout_shared::{
 
 // ── Persistent Storage Keys ──────────────────────────────────────────────────
 const ADMIN: &str                        = "ADMIN";
+const PENDING_ADMIN: &str                = "PENDING_ADMIN";
+const PENDING_ADMIN_EXPIRY: &str         = "PENDING_ADMIN_EXPIRY";
+const ADMIN_TIMELOCK: &str               = "ADMIN_TIMELOCK";
+const PENDING_ADMIN_UNLOCK: &str         = "PENDING_ADMIN_UNLOCK";
+const PENDING_ADMIN_TTL_SECS: u64        = 604_800; // 7 days
+const DEFAULT_ADMIN_TIMELOCK_SECS: u64   = 86_400;  // 24 hours
 const BET_TOKEN: &str                    = "BET_TOKEN";
 const FACTORY: &str                      = "FACTORY";
 const ACCUMULATED_FEES: &str             = "ACCUMULATED_FEES";             // Map<Address, i128>
@@ -48,9 +54,13 @@ const FEE_TIERS: &str                    = "FEE_TIERS";                    // Ve
 const MIN_WITHDRAWAL: i128               = 10_000_000;                     // 1 XLM in stroops
 
 // ── Action symbols for events ────────────────────────────────────────────────
+#[allow(dead_code)]
 const SYM_FEE_WITHDRAW: &str             = "fee_wthdrl";
+#[allow(dead_code)]
 const SYM_EMRG_DRAIN: &str               = "emrg_drain";
+#[allow(dead_code)]
 const SYM_FEE_DEPOSIT: &str              = "fee_depst";
+#[allow(dead_code)]
 const SYM_CAP_REACHED: &str              = "cap_rchd";
 
 #[contract]
@@ -172,6 +182,7 @@ impl Treasury {
         env.storage().persistent().set(&FEE_LOCK, &false);
         env.storage().persistent().set(&AUDIT_LOG, &Vec::<AuditEntry>::new(&env));
         env.storage().persistent().set(&AUDIT_NEXT_ID, &0u64);
+        env.storage().persistent().set(&ADMIN_TIMELOCK, &DEFAULT_ADMIN_TIMELOCK_SECS);
 
         let mut default_tiers = Vec::<FeeTier>::new(&env);
         default_tiers.push_back(FeeTier { volume_threshold: 100_000_000, fee_bps: 200 }); // <= 10 XLM: 200 bps (2%)
@@ -569,8 +580,159 @@ impl Treasury {
         ((bet_amount as u128 * rate_bps as u128) / 10_000) as u64
     }
 
+    /// Returns the registered admin address of the treasury.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().persistent()
+            .get(&ADMIN)
+            .expect("treasury not initialized")
+    }
+
+    /// Sets the admin timelock in seconds. Only callable by admin.
+    pub fn set_admin_timelock(
+        env: Env,
+        admin: Address,
+        timelock_secs: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&ADMIN_TIMELOCK, &timelock_secs);
+        Ok(())
+    }
+
+    /// Gets the current admin timelock in seconds.
+    pub fn get_admin_timelock(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&ADMIN_TIMELOCK)
+            .unwrap_or(DEFAULT_ADMIN_TIMELOCK_SECS)
+    }
+
+    /// Returns the pending admin nominee, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&PENDING_ADMIN)
+    }
+
+    /// Returns the timestamp when the pending admin transfer can be accepted.
+    pub fn get_pending_admin_unlock(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&PENDING_ADMIN_UNLOCK)
+            .unwrap_or(0)
+    }
+
+    /// Proposes a new admin address, starting the two-step transfer.
+    pub fn propose_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        current_admin.require_auth();
+        Self::require_admin(&env, &current_admin)?;
+
+        let timelock = env
+            .storage()
+            .persistent()
+            .get(&ADMIN_TIMELOCK)
+            .unwrap_or(DEFAULT_ADMIN_TIMELOCK_SECS);
+        let now = env.ledger().timestamp();
+        let unlock_at = now.saturating_add(timelock);
+        let expiry = now.saturating_add(PENDING_ADMIN_TTL_SECS);
+
+        env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
+        env.storage().persistent().set(&PENDING_ADMIN_UNLOCK, &unlock_at);
+        env.storage()
+            .persistent()
+            .set(&PENDING_ADMIN_EXPIRY, &expiry);
+        boxmeout_shared::emit_admin_proposed(&env, current_admin, new_admin);
+        Ok(())
+    }
+
+    /// Completes the two-step admin transfer.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
+
+        if new_admin != pending {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let unlock_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN_UNLOCK)
+            .unwrap_or(0);
+        if env.ledger().timestamp() < unlock_at {
+            return Err(ContractError::AdminTimelockActive);
+        }
+
+        let expiry: u64 = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN_EXPIRY)
+            .ok_or(ContractError::Unauthorized)?;
+        if env.ledger().timestamp() > expiry {
+            env.storage().persistent().remove(&PENDING_ADMIN);
+            env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
+            env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
+            return Err(ContractError::PendingAdminExpired);
+        }
+
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
+
+        env.storage().persistent().set(&ADMIN, &new_admin);
+        env.storage().persistent().remove(&PENDING_ADMIN);
+        env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
+        env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
+
+        boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
+        Ok(())
+    }
+
+    /// Deposits fees into the treasury (e.g. from market place_bet).
+    pub fn deposit(env: Env, fee_amount: i128) -> Result<(), ContractError> {
+        if fee_amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let token: Address = env
+            .storage()
+            .persistent()
+            .get(&BET_TOKEN)
+            .ok_or(ContractError::Unauthorized)?;
+
+        let mut fees: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&ACCUMULATED_FEES)
+            .unwrap_or_else(|| Map::new(&env));
+        let current = fees.get(token.clone()).unwrap_or(0);
+        fees.set(token.clone(), current + fee_amount);
+        env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
+
+        Self::record_audit(
+            &env,
+            AuditAction::FeeDeposited,
+            token.clone(),
+            fee_amount,
+            env.current_contract_address(),
+            env.current_contract_address(),
+        );
+
+        boxmeout_shared::emit_fee_deposited(&env, env.current_contract_address(), token, fee_amount);
+        Ok(())
+    }
+
     pub fn extend_ttl(env: Env) {
         env.storage().persistent().extend_ttl(&ADMIN, 518_400, 518_400);
+        env.storage().persistent().extend_ttl(&ADMIN_TIMELOCK, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&BET_TOKEN, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&FACTORY, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&WITHDRAWAL_LIMIT, 518_400, 518_400);
@@ -601,7 +763,7 @@ impl Treasury {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, LedgerInfo},
+        testutils::{Address as _, Ledger},
         token::StellarAssetClient,
     };
 
@@ -632,7 +794,7 @@ mod tests {
     fn set_time(env: &Env, ts: u64) {
         env.ledger().set(soroban_sdk::testutils::LedgerInfo {
             timestamp: ts,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 100,
             network_id: Default::default(),
             base_reserve: 1,
@@ -696,5 +858,83 @@ mod tests {
         assert_eq!(client.get_audit_log_len(), log.len() as u64);
         let entry = client.get_audit_entry(&0).unwrap();
         assert_eq!(entry.id, 0);
+    }
+
+    #[test]
+    fn test_early_acceptance_rejected_by_timelock() {
+        let (env, client, admin, _market, _token, _factory) = setup(10_000_000);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+
+        // Early accept before 24h must be rejected
+        let early = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            early.unwrap_err(),
+            Ok(ContractError::AdminTimelockActive)
+        );
+
+        // Advance to 86,399s
+        set_time(&env, 86_399);
+        let still_early = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            still_early.unwrap_err(),
+            Ok(ContractError::AdminTimelockActive)
+        );
+
+        // Advance to 86,400s -> succeeds
+        set_time(&env, 86_400);
+        assert!(client.try_accept_admin(&new_admin).is_ok());
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_configurable_admin_timelock() {
+        let (env, client, admin, _market, _token, _factory) = setup(10_000_000);
+        let new_admin = Address::generate(&env);
+
+        // Configure timelock to 3600 seconds
+        client.set_admin_timelock(&admin, &3600);
+        assert_eq!(client.get_admin_timelock(), 3600);
+
+        client.propose_admin(&admin, &new_admin);
+
+        set_time(&env, 3599);
+        let early = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            early.unwrap_err(),
+            Ok(ContractError::AdminTimelockActive)
+        );
+
+        set_time(&env, 3600);
+        assert!(client.try_accept_admin(&new_admin).is_ok());
+    }
+
+    #[test]
+    fn test_impostor_cannot_accept_admin() {
+        let (env, client, admin, _market, _token, _factory) = setup(10_000_000);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+        set_time(&env, 86_401);
+
+        let err = client.try_accept_admin(&impostor);
+        assert_eq!(
+            err.unwrap_err(),
+            Ok(ContractError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn test_deposit_accumulates_fees() {
+        let (_env, client, _admin, _market, token, _factory) = setup(10_000_000);
+        assert_eq!(client.get_accumulated_fees(&token), 0);
+
+        client.deposit(&250_000i128);
+        assert_eq!(client.get_accumulated_fees(&token), 250_000i128);
+
+        client.deposit(&500_000i128);
+        assert_eq!(client.get_accumulated_fees(&token), 750_000i128);
     }
 }
