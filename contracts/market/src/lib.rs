@@ -79,6 +79,12 @@ pub trait FactoryInterface {
     fn get_admin(env: Env) -> Address;
 }
 
+// ─── Cross-contract client for treasury fee deposits ─────────────────────────
+#[contractclient(name = "TreasuryClient")]
+pub trait TreasuryInterface {
+    fn deposit(env: Env, fee_amount: i128) -> Result<(), ContractError>;
+}
+
 #[contract]
 pub struct Market;
 
@@ -424,6 +430,21 @@ impl Market {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&bettor, &env.current_contract_address(), &amount);
 
+        // Platform fee routing to Treasury (Issue #636)
+        let fee_amount = if new_state.config.fee_bps > 0 {
+            amount.checked_mul(new_state.config.fee_bps as i128).unwrap_or(0) / 10_000
+        } else {
+            0
+        };
+
+        if fee_amount > 0 {
+            if let Some(treasury) = env.storage().persistent().get::<_, Address>(&TREASURY) {
+                // Route fees to treasury (no direct token transfers to admin address)
+                token_client.transfer(&env.current_contract_address(), &treasury, &fee_amount);
+                let _ = TreasuryClient::new(&env, &treasury).try_deposit(&fee_amount);
+            }
+        }
+
         boxmeout_shared::emit_bet_placed(&env, new_state.market_id, bet.clone());
 
         // ── AMM PIPELINE EVENTS (issues #473–#476) ────────────────────────────
@@ -558,16 +579,11 @@ impl Market {
             .get(&LP_FEE_PER_SHARE)
             .unwrap_or(0);
 
-        let lp_shares = if total_shares == 0 || state.total_pool == 0 {
-            // First liquidity: mint shares equal to total input (1:1 seed)
-            total_in
-        } else {
-            // Subsequent liquidity: proportional to existing pool
-            total_in
-                .checked_mul(total_shares)
-                .and_then(|v| v.checked_div(state.total_pool))
-                .ok_or(ContractError::InsufficientAmount)?
-        };
+        let lp_shares = boxmeout_shared::amm::calc_lp_shares_to_mint(
+            total_in,
+            state.total_pool,
+            total_shares,
+        ).ok_or(ContractError::InsufficientAmount)?;
 
         if lp_shares < min_lp_shares_out {
             return Err(ContractError::SlippageExceeded);
@@ -661,24 +677,13 @@ impl Market {
             .unwrap_or(0);
 
         // Compute proportional withdrawal amounts
-        let share_ratio_num = lp_shares_to_burn;
-        let share_ratio_den = total_shares;
-
-        let withdraw_a = if share_ratio_den > 0 {
-            state.pool_a.checked_mul(share_ratio_num)
-                .and_then(|v| v.checked_div(share_ratio_den))
-                .unwrap_or(0)
-        } else { 0 };
-        let withdraw_b = if share_ratio_den > 0 {
-            state.pool_b.checked_mul(share_ratio_num)
-                .and_then(|v| v.checked_div(share_ratio_den))
-                .unwrap_or(0)
-        } else { 0 };
-        let withdraw_draw = if share_ratio_den > 0 {
-            state.pool_draw.checked_mul(share_ratio_num)
-                .and_then(|v| v.checked_div(share_ratio_den))
-                .unwrap_or(0)
-        } else { 0 };
+        let (withdraw_a, withdraw_b, withdraw_draw) = boxmeout_shared::amm::calc_lp_withdrawal_amounts(
+            lp_shares_to_burn,
+            total_shares,
+            state.pool_a,
+            state.pool_b,
+            state.pool_draw,
+        ).ok_or(ContractError::InsufficientAmount)?;
         let total_out = withdraw_a
             .saturating_add(withdraw_b)
             .saturating_add(withdraw_draw);
@@ -816,8 +821,6 @@ impl Market {
             return Err(ContractError::MarketNotStarted);
         }
 
-        let deadline = state.fight.scheduled_at
-
         let deadline = state
             .fight
             .scheduled_at
@@ -894,8 +897,6 @@ impl Market {
             OptionalMarketTier::None => 0,
         };
 
-        let outcome_byte: u32 = match report.outcome {
-
         // Emit structured event for real-time frontend progress updates
         let outcome_index: u32 = match report.outcome {
             Outcome::FighterA  => 0,
@@ -903,6 +904,7 @@ impl Market {
             Outcome::Draw      => 2,
             Outcome::NoContest => 3,
         };
+        let outcome_byte: u32 = outcome_index;
 
         // Emit oracle_report_received so frontends can track resolution progress.
         boxmeout_shared::emit_oracle_report_received(
@@ -912,10 +914,6 @@ impl Market {
             outcome_byte,
             pending.len(),
         );
-
-        // Resolve if we have 2 matching reports (2-of-3 consensus, issues #473–#476).
-        let consensus_threshold = boxmeout_shared::amm::tier_oracle_consensus_threshold(tier_byte);
-        if matching_count >= consensus_threshold {
 
         boxmeout_shared::emit_oracle_report_submitted(
             &env,
@@ -968,7 +966,7 @@ impl Market {
             boxmeout_shared::emit_market_resolution_pending(
                 &env,
                 state.market_id,
-                outcome_byte,
+                outcome_byte as u8,
                 cooldown_end_ledger,
             );
         } else if conflicting_count > 0 && matching_count == 1 {
@@ -1198,9 +1196,11 @@ impl Market {
             .get(&TREASURY)
             .ok_or(ContractError::Unauthorized)?;
 
-        // Transfer fee to treasury first
-        if fee > 0 {
+        // Transfer fee to treasury if not already routed during place_bet
+        let current_balance = token_client.balance(&env.current_contract_address());
+        if current_balance >= payout + fee && fee > 0 {
             token_client.transfer(&env.current_contract_address(), &treasury, &fee);
+            let _ = TreasuryClient::new(&env, &treasury).try_deposit(&fee);
         }
         // Transfer payout to bettor
         if payout > 0 {
@@ -1324,7 +1324,7 @@ impl Market {
         Self::save_state(&env, &state);
         Self::extend_market_ttl(&env);
 
-        boxmeout_shared::emit_market_cancelled(&env, state.market_id, reason);
+        boxmeout_shared::emit_market_cancelled(&env, state.market_id, caller, reason);
         Ok(())
     }
 

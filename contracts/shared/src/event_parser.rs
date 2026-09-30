@@ -47,11 +47,8 @@ pub struct RefundClaimedEvent {
     pub amount: i128,
 }
 
-#[derive(Clone, Debug)]
-pub struct MarketCancelledEvent {
-    pub market_id: u64,
-    pub reason: String,
-}
+pub use crate::events::MarketCancelled;
+pub type MarketCancelledEvent = MarketCancelled;
 
 #[derive(Clone, Debug)]
 pub struct MarketDisputedEvent {
@@ -190,15 +187,19 @@ pub fn parse_refund_claimed_event(
 /// Parses a raw `market_cancelled` event.
 ///
 /// Topics: `(Symbol("market_cancelled"), market_id: u64)`
-/// Data:   `String` (reason)
+/// Data:   `(cancelled_by: Address, reason: String)`
 pub fn parse_market_cancelled_event(
     env: &Env,
     topics: &Vec<Val>,
     data: &Val,
 ) -> Result<MarketCancelledEvent, ParseError> {
     let market_id: u64 = get_topic(env, topics, 1)?;
-    let reason: String = decode_data(env, data)?;
-    Ok(MarketCancelledEvent { market_id, reason })
+    let (cancelled_by, reason): (Address, String) = decode_data(env, data)?;
+    Ok(MarketCancelledEvent {
+        market_id,
+        cancelled_by,
+        reason,
+    })
 }
 
 /// Parses a raw `market_disputed` event.
@@ -239,7 +240,7 @@ mod tests {
     use soroban_sdk::{
         contract, contractimpl,
         testutils::{Address as _, Events},
-        Address, Env, IntoVal,
+        Address, Env,
     };
 
     use crate::{
@@ -373,12 +374,14 @@ mod tests {
     #[test]
     fn test_parse_market_cancelled_event() {
         let (env, id) = setup();
+        let canceller = addr(&env);
         env.as_contract(&id, || {
-            emit_market_cancelled(&env, 7, s(&env, "postponed"));
+            emit_market_cancelled(&env, 7, canceller.clone(), s(&env, "postponed"));
         });
         let ev = last_event!(env);
         let parsed = parse_market_cancelled_event(&env, &ev.1, &ev.2).unwrap();
         assert_eq!(parsed.market_id, 7);
+        assert_eq!(parsed.cancelled_by, canceller);
         assert_eq!(parsed.reason, s(&env, "postponed"));
     }
 
