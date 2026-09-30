@@ -18,6 +18,7 @@ interface MarketCardProps {
 
 export function MarketCard({ market, isNew = false }: MarketCardProps): JSX.Element {
   const totalXlm = Math.floor(parseInt(market.total_pool, 10) / 1e7).toLocaleString();
+  const betCount = (market as any).bet_count ? Number((market as any).bet_count).toLocaleString() : '0';
 
   return (
     <Link
@@ -60,7 +61,10 @@ export function MarketCard({ market, isNew = false }: MarketCardProps): JSX.Elem
           <ScheduledTimeDisplay scheduledAt={market.scheduled_at} />
           <CountdownTimer targetDate={market.scheduled_at} label="Starts in" />
         </div>
-        <span className="text-right">{totalXlm} XLM pooled</span>
+        <div className="flex flex-col items-end gap-1">
+          <span className="text-right">{totalXlm} XLM pooled</span>
+          <span className="text-right">🥊 {betCount} bets</span>
+        </div>
       </div>
     </Link>
   );

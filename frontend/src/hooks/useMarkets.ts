@@ -109,7 +109,20 @@ export function useMarkets(filters?: MarketFilters, pagination?: PaginationParam
               marketId?: string;
               fighterA?: string;
               fighterB?: string;
+              betCount?: number;
             };
+            // Handle bet_count_update events
+            if (payload.type === 'bet_count_update' && payload.marketId && typeof payload.betCount === 'number') {
+              const { marketId, betCount } = payload;
+              setMarkets((current) => current.map((m) =>
+                m.market_id === marketId ? { ...m, bet_count: betCount } : m
+              ));
+              marketsRef.current = marketsRef.current.map((m) =>
+                m.market_id === marketId ? { ...m, bet_count: betCount } : m
+              );
+              return;
+            }
+
             if (
               payload.type !== 'market:created' ||
               typeof payload.marketId !== 'string' ||
