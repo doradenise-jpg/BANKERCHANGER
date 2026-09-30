@@ -10,13 +10,7 @@ import { pool } from '../config/db';
 import { rpc, Address, xdr } from '@stellar/stellar-sdk';
 import { subscribeToContractEvents, fetchHistoricalEvents } from '../services/StellarService';
 import { cacheDeletePattern } from '../services/cache.service';
-import { tryGetActivityFeed, getActivityFeedIfInitialized, type ActivityEvent } from '../websocket/realtime';
-import {
-  findMissingRanges,
-  getProcessedRanges,
-  getLastProcessedLedger as getTrackerLastProcessed,
-  recordProcessedRange,
-} from './ledgerTracker';
+import { broadcastMarketResolved } from '../websocket/realtime';
 
 // Raw event shape returned by Stellar RPC / Horizon
 export interface RawStellarEvent {
@@ -647,6 +641,7 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
   const outcome = typeof p.outcome === 'string' ? p.outcome : null;
   const marketId = typeof p.market_id === 'string' ? p.market_id : null;
   const client = await pool.connect();
+  let winnerOdds = 0;
   try {
     await client.query('BEGIN');
 
@@ -666,6 +661,25 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
       [outcome, resolvedAt, oracleAddress ?? null, marketId],
     );
 
+    const { rows: [market] } = await client.query(
+      `SELECT pool_a, pool_b, pool_draw, total_pool, fee_bps
+         FROM markets WHERE market_id = $1`,
+      [p.market_id],
+    );
+    if (market && p.outcome !== 'no_contest') {
+      const winningPool = BigInt(
+        p.outcome === 'fighter_a' ? market.pool_a :
+        p.outcome === 'fighter_b' ? market.pool_b :
+        p.outcome === 'draw' ? market.pool_draw : '0',
+      );
+      const totalPool = BigInt(market.total_pool);
+      if (winningPool > 0n && totalPool > 0n) {
+        const fee = (totalPool * BigInt(market.fee_bps)) / 10000n;
+        winnerOdds = Number(((totalPool - fee) * 10000n) / winningPool);
+      }
+    }
+
+    // Insert OracleReport record
     await client.query(
       `INSERT INTO oracle_reports
          (match_id, oracle_address, outcome, reported_at, signature, accepted, tx_hash)
@@ -702,7 +716,12 @@ export async function handleMarketResolved(event: RawStellarEvent): Promise<void
     client.release();
   }
 
-  await cacheDeletePattern(`market:${marketId}*`);
+  if (typeof p.market_id === 'string' && typeof p.outcome === 'string') {
+    broadcastMarketResolved(p.market_id, p.outcome, winnerOdds);
+  }
+
+  // Invalidate all Redis cache keys for this market
+  await cacheDeletePattern(`market:${p.market_id}*`);
   await cacheDeletePattern(`markets:*`);
 
   if (marketId) {

@@ -6,7 +6,7 @@
  *   2. fetchExternalFightResult() reads the mock
  *   3. submitFightResult() records the OracleReport in the DB and calls invokeContract (mocked)
  *   4. handleMarketResolved() (indexer) updates the market row in the DB
- *   5. ActivityFeed.publish() broadcasts the "resolved" WebSocket event
+ *   5. The indexer broadcasts the committed resolution to WebSocket subscribers
  *
  * Requires a running PostgreSQL instance:
  *   DATABASE_URL=postgresql://bankerchanger:bankerchanger@localhost:5433/bankerchanger_test
@@ -19,13 +19,16 @@ import http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import express from 'express';
 import { Pool } from 'pg';
 import { WebSocket } from 'ws';
-import { ActivityFeed, type ActivityEvent } from '../../src/websocket/realtime';
-import {
-  fetchExternalFightResult,
-  submitFightResult,
-} from '../../src/oracle/OracleService';
+import jwt from 'jsonwebtoken';
+import request from 'supertest';
+import { initActivityFeed, type ActivityEvent } from '../../src/websocket/realtime';
+import { fetchExternalFightResult } from '../../src/oracle/OracleService';
+import { resolveMarket } from '../../src/api/controllers/MarketController';
+import { setDbAdapter } from '../../src/services/MarketService';
+import type { Market } from '../../src/models/Market';
 import { handleMarketResolved } from '../../src/indexer/StellarIndexer';
 import type { RawStellarEvent } from '../../src/indexer/StellarIndexer';
 
@@ -83,6 +86,7 @@ const ORACLE_OUTCOME = 'fighter_a' as const;
 
 // Deterministic timestamp
 const FROZEN_ISO = '2026-06-30T10:00:00.000Z';
+const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 
 // -- Helpers -------------------------------------------------------------------
 
@@ -104,6 +108,10 @@ function waitForWsMessage(ws: WebSocket, timeoutMs = 2000): Promise<ActivityEven
   });
 }
 
+function generateTestToken(): string {
+  return jwt.sign({ sub: 'test-user', type: 'access' }, JWT_SECRET);
+}
+
 // -- Setup / Teardown ----------------------------------------------------------
 
 beforeAll(async () => {
@@ -123,6 +131,31 @@ beforeEach(async () => {
      VALUES ($1,$2,$3,$4,$5,'heavyweight',false,'MSG', NOW() - INTERVAL '2 hours','open',1000)`,
     [MARKET_ID, CONTRACT_ADDRESS, MATCH_ID, 'Ali', 'Frazier'],
   );
+  await pool.query(
+    `UPDATE markets SET pool_a = 6000, pool_b = 4000, total_pool = 10000, fee_bps = 200
+      WHERE market_id = $1`,
+    [MARKET_ID],
+  );
+
+  setDbAdapter({
+    findMarkets: async () => [],
+    findMarketById: async (marketId) => {
+      const [market] = await q<Record<string, unknown>>(
+        'SELECT * FROM markets WHERE market_id = $1',
+        [marketId],
+      );
+      return market ? {
+        ...market,
+        scheduled_at: new Date(market.scheduled_at as string),
+        created_at: new Date(market.created_at as string),
+        updated_at: new Date(market.updated_at as string),
+        resolved_at: market.resolved_at ? new Date(market.resolved_at as string) : null,
+      } as unknown as Market : null;
+    },
+    findBetsByAddress: async () => [],
+    findBetsByMarket: async () => [],
+    updateMarketStatus: async () => {},
+  });
 
   jest.clearAllMocks();
 });
@@ -151,18 +184,27 @@ describe('Oracle Resolution Pipeline', () => {
 
     // 2. Set up WebSocket server + ActivityFeed
     const httpServer = http.createServer();
-    const feed = new ActivityFeed(httpServer);
+    const feed = initActivityFeed(httpServer);
 
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
     const { port } = httpServer.address() as { port: number };
 
     const wsClient = new WebSocket(`ws://localhost:${port}`);
     await new Promise<void>((resolve) => wsClient.once('open', resolve));
+    wsClient.send(JSON.stringify({ type: 'auth', token: generateTestToken() }));
+    await new Promise((r) => setImmediate(r));
     wsClient.send(JSON.stringify({ type: 'subscribe_activity', marketId: MARKET_ID }));
     await new Promise((r) => setImmediate(r));
+    const secondWsClient = new WebSocket(`ws://localhost:${port}`);
+    await new Promise<void>((resolve) => secondWsClient.once('open', resolve));
+    secondWsClient.send(JSON.stringify({ type: 'auth', token: generateTestToken() }));
+    await new Promise((r) => setImmediate(r));
+    secondWsClient.send(JSON.stringify({ type: 'subscribe_activity', marketId: MARKET_ID }));
+    await new Promise((r) => setImmediate(r));
 
-    // Prime the WS message listener before the event is published
+    // Prime both WS message listeners before the resolution event is published.
     const wsMessagePromise = waitForWsMessage(wsClient);
+    const secondWsMessagePromise = waitForWsMessage(secondWsClient);
 
     try {
       // 3. Fetch confirmed fight result from mocked external API
@@ -173,21 +215,21 @@ describe('Oracle Resolution Pipeline', () => {
       const calledUrl: string = mockFetch.mock.calls[0][0] as string;
       expect(calledUrl).toContain(encodeURIComponent(MATCH_ID));
 
-      // 4. Submit fight result — writes OracleReport row, calls invokeContract
       const { invokeContract } = require('../../src/services/StellarService') as {
         invokeContract: jest.Mock;
       };
 
-      const oracleReport = await submitFightResult(MATCH_ID, ORACLE_OUTCOME);
+      const restApp = express();
+      restApp.use(express.json());
+      restApp.post('/api/markets/:market_id/resolve', resolveMarket);
+      const response = await request(restApp)
+        .post(`/api/markets/${MARKET_ID}/resolve`)
+        .send({ winning_outcome: ORACLE_OUTCOME });
 
+      expect(response.status).toBe(200);
       expect(invokeContract).toHaveBeenCalledTimes(1);
       expect(invokeContract.mock.calls[0][0]).toBe(CONTRACT_ADDRESS);
       expect(invokeContract.mock.calls[0][1]).toBe('resolve_market');
-
-      expect(oracleReport.match_id).toBe(MATCH_ID);
-      expect(oracleReport.outcome).toBe(ORACLE_OUTCOME);
-      expect(oracleReport.accepted).toBe(true);
-      expect(oracleReport.tx_hash).toBe('mock-tx-hash-oracle-resolve');
 
       // 5. Simulate the indexer receiving the on-chain MarketResolved event
       const resolvedEvent: RawStellarEvent = {
@@ -230,23 +272,22 @@ describe('Oracle Resolution Pipeline', () => {
       expect(oracleRows.length).toBeGreaterThanOrEqual(1);
       expect(oracleRows[0].outcome).toBe(ORACLE_OUTCOME);
 
-      // 7. WebSocket assertion — publish "resolved" event
-      const resolvedWsEvent: ActivityEvent = {
-        type: 'resolved',
-        marketId: MARKET_ID,
-        winningOutcomeId: ORACLE_OUTCOME,
-      };
-
-      feed.publish(resolvedWsEvent);
-
-      const receivedWsMsg = await wsMessagePromise;
-
-      expect(receivedWsMsg.type).toBe('resolved');
-      expect((receivedWsMsg as typeof resolvedWsEvent).marketId).toBe(MARKET_ID);
-      expect((receivedWsMsg as typeof resolvedWsEvent).winningOutcomeId).toBe(ORACLE_OUTCOME);
-      expect(receivedWsMsg).toEqual(resolvedWsEvent);
+      const receivedMessages = await Promise.all([wsMessagePromise, secondWsMessagePromise]);
+      for (const message of receivedMessages) {
+        if (message.type !== 'market:resolved') {
+          throw new Error(`Unexpected WebSocket event: ${message.type}`);
+        }
+        expect(message).toMatchObject({
+          type: 'market:resolved',
+          marketId: MARKET_ID,
+          outcome: ORACLE_OUTCOME,
+          winner_odds: 16333,
+        });
+        expect(new Date(message.timestamp).toISOString()).toBe(message.timestamp);
+      }
     } finally {
       wsClient.close();
+      secondWsClient.close();
       await new Promise<void>((resolve) => {
         feed.close();
         httpServer.close(() => resolve());
