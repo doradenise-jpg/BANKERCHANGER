@@ -76,6 +76,8 @@ pub enum ContractError {
     DisputeCooldownActive = 34,
     /// finalize_resolution called on a market not in ResolutionPending state
     ResolutionNotPending = 35,
+    /// Market was not configured to allow Draw outcome
+    DrawNotAllowed = 36,
 
     // ── Treasury ───────────────────────────────────────────
     /// Fee withdrawals are temporarily paused
@@ -110,4 +112,8 @@ pub enum ContractError {
     // ── Slippage ────────────────────────────────────────────
     /// Computed shares out are below the caller's min_shares_out tolerance
     SlippageExceeded = 61,
+
+    // ── Arithmetic ─────────────────────────────────────────
+    /// Arithmetic operation resulted in overflow
+    ArithmeticOverflow = 70,
 }

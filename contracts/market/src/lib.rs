@@ -54,6 +54,8 @@ const LP_TOTAL_SHARES: &str = "LP_TOTAL_SHARES";
 const LP_PREFIX: &str       = "LP";
 /// Accumulated fee-per-LP-share in micro-units (scaled by 1_000_000)
 const LP_FEE_PER_SHARE: &str = "LP_FEE_PER_SHARE";
+/// Storage key for whether Draw outcome is permitted
+const ALLOW_DRAW: &str       = "ALLOW_DRAW";
 /// Seed liquidity minimum — 1 XLM per pool side
 const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
 
@@ -193,6 +195,16 @@ impl Market {
     fn remove_lp_position(env: &Env, provider: &Address) {
         let key = Self::lp_key(env, provider);
         env.storage().persistent().remove(&key);
+    }
+
+    fn get_allow_draw(env: &Env) -> bool {
+        if let Some(val) = env.storage().persistent().get(&ALLOW_DRAW) {
+            return val;
+        }
+        if let Some(val) = env.storage().persistent().get(&Symbol::new(env, "allow_draw")) {
+            return val;
+        }
+        true
     }
 }
 
@@ -812,11 +824,13 @@ impl Market {
             return Err(ContractError::InvalidMarketStatus);
         }
 
+        if report.outcome == Outcome::Draw && !Self::get_allow_draw(&env) {
+            return Err(ContractError::DrawNotAllowed);
+        }
+
         if env.ledger().timestamp() < state.fight.scheduled_at {
             return Err(ContractError::MarketNotStarted);
         }
-
-        let deadline = state.fight.scheduled_at
 
         let deadline = state
             .fight
@@ -895,14 +909,14 @@ impl Market {
         };
 
         let outcome_byte: u32 = match report.outcome {
-
-        // Emit structured event for real-time frontend progress updates
-        let outcome_index: u32 = match report.outcome {
             Outcome::FighterA  => 0,
             Outcome::FighterB  => 1,
             Outcome::Draw      => 2,
             Outcome::NoContest => 3,
         };
+
+        // Emit structured event for real-time frontend progress updates
+        let outcome_index: u32 = outcome_byte;
 
         // Emit oracle_report_received so frontends can track resolution progress.
         boxmeout_shared::emit_oracle_report_received(
@@ -1159,10 +1173,7 @@ impl Market {
             .checked_sub(fee)
             .ok_or(ContractError::InsufficientAmount)?;
         let payout = if winning_pool > 0 {
-            bettor_stake
-                .checked_mul(net_pool)
-                .and_then(|v| v.checked_div(winning_pool))
-                .ok_or(ContractError::InsufficientAmount)?
+            boxmeout_shared::math::calculate_payout(bettor_stake, net_pool, winning_pool)?
         } else {
             0
         };
@@ -1209,6 +1220,9 @@ impl Market {
 
         // ── CLEANUP ───────────────────────────────────────────────────────────
         env.storage().instance().set(&CLAIMING, &false);
+        // Remove share/bet entry from persistent storage after payout to burn shares and prevent ledger bloat
+        let share_key = Self::bet_key(&env, &bettor);
+        env.storage().persistent().remove(&share_key);
         Self::extend_market_ttl(&env);
 
         boxmeout_shared::emit_winnings_claimed(&env, state.market_id, receipt.clone());
@@ -1400,6 +1414,10 @@ impl Market {
             return Err(ContractError::InvalidMarketStatus);
         }
 
+        if final_outcome == Outcome::Draw && !Self::get_allow_draw(&env) {
+            return Err(ContractError::DrawNotAllowed);
+        }
+
         // EFFECTS
         state.outcome = OptionalOutcome::Some(final_outcome.clone());
         state.status = MarketStatus::Resolved;
@@ -1411,6 +1429,26 @@ impl Market {
         // Include the admin address so on-chain audits can distinguish
         // oracle-resolved markets from admin-overridden (dispute) resolutions.
         boxmeout_shared::emit_market_resolved(&env, state.market_id, final_outcome, admin);
+        Ok(())
+    }
+
+    /// Resolves the market via oracle report (alias for resolve_market).
+    pub fn resolve(
+        env: Env,
+        oracle: Address,
+        report: OracleReport,
+    ) -> Result<(), ContractError> {
+        Self::resolve_market(env, oracle, report)
+    }
+
+    /// Configures whether Draw outcome is permitted for this market.
+    pub fn set_allow_draw(env: Env, admin: Address, allow_draw: bool) -> Result<(), ContractError> {
+        admin.require_auth();
+        let factory: Address = env.storage().persistent().get(&FACTORY).unwrap();
+        if admin != factory {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().persistent().set(&ALLOW_DRAW, &allow_draw);
         Ok(())
     }
 
@@ -1475,9 +1513,15 @@ impl Market {
         if winning_pool == 0 {
             return 0;
         }
-        let fee = hypo_total * (state.config.fee_bps as i128) / 10_000;
-        let net_pool = hypo_total - fee;
-        amount * net_pool / winning_pool
+        let fee = match hypo_total.checked_mul(state.config.fee_bps as i128).and_then(|v| v.checked_div(10_000)) {
+            Some(f) => f,
+            None => return 0,
+        };
+        let net_pool = match hypo_total.checked_sub(fee) {
+            Some(n) => n,
+            None => return 0,
+        };
+        boxmeout_shared::math::calculate_payout(amount, net_pool, winning_pool).unwrap_or(0)
     }
 
     /// Returns the number of unique bettors in this market.
