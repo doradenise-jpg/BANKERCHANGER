@@ -47,6 +47,7 @@ export type ActivityEvent =
   | { type: 'market_update'; marketId: string; eventType: string; data: Record<string, unknown> }
   | { type: 'leaderboard_rank_update'; userId: string; rank: number; currentStreak?: number; timestamp: string }
   | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string }
+  | { type: 'bet_count_update'; marketId: string; betCount: number; timestamp: string }
   | { type: 'indexer_status'; status: 'running' | 'idle' | 'error' | 'syncing'; currentLedger: number; targetLedger: number; timestamp: string };
 
 export type MarketCreatedEvent = {
@@ -453,6 +454,17 @@ export class ActivityFeed {
     for (const ws of this.globalMarketCreatedSubs) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
     }
+  }
+
+  /** Publish a bet count update to market subscribers. */
+  publishBetCountUpdate(marketId: string, betCount: number): void {
+    const event = {
+      type: 'bet_count_update' as const,
+      marketId,
+      betCount,
+      timestamp: new Date().toISOString(),
+    };
+    this.publish(event);
   }
 
   publishLeaderboardUpdate(event: LeaderboardRankUpdateEvent | { userId: string; rank: number; currentStreak: number }): void {

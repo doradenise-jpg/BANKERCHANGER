@@ -117,11 +117,19 @@ export function useMarket(market_id: string): UseMarketResult {
               marketId?: string;
               winningOutcomeId?: string;
               outcome?: string;
+              betCount?: number;
             };
             if (
-              !['resolved', 'market:resolved', 'market_resolved'].includes(payload.type ?? '') ||
+              !['resolved', 'market:resolved', 'market_resolved', 'bet_count_update'].includes(payload.type ?? '') ||
               payload.marketId !== market_id
             ) return;
+
+            if (payload.type === 'bet_count_update' && typeof payload.betCount === 'number') {
+              setMarket((current) => current
+                ? { ...current, bet_count: payload.betCount }
+                : current);
+              return;
+            }
 
             const rawOutcome = payload.winningOutcomeId ?? payload.outcome;
             const outcome =

@@ -173,5 +173,15 @@ describe('MarketCard', () => {
       render(<MarketCard market={makeMarket({ total_pool: '1000000000' })} />);
       expect(screen.getByText(/100.*xlm pooled/i)).toBeInTheDocument();
     });
+
+    it('shows bet count with boxing glove and formatted with commas for > 999', () => {
+      render(<MarketCard market={makeMarket({ bet_count: 1234 } as any)} />);
+      expect(screen.getByText('🥊 1,234 bets')).toBeInTheDocument();
+    });
+
+    it('shows bet count for <= 999 without comma separator', () => {
+      render(<MarketCard market={makeMarket({ bet_count: 42 } as any)} />);
+      expect(screen.getByText('🥊 42 bets')).toBeInTheDocument();
+    });
   });
 });
