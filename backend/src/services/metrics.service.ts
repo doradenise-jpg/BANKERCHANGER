@@ -44,6 +44,7 @@ export const cacheHitsTotal = new Counter({
 export const cacheMissesTotal = new Counter({
   name: 'cache_misses_total',
   help: 'Total number of Redis cache misses',
+  labelNames: ['reason'] as const,
 });
 
 // ── WebSocket Metrics ─────────────────────────────────────────────────────────

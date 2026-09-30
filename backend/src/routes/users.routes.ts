@@ -3,7 +3,7 @@ import { Router, Response, NextFunction } from 'express';
 import { usersController } from '../api/controllers/UsersController.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { requireAdmin } from '../middleware/admin.middleware.js';
-import { validate } from '../middleware/validation.middleware.js';
+import { validateBody } from '../middleware/validation.middleware.js';
 import { updateProfileBody } from '../schemas/validation.schemas.js';
 import { AuthenticatedRequest } from '../types/auth.types.js';
 import { UserRepository } from '../repositories/user.repository.js';
@@ -74,6 +74,8 @@ router.get('/me', requireAuth, rejectSuspended, usersController.getMyProfile.bin
  *               avatarUrl:
  *                 type: string
  *                 format: uri
+ *               walletAddress:
+ *                 type: string
  *     responses:
  *       200:
  *         description: Updated user profile
@@ -88,7 +90,7 @@ router.patch(
   '/me',
   requireAuth,
   rejectSuspended,
-  validate({ body: updateProfileBody }),
+  validateBody(updateProfileBody),
   usersController.updateMyProfile.bind(usersController)
 );
 
