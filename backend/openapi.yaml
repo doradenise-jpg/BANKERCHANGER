@@ -2804,3 +2804,119 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse500' }
+
+# =============================================================================
+# WebSocket API Documentation (issue #659)
+#
+# The real-time feed is served at ws://<host>/ws (same port as the REST API).
+# Clients MUST authenticate before subscribing. All market-room broadcast
+# payloads are projected through a DTO whitelist — private fields such as
+# user_id and wallet_address are never included.
+#
+# Connection flow:
+#   1. Client connects to WebSocket endpoint.
+#   2. Client sends: { "type": "auth", "token": "<jwt>" }
+#      Accepted tokens: standard access JWT or a ws_activity scoped token.
+#   3. Client sends a subscribe message (see below).
+#   4. Server broadcasts events to subscribed rooms.
+#
+# Client → Server messages:
+#   { "type": "auth",                  "token": string }
+#   { "type": "subscribe_activity",    "marketId": string }
+#   { "type": "subscribe_market_created" }
+#   { "type": "subscribe_leaderboard", "leaderboardId"?: string }
+#   { "type": "unsubscribe_leaderboard","leaderboardId"?: string }
+#
+# Server → Client messages (market-room broadcasts — DTO whitelisted):
+#
+# x-websocket-schemas:
+#   WsTradeEvent:
+#     type: object
+#     description: A new trade (bet) was placed in the market.
+#     required: [type, marketId, outcomeId, side, sharesAmount, priceBps, timestamp]
+#     properties:
+#       type:        { type: string, enum: [trade] }
+#       marketId:    { type: string }
+#       outcomeId:   { type: string }
+#       side:        { type: string }
+#       sharesAmount:{ type: number }
+#       priceBps:    { type: number, description: Price in basis points (0–10000) }
+#       timestamp:   { type: string, format: date-time }
+#
+#   WsDisputeEvent:
+#     type: object
+#     description: A dispute was filed against the market outcome.
+#     required: [type, marketId, proposedOutcomeId]
+#     properties:
+#       type:              { type: string, enum: [dispute] }
+#       marketId:          { type: string }
+#       proposedOutcomeId: { type: string }
+#
+#   WsResolvedEvent:
+#     type: object
+#     description: The market was resolved with a winning outcome.
+#     required: [type, marketId, winningOutcomeId]
+#     properties:
+#       type:             { type: string, enum: [resolved] }
+#       marketId:         { type: string }
+#       winningOutcomeId: { type: string }
+#
+#   WsCancelledEvent:
+#     type: object
+#     description: The market was cancelled.
+#     required: [type, marketId]
+#     properties:
+#       type:     { type: string, enum: [cancelled] }
+#       marketId: { type: string }
+#
+#   WsMarketUpdateEvent:
+#     type: object
+#     description: >
+#       Generic market state update. The `data` field contains only public
+#       market fields — private fields (user_id, wallet_address, etc.) are
+#       stripped by the DTO projection layer before broadcast.
+#     required: [type, marketId, eventType, data]
+#     properties:
+#       type:      { type: string, enum: [market_update] }
+#       marketId:  { type: string }
+#       eventType: { type: string, description: Describes the nature of the update }
+#       data:
+#         type: object
+#         description: >
+#           Public market data payload. Never contains user_id, wallet_address,
+#           bettor_address, email, passwordHash, or any other private field.
+#         additionalProperties: true
+#
+#   WsMarketCreatedEvent:
+#     type: object
+#     description: A new market was created (broadcast to market:created subscribers).
+#     required: [type, marketId, fighterA, fighterB]
+#     properties:
+#       type:     { type: string, enum: [market:created] }
+#       marketId: { type: string }
+#       fighterA: { type: string }
+#       fighterB: { type: string }
+#
+#   WsLeaderboardRankUpdateEvent:
+#     type: object
+#     description: A leaderboard rank changed (broadcast to leaderboard subscribers only).
+#     required: [type, userId, rank, timestamp]
+#     properties:
+#       type:          { type: string, enum: [leaderboard_rank_update] }
+#       userId:        { type: string }
+#       rank:          { type: integer }
+#       score:         { type: number }
+#       currentStreak: { type: integer }
+#       displayName:   { type: string }
+#       leaderboardId: { type: string }
+#       timestamp:     { type: string, format: date-time }
+#
+#   WsErrorFrame:
+#     type: object
+#     description: Error frame sent by the server when an operation is rejected.
+#     required: [type, code, message]
+#     properties:
+#       type:    { type: string, enum: [error] }
+#       code:    { type: integer, description: HTTP-style error code (e.g. 429, 403) }
+#       message: { type: string, description: Machine-readable error identifier }
+# =============================================================================

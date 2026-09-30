@@ -3,6 +3,7 @@ import type { IncomingMessage, Server } from 'http';
 import jwt from 'jsonwebtoken';
 import { logger } from '../utils/logger';
 import type { RankUpdate } from '../models/Engagement';
+import { toMarketEventDTO } from '../dto/market.dto';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -422,7 +423,10 @@ export class ActivityFeed {
       const sockets = this.subscriptions.get(marketId);
       if (!sockets?.size) return;
 
-      const payload = JSON.stringify(event);
+      // Apply DTO whitelist projection to prevent private fields (user_id,
+      // wallet_address, etc.) from leaking into market-room broadcasts (#659).
+      const safeEvent = toMarketEventDTO(event as ActivityEvent);
+      const payload = JSON.stringify(safeEvent);
       for (const ws of sockets) {
         if (ws.readyState === WebSocket.OPEN) ws.send(payload);
       }
