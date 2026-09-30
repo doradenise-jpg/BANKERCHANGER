@@ -3,6 +3,8 @@
 //! BANKERCHANGER — MarketFactory Contract (Security-Audited)
 //! ============================================================
 
+extern crate alloc;
+
 use soroban_sdk::{contract, contractclient, contractimpl, Address, BytesN, Env, Map, Vec};
 
 use boxmeout_shared::{
@@ -40,6 +42,11 @@ pub trait MarketInterface {
     fn get_bets_by_address(env: Env, bettor: Address) -> Vec<BetRecord>;
     fn get_state(env: Env) -> Result<MarketState, ContractError>;
     fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>;
+    fn emergency_pause(env: Env, admin: Address) -> Result<(), ContractError>;
+    fn emergency_unpause(env: Env, admin: Address) -> Result<(), ContractError>;
+    fn get_status(env: Env) -> Result<MarketStatus, ContractError>;
+    fn get_market_status(env: Env) -> Result<MarketStatus, ContractError>;
+    fn refund_expired(env: Env, market_id: u64) -> Result<(), ContractError>;
 }
 
 #[contract]
@@ -106,6 +113,7 @@ impl MarketFactory {
             lock_before_secs: config.default_lock_before_secs,
             resolution_window: config.default_resolution_window,
             tier: 0,
+            dispute_cooldown_ledgers: 720,
         };
         env.storage()
             .persistent()
@@ -119,6 +127,18 @@ impl MarketFactory {
         env.storage()
             .persistent()
             .set(&OPEN_MARKETS, &Vec::<u64>::new(&env));
+
+        env.storage().instance().extend_ttl(50_000, 100_000);
+        env.storage().persistent().extend_ttl(&ADMIN, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&TREASURY, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&ORACLE_WHITELIST, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&PAUSED, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&MARKET_COUNT, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&MARKET_MAP, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&DEFAULT_CONFIG, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&MARKET_WASM_HASH, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&OPEN_MARKETS, 50_000, 100_000);
+
         Ok(())
     }
 
@@ -165,6 +185,25 @@ impl MarketFactory {
         }
         if fight.fighter_a.len() == 0 || fight.fighter_b.len() == 0 {
             return Err(ContractError::InvalidMarketParameters);
+        }
+
+        // Validate fighter_a != fighter_b (case-insensitive)
+        if fight.fighter_a.len() == fight.fighter_b.len() {
+            let len = fight.fighter_a.len() as usize;
+            let mut bytes_a = alloc::vec![0u8; len];
+            let mut bytes_b = alloc::vec![0u8; len];
+            fight.fighter_a.copy_into_slice(&mut bytes_a);
+            fight.fighter_b.copy_into_slice(&mut bytes_b);
+            let mut is_dup = true;
+            for i in 0..len {
+                if bytes_a[i].to_ascii_lowercase() != bytes_b[i].to_ascii_lowercase() {
+                    is_dup = false;
+                    break;
+                }
+            }
+            if is_dup {
+                return Err(ContractError::DuplicateFighterName);
+            }
         }
 
         // ── Config validation ─────────────────────────────
@@ -418,6 +457,9 @@ impl MarketFactory {
             .persistent()
             .get(&ORACLE_WHITELIST)
             .unwrap_or_else(|| Map::new(&env));
+        if oracles.contains_key(oracle.clone()) {
+            return Err(ContractError::OracleAlreadyWhitelisted);
+        }
         oracles.set(oracle, raw_key);
         env.storage().persistent().set(&ORACLE_WHITELIST, &oracles);
         Ok(())
@@ -570,6 +612,57 @@ impl MarketFactory {
     /// Returns whether the factory is paused.
     pub fn is_paused(env: Env) -> bool {
         env.storage().persistent().get(&PAUSED).unwrap_or(false)
+    }
+
+    /// Pauses an individual market. Only admin can call this.
+    ///
+    /// # Errors
+    /// - `NotAdmin`: Caller is not the admin
+    /// - `MarketNotFound`: Market ID does not exist
+    pub fn pause_market(env: Env, admin: Address, market_id: u64) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let market_address = Self::get_market_address(env.clone(), market_id)?;
+        MarketClient::new(&env, &market_address).emergency_pause(&env.current_contract_address());
+        boxmeout_shared::emit_market_paused(&env, market_id, admin);
+        Ok(())
+    }
+
+    /// Unpauses an individual market. Only admin can call this.
+    ///
+    /// # Errors
+    /// - `NotAdmin`: Caller is not the admin
+    /// - `MarketNotFound`: Market ID does not exist
+    pub fn unpause_market(env: Env, admin: Address, market_id: u64) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let market_address = Self::get_market_address(env.clone(), market_id)?;
+        MarketClient::new(&env, &market_address).emergency_unpause(&env.current_contract_address());
+        boxmeout_shared::emit_market_unpaused(&env, market_id, admin);
+        Ok(())
+    }
+
+    /// Returns the current status of a specific market.
+    ///
+    /// # Errors
+    /// - `MarketNotFound`: Market ID does not exist
+    pub fn get_market_status(env: Env, market_id: u64) -> Result<MarketStatus, ContractError> {
+        let market_address = Self::get_market_address(env.clone(), market_id)?;
+        match MarketClient::new(&env, &market_address).try_get_market_status() {
+            Ok(Ok(status)) => Ok(status),
+            _ => Err(ContractError::MarketNotFound),
+        }
+    }
+
+    /// Permissionless refund for an expired, unresolved market.
+    ///
+    /// # Errors
+    /// - `MarketNotFound`: Market ID does not exist
+    /// - `InvalidMarketStatus`: Market is not expired or already resolved
+    pub fn refund_expired(env: Env, market_id: u64) -> Result<(), ContractError> {
+        let market_address = Self::get_market_address(env.clone(), market_id)?;
+        MarketClient::new(&env, &market_address).refund_expired(&market_id);
+        Ok(())
     }
 
     /// Returns the registered admin address of the factory.
@@ -755,7 +848,6 @@ mod tests {
             default_fee_bps: 200,
             default_lock_before_secs: 3600,
             default_resolution_window: 86400,
-            tier: 0,
         }
     }
 
@@ -779,6 +871,7 @@ mod tests {
             lock_before_secs: 3600,
             resolution_window: 86400,
             tier: 0,
+            dispute_cooldown_ledgers: 0,
         }
     }
 
@@ -1007,6 +1100,8 @@ mod scheduled_at_validation_tests {
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
         }
     }
 
@@ -1188,15 +1283,6 @@ mod open_markets_cleanup_tests {
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
         let oracle_raw_key: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
-        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &FactoryConfig {
-            default_min_bet: 1_000_000,
-            default_max_bet: 100_000_000_000,
-            default_fee_bps: 200,
-            default_lock_before_secs: 3_600,
-            default_resolution_window: 86_400,
-            tier: 0,
-        });
-
         client.initialize(
             &admin,
             &treasury,
@@ -1421,7 +1507,7 @@ mod task12_factory_market_integrity_tests {
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
             timestamp: 50_000,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 500,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1463,7 +1549,7 @@ mod task12_factory_market_integrity_tests {
         // Advance ledger 50,000 sequences
         env.ledger().set(LedgerInfo {
             timestamp: 50_000 + 86_400 * 14,
-            protocol_version: 20,
+            protocol_version: 22,
             sequence_number: 50_500,
             network_id: Default::default(),
             base_reserve: 1,
@@ -1537,6 +1623,8 @@ mod task12_factory_market_integrity_tests {
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
         };
 
         // 1. Fight scheduled in the past
@@ -1573,7 +1661,7 @@ mod task12_factory_market_integrity_tests {
         // Add second oracle
         client.add_oracle(&admin, &oracle2, &key2);
         assert_eq!(client.get_oracles().len(), 2);
-        assert_eq!(client.get_oracle_key(&oracle2), Some(key2));
+        assert_eq!(client.get_oracle_key(&oracle2), Some(key2.clone()));
 
         // Adding duplicate oracle fails
         let err_dup = client.try_add_oracle(&admin, &oracle2, &key2);
@@ -1583,5 +1671,84 @@ mod task12_factory_market_integrity_tests {
         client.remove_oracle(&admin, &oracle2);
         assert_eq!(client.get_oracles().len(), 1);
         assert_eq!(client.get_oracle_key(&oracle2), None);
+    }
+
+    // ── 5. Duplicate Fighter Names Validation (Issue #639 / #13) ──
+    #[test]
+    fn test_duplicate_fighter_names_validation() {
+        let env = Env::default();
+        let (client, _admin, _treasury, _oracle) = setup_factory(&env);
+        let caller = Address::generate(&env);
+
+        let mut fight = FightDetails {
+            match_id: soroban_sdk::String::from_str(&env, "DUPE-MATCH"),
+            fighter_a: soroban_sdk::String::from_str(&env, "Ali"),
+            fighter_b: soroban_sdk::String::from_str(&env, "Ali"),
+            weight_class: soroban_sdk::String::from_str(&env, "Heavyweight"),
+            scheduled_at: 100_000,
+            venue: soroban_sdk::String::from_str(&env, "MGM"),
+            title_fight: true,
+        };
+
+        let config = MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
+        };
+
+        // 1. Same exact name -> DuplicateFighterName
+        let err_same = client.try_create_market(&caller, &fight, &config, &None);
+        assert_eq!(err_same.unwrap_err(), Ok(ContractError::DuplicateFighterName));
+
+        // 2. Same name, different case -> DuplicateFighterName
+        fight.fighter_b = soroban_sdk::String::from_str(&env, "ALI");
+        let err_case1 = client.try_create_market(&caller, &fight, &config, &None);
+        assert_eq!(err_case1.unwrap_err(), Ok(ContractError::DuplicateFighterName));
+
+        fight.fighter_a = soroban_sdk::String::from_str(&env, "Mike Tyson");
+        fight.fighter_b = soroban_sdk::String::from_str(&env, "mike tyson");
+        let err_case2 = client.try_create_market(&caller, &fight, &config, &None);
+        assert_eq!(err_case2.unwrap_err(), Ok(ContractError::DuplicateFighterName));
+
+        // 3. Different names -> passes duplicate check (fails on WasmHashNotSet because WASM is not loaded)
+        fight.fighter_b = soroban_sdk::String::from_str(&env, "Evander Holyfield");
+        let err_diff = client.try_create_market(&caller, &fight, &config, &None);
+        assert_ne!(err_diff.unwrap_err(), Ok(ContractError::DuplicateFighterName));
+    }
+
+    // ── 6. Admin Pause Individual Market Controls (Issue #649 / #23) ──
+    #[test]
+    fn test_factory_market_pause_controls() {
+        let env = Env::default();
+        let (client, admin, _treasury, _oracle) = setup_factory(&env);
+        let non_admin = Address::generate(&env);
+
+        // Non-admin cannot pause market
+        let err_pause_non_admin = client.try_pause_market(&non_admin, &1u64);
+        assert_eq!(err_pause_non_admin.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        // Non-admin cannot unpause market
+        let err_unpause_non_admin = client.try_unpause_market(&non_admin, &1u64);
+        assert_eq!(err_unpause_non_admin.unwrap_err(), Ok(ContractError::NotAdmin));
+
+        // Admin pausing nonexistent market returns MarketNotFound
+        let err_not_found = client.try_pause_market(&admin, &999u64);
+        assert_eq!(err_not_found.unwrap_err(), Ok(ContractError::MarketNotFound));
+
+        // Admin unpausing nonexistent market returns MarketNotFound
+        let err_unpause_not_found = client.try_unpause_market(&admin, &999u64);
+        assert_eq!(err_unpause_not_found.unwrap_err(), Ok(ContractError::MarketNotFound));
+
+        // Querying status of nonexistent market returns MarketNotFound
+        let err_status = client.try_get_market_status(&999u64);
+        assert_eq!(err_status.unwrap_err(), Ok(ContractError::MarketNotFound));
+
+        // Refund expired on nonexistent market returns MarketNotFound
+        let err_refund = client.try_refund_expired(&999u64);
+        assert_eq!(err_refund.unwrap_err(), Ok(ContractError::MarketNotFound));
     }
 }

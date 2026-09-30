@@ -44,6 +44,8 @@ pub enum ContractError {
     BettingClosed = 18,
     /// Bet amount exceeds maximum allowed
     BetTooLarge = 19,
+    /// Market is paused
+    MarketPaused = 48,
 
     // ── Bet Validation ─────────────────────────────────────
     /// Bet amount is below minimum allowed
@@ -102,6 +104,8 @@ pub enum ContractError {
     WasmHashNotSet = 53,
     /// Oracle address is not whitelisted
     OracleNotWhitelisted = 54,
+    /// Fighter names cannot be identical
+    DuplicateFighterName = 55,
 
     // ── Reentrancy ─────────────────────────────────────────
     /// A claim or refund transfer is already in progress
