@@ -15,6 +15,7 @@ import { requireAdminJwt } from '../middleware/requireAdminJwt.middleware';
 import { rateLimit } from '../middleware/rate-limit.middleware';
 import { AppError } from '../utils/AppError';
 import { pool } from '../config/db';
+import { verifyOracleSignature } from '../oracle/OracleService';
 
 const router = Router();
 
@@ -65,6 +66,8 @@ function requireOracleApiKey(req: Request, _res: Response, next: NextFunction): 
  *         description: Report accepted and market resolved
  *       401:
  *         description: Invalid oracle key
+ *       403:
+ *         description: Oracle is unregistered or its report signature is invalid
  *       404:
  *         description: Market not found
  *       422:
@@ -76,9 +79,23 @@ router.post(
   requireOracleApiKey,
   validateBody(submitOracleReportGroup5BodySchema),
   async (req: Request, res: Response, next: NextFunction) => {
-    const client = await pool.connect();
+    let client: Awaited<ReturnType<typeof pool.connect>> | undefined;
     try {
       const { match_id, market_id, outcome, reported_at, oracle_address, signature } = req.body;
+
+      const oracleResult = await pool.query(
+        'SELECT public_key FROM registered_oracles WHERE oracle_address = $1 AND active = TRUE',
+        [oracle_address],
+      );
+      const publicKey = oracleResult.rows[0]?.public_key as string | undefined;
+      if (
+        !publicKey ||
+        !verifyOracleSignature({ match_id, outcome, reported_at, oracle_address }, signature, publicKey)
+      ) {
+        throw AppError.forbidden('Invalid or unregistered oracle signature');
+      }
+
+      client = await pool.connect();
 
       await client.query('BEGIN');
 
@@ -135,10 +152,10 @@ router.post(
         },
       });
     } catch (err) {
-      await client.query('ROLLBACK');
+      if (client) await client.query('ROLLBACK');
       next(err);
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );

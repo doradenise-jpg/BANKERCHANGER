@@ -132,6 +132,19 @@ export const oracle_reports = pgTable(
   }),
 );
 
+export const registered_oracles = pgTable(
+  'registered_oracles',
+  {
+    oracle_address: text('oracle_address').primaryKey(),
+    public_key: text('public_key').notNull(),
+    active: boolean('active').notNull().default(true),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    active_idx: index('registered_oracles_active_idx').on(table.active),
+  }),
+);
+
 export const notification_jobs = pgTable(
   'notification_jobs',
   {
