@@ -20,6 +20,10 @@ const PENDING_ADMIN: &str = "PENDING_ADMIN";
 const PENDING_ADMIN_EXPIRY: &str = "PENDING_ADMIN_EXPIRY";
 /// Two-step admin transfer must be accepted within this window (7 days) or it expires.
 const PENDING_ADMIN_TTL_SECS: u64 = 604_800;
+/// Minimum number of seconds between "now" and a fight's scheduled_at.
+/// A fight must be at least 1 hour (3 600 s) in the future so that a meaningful
+/// betting window can open before the market locks.
+pub(crate) const MIN_MARKET_DURATION: u64 = 3_600;
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str = "PAUSED";
 const DEFAULT_CONFIG: &str = "DEFAULT_CONFIG";
@@ -106,6 +110,7 @@ impl MarketFactory {
             lock_before_secs: config.default_lock_before_secs,
             resolution_window: config.default_resolution_window,
             tier: 0,
+            dispute_cooldown_ledgers: 0,
         };
         env.storage()
             .persistent()
@@ -162,6 +167,11 @@ impl MarketFactory {
 
         if fight.scheduled_at <= env.ledger().timestamp() {
             return Err(ContractError::InvalidTimeRange);
+        }
+        // Enforce a minimum betting window: the fight must be scheduled at least
+        // MIN_MARKET_DURATION seconds from now so bettors have time to participate.
+        if fight.scheduled_at <= env.ledger().timestamp().saturating_add(MIN_MARKET_DURATION) {
+            return Err(ContractError::InvalidFightDate);
         }
         if fight.fighter_a.len() == 0 || fight.fighter_b.len() == 0 {
             return Err(ContractError::InvalidMarketParameters);
@@ -755,7 +765,6 @@ mod tests {
             default_fee_bps: 200,
             default_lock_before_secs: 3600,
             default_resolution_window: 86400,
-            tier: 0,
         }
     }
 
@@ -779,6 +788,7 @@ mod tests {
             lock_before_secs: 3600,
             resolution_window: 86400,
             tier: 0,
+            dispute_cooldown_ledgers: 0,
         }
     }
 
@@ -977,7 +987,7 @@ mod tests {
 // ============================================================
 #[cfg(test)]
 mod scheduled_at_validation_tests {
-    use crate::{MarketFactory, MarketFactoryClient};
+    use crate::{MarketFactory, MarketFactoryClient, MIN_MARKET_DURATION};
     use boxmeout_shared::errors::ContractError;
     use boxmeout_shared::types::{FactoryConfig, FightDetails, MarketConfig};
     use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
@@ -995,8 +1005,8 @@ mod scheduled_at_validation_tests {
             default_min_bet: 1_000_000,
             default_max_bet: 100_000_000_000,
             default_fee_bps: 200,
-            default_lock_before_secs: 3600,
-            default_resolution_window: 86400,
+            default_lock_before_secs: 3_600,
+            default_resolution_window: 86_400,
         }
     }
 
@@ -1005,8 +1015,10 @@ mod scheduled_at_validation_tests {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
             fee_bps: 200,
-            lock_before_secs: 3600,
-            resolution_window: 86400,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
         }
     }
 
@@ -1036,27 +1048,9 @@ mod scheduled_at_validation_tests {
         }
     }
 
-    /// Future timestamp → does NOT fail with InvalidTimeRange
-    #[test]
-    fn test_future_timestamp_does_not_reject() {
-        let (env, client) = setup();
-        init_factory(&env, &client);
+    // ── InvalidTimeRange boundary (fight is in the past / present) ──────────
 
-        let future_ts = env.ledger().timestamp() + 86400;
-        let fight = fight_with_timestamp(&env, future_ts);
-        let caller = Address::generate(&env);
-        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
-        // It will fail (WASM hash not set), but NOT with InvalidTimeRange
-        assert!(result.is_err());
-        let err = result.unwrap_err().unwrap();
-        assert_ne!(
-            err,
-            ContractError::InvalidTimeRange,
-            "Future timestamp must not be rejected with InvalidTimeRange"
-        );
-    }
-
-    /// Timestamp exactly equal to current ledger timestamp → rejected
+    /// Timestamp exactly equal to current ledger timestamp → rejected with InvalidTimeRange
     #[test]
     fn test_equal_timestamp_rejected() {
         let (env, client) = setup();
@@ -1071,11 +1065,11 @@ mod scheduled_at_validation_tests {
         assert_eq!(
             err,
             ContractError::InvalidTimeRange,
-            "Timestamp equal to current ledger time must be rejected"
+            "Timestamp equal to current ledger time must be rejected with InvalidTimeRange"
         );
     }
 
-    /// Past timestamp → rejected
+    /// Past timestamp → rejected with InvalidTimeRange
     #[test]
     fn test_past_timestamp_rejected() {
         let (env, client) = setup();
@@ -1090,11 +1084,11 @@ mod scheduled_at_validation_tests {
         assert_eq!(
             err,
             ContractError::InvalidTimeRange,
-            "Past timestamp must be rejected"
+            "Past timestamp must be rejected with InvalidTimeRange"
         );
     }
 
-    /// Boundary: 1 second before current → rejected
+    /// Boundary: 1 second before current → rejected with InvalidTimeRange
     #[test]
     fn test_one_second_before_rejected() {
         let (env, client) = setup();
@@ -1109,49 +1103,11 @@ mod scheduled_at_validation_tests {
         assert_eq!(
             err,
             ContractError::InvalidTimeRange,
-            "One second before current time must be rejected"
+            "One second before current time must be rejected with InvalidTimeRange"
         );
     }
 
-    /// Boundary: 1 second after current → does NOT fail with InvalidTimeRange
-    #[test]
-    fn test_one_second_after_does_not_reject() {
-        let (env, client) = setup();
-        init_factory(&env, &client);
-
-        let ts = env.ledger().timestamp() + 1;
-        let fight = fight_with_timestamp(&env, ts);
-        let caller = Address::generate(&env);
-        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
-        assert!(result.is_err());
-        let err = result.unwrap_err().unwrap();
-        assert_ne!(
-            err,
-            ContractError::InvalidTimeRange,
-            "One second after current time must not be rejected with InvalidTimeRange"
-        );
-    }
-
-    /// Large future timestamp → does NOT fail with InvalidTimeRange
-    #[test]
-    fn test_large_future_timestamp_does_not_reject() {
-        let (env, client) = setup();
-        init_factory(&env, &client);
-
-        let future_ts = env.ledger().timestamp() + 365 * 86400;
-        let fight = fight_with_timestamp(&env, future_ts);
-        let caller = Address::generate(&env);
-        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
-        assert!(result.is_err());
-        let err = result.unwrap_err().unwrap();
-        assert_ne!(
-            err,
-            ContractError::InvalidTimeRange,
-            "Large future timestamp must not be rejected with InvalidTimeRange"
-        );
-    }
-
-    /// Zero timestamp → rejected
+    /// Zero timestamp → rejected with InvalidTimeRange
     #[test]
     fn test_zero_timestamp_rejected() {
         let (env, client) = setup();
@@ -1165,7 +1121,108 @@ mod scheduled_at_validation_tests {
         assert_eq!(
             err,
             ContractError::InvalidTimeRange,
-            "Zero timestamp must be rejected"
+            "Zero timestamp must be rejected with InvalidTimeRange"
+        );
+    }
+
+    // ── InvalidFightDate boundary (fight is in the future but within MIN_MARKET_DURATION) ──
+
+    /// 1 second in the future is within MIN_MARKET_DURATION → rejected with InvalidFightDate
+    #[test]
+    fn test_one_second_after_rejected_with_invalid_fight_date() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ts = env.ledger().timestamp() + 1;
+        let fight = fight_with_timestamp(&env, ts);
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            ContractError::InvalidFightDate,
+            "Timestamp 1 second ahead must be rejected with InvalidFightDate (within MIN_MARKET_DURATION)"
+        );
+    }
+
+    /// Exactly at MIN_MARKET_DURATION boundary (== not >) → still rejected with InvalidFightDate
+    #[test]
+    fn test_exactly_at_min_duration_boundary_rejected() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        // scheduled_at == now + MIN_MARKET_DURATION fails the strict > check
+        let ts = env.ledger().timestamp() + MIN_MARKET_DURATION;
+        let fight = fight_with_timestamp(&env, ts);
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            ContractError::InvalidFightDate,
+            "scheduled_at == now + MIN_MARKET_DURATION must be rejected (boundary is exclusive)"
+        );
+    }
+
+    /// One second beyond MIN_MARKET_DURATION → passes validation, fails only on WasmHashNotSet
+    #[test]
+    fn test_one_second_beyond_min_duration_passes_validation() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let ts = env.ledger().timestamp() + MIN_MARKET_DURATION + 1;
+        let fight = fight_with_timestamp(&env, ts);
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
+        // Validation passes; only WasmHashNotSet blocks creation at this point
+        assert!(result.is_err());
+        let err = result.unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            ContractError::WasmHashNotSet,
+            "scheduled_at one second beyond MIN_MARKET_DURATION must only fail on WasmHashNotSet"
+        );
+    }
+
+    // ── Well-within-future range (sanity checks) ────────────────────────────
+
+    /// Future timestamp (24 h) → passes validation, fails only on WasmHashNotSet
+    #[test]
+    fn test_future_timestamp_passes_validation() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let future_ts = env.ledger().timestamp() + 86_400; // 24 hours
+        let fight = fight_with_timestamp(&env, future_ts);
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            ContractError::WasmHashNotSet,
+            "Future timestamp (24 h) must pass date validation and fail only on WasmHashNotSet"
+        );
+    }
+
+    /// Large future timestamp (1 year) → passes validation, fails only on WasmHashNotSet
+    #[test]
+    fn test_large_future_timestamp_passes_validation() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let future_ts = env.ledger().timestamp() + 365 * 86_400;
+        let fight = fight_with_timestamp(&env, future_ts);
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_market_config(), &None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            ContractError::WasmHashNotSet,
+            "Large future timestamp (1 year) must pass date validation and fail only on WasmHashNotSet"
         );
     }
 }
@@ -1188,15 +1245,6 @@ mod open_markets_cleanup_tests {
         let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
         let oracle_raw_key: BytesN<32> = BytesN::from_array(&env, &[1u8; 32]);
-        client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &FactoryConfig {
-            default_min_bet: 1_000_000,
-            default_max_bet: 100_000_000_000,
-            default_fee_bps: 200,
-            default_lock_before_secs: 3_600,
-            default_resolution_window: 86_400,
-            tier: 0,
-        });
-
         client.initialize(
             &admin,
             &treasury,
@@ -1537,6 +1585,8 @@ mod task12_factory_market_integrity_tests {
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
         };
 
         // 1. Fight scheduled in the past
