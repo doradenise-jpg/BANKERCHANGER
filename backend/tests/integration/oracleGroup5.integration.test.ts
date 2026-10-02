@@ -1,6 +1,7 @@
 import request from 'supertest';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { Keypair } from '@stellar/stellar-sdk';
 import oracleGroup5Router from '../../src/routes/oracleGroup5.routes';
 import { errorMiddleware } from '../../src/middleware/error.middleware';
 
@@ -46,8 +47,9 @@ const { pool } = require('../../src/config/db');
 
 describe('API Module Group 5: Oracle Results & Dispute Resolution Endpoints', () => {
   const validOracleKey = 'default-oracle-secret-key';
-  const validStellarAddress = 'GBZXN7PIRZGNMHGA72YD2MKXT3MYMVGBLMHMT6A2R63FWIFKIIOHPSTA';
-  const validSignature = 'a'.repeat(128); // 128 hex chars
+  const oracleKeypair = Keypair.random();
+  const validStellarAddress = oracleKeypair.publicKey();
+  const validPublicKey = oracleKeypair.rawPublicKey().toString('hex');
   const adminSecret = 'test-admin-secret-key-32-chars-long!';
   const validAdminToken = jwt.sign(
     { sub: 'admin-1', role: 'admin', type: 'access' },
@@ -62,16 +64,30 @@ describe('API Module Group 5: Oracle Results & Dispute Resolution Endpoints', ()
   });
 
   describe('POST /api/v2/oracle/report', () => {
+    const reportedAt = '2026-01-01T12:00:00.000Z';
+    const matchId = 'match_123';
+    const messageMatchIdBytes = Buffer.from(matchId, 'utf8');
+    const messageLength = Buffer.alloc(4);
+    messageLength.writeUInt32BE(messageMatchIdBytes.length, 0);
+    const messageTimestamp = Buffer.alloc(8);
+    messageTimestamp.writeBigInt64BE(BigInt(new Date(reportedAt).getTime()));
+    const signedMessage = Buffer.concat([
+      messageLength,
+      messageMatchIdBytes,
+      Buffer.from([0]),
+      messageTimestamp,
+    ]);
     const validReportPayload = {
-      match_id: 'match_123',
+      match_id: matchId,
       market_id: 'mkt_123',
       outcome: 'fighter_a',
-      reported_at: new Date().toISOString(),
+      reported_at: reportedAt,
       oracle_address: validStellarAddress,
-      signature: validSignature,
+      signature: Buffer.from(oracleKeypair.sign(signedMessage)).toString('hex'),
     };
 
     it('submits report and resolves market successfully', async () => {
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rows: [{ public_key: validPublicKey }] });
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
         .mockResolvedValueOnce({
@@ -93,6 +109,30 @@ describe('API Module Group 5: Oracle Results & Dispute Resolution Endpoints', ()
       expect(res.body.data.outcome).toBe('fighter_a');
     });
 
+    it('rejects a forged report with 403 before writing to the database', async () => {
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rows: [{ public_key: validPublicKey }] });
+
+      const res = await request(app)
+        .post('/api/v2/oracle/report')
+        .set('X-Oracle-Key', validOracleKey)
+        .send({ ...validReportPayload, signature: 'a'.repeat(128) });
+
+      expect(res.status).toBe(403);
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing signature with 403', async () => {
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rows: [{ public_key: validPublicKey }] });
+
+      const res = await request(app)
+        .post('/api/v2/oracle/report')
+        .set('X-Oracle-Key', validOracleKey)
+        .send({ ...validReportPayload, signature: undefined });
+
+      expect(res.status).toBe(403);
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
     it('rejects request without X-Oracle-Key with 401', async () => {
       const res = await request(app)
         .post('/api/v2/oracle/report')
@@ -101,13 +141,16 @@ describe('API Module Group 5: Oracle Results & Dispute Resolution Endpoints', ()
       expect(res.status).toBe(401);
     });
 
-    it('rejects invalid signature length with 422', async () => {
+    it('rejects a malformed signature with 403', async () => {
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rows: [{ public_key: validPublicKey }] });
+
       const res = await request(app)
         .post('/api/v2/oracle/report')
         .set('X-Oracle-Key', validOracleKey)
         .send({ ...validReportPayload, signature: 'short_sig' });
 
-      expect(res.status).toBe(422);
+      expect(res.status).toBe(403);
+      expect(pool.connect).not.toHaveBeenCalled();
     });
   });
 

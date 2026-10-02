@@ -23,9 +23,7 @@ export const submitOracleReportGroup5BodySchema = z.object({
     .string({ required_error: 'reported_at is required' })
     .datetime({ message: 'reported_at must be an ISO-8601 string' }),
   oracle_address: stellarAddressSchema,
-  signature: z
-    .string({ required_error: 'signature is required' })
-    .regex(/^[a-fA-F0-9]{128}$/, 'signature must be a valid 64-byte Ed25519 hex string (128 hex chars)'),
+  signature: z.string().optional(),
 });
 
 export const flagDisputeGroup5BodySchema = z.object({

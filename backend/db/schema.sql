@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS indexer_ledger_ranges (
 );
 CREATE INDEX IF NOT EXISTS indexer_ledger_ranges_start_idx ON indexer_ledger_ranges (start_ledger);
 
+CREATE TABLE IF NOT EXISTS registered_oracles (
+  oracle_address   TEXT        PRIMARY KEY,
+  public_key       TEXT        NOT NULL,
+  active           BOOLEAN     NOT NULL DEFAULT TRUE,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS registered_oracles_active_idx ON registered_oracles (active);
+
 CREATE TABLE IF NOT EXISTS oracle_reports (
   id               SERIAL PRIMARY KEY,
   match_id         TEXT        NOT NULL,
