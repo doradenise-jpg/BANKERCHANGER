@@ -102,8 +102,12 @@ export async function getBetsByAddress(
 ): Promise<void> {
   try {
     const { bettor_address } = req.params;
-    const page = req.query.page !== undefined ? parseInt(req.query.page as string, 10) : 1;
+    const legacyPage = req.query.page !== undefined;
+    const legacyOffset = req.query.offset !== undefined ? parseInt(req.query.offset as string, 10) : undefined;
+    const page = legacyPage ? parseInt(req.query.page as string, 10) : 1;
     const limit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : 50;
+    const cursor = req.query.cursor as string | undefined;
+    const cursorMode = cursor !== undefined || (!legacyPage && legacyOffset === undefined);
 
     // Validate Stellar address format early and return 400 (not 500) for invalid addresses
     try {
@@ -125,13 +129,21 @@ export async function getBetsByAddress(
       );
     }
 
-    const result = await BetService.fetchBetsByAddress(bettor_address, page, limit);
-    res.status(200).json({
-      bets: result.bets,
-      total: result.total,
+    const result = await BetService.fetchBetsByAddress(
+      bettor_address,
       page,
       limit,
-    });
+      cursorMode ? cursor ?? '' : null,
+      legacyOffset,
+    );
+    if (cursorMode) {
+      res.status(200).json({ bets: result.bets, nextCursor: result.nextCursor, limit });
+      return;
+    }
+
+    res.setHeader('Deprecation', 'true');
+    res.setHeader('Sunset', 'Fri, 02 Apr 2027 00:00:00 GMT');
+    res.status(200).json({ bets: result.bets, total: result.total, limit, nextCursor: result.nextCursor });
   } catch (err) {
     if (err instanceof AppError && err.statusCode === 400) {
       return next(err);

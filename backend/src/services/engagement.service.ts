@@ -510,6 +510,21 @@ export class EngagementService {
     return updates;
   }
 
+  async recordBetPlaced(userId: string, transactionHash: string): Promise<boolean> {
+    const result = await pool.query(
+      `INSERT INTO engagement_xp_events (transaction_hash, event_type, user_id, points)
+       VALUES ($1, 'bet_placed', $2, 10)
+       ON CONFLICT (transaction_hash, event_type) DO NOTHING
+       RETURNING transaction_hash`,
+      [transactionHash, userId],
+    );
+    if (result.rows.length === 0) return false;
+
+    this.addPoints(userId, 10);
+    await cache.cacheDeletePattern('leaderboard:global:*');
+    return true;
+  }
+
   getRank(userId: string): number {
     const sorted = [...this.userPoints.entries()].sort((a, b) => b[1] - a[1]);
     const idx = sorted.findIndex(([id]) => id === userId);
