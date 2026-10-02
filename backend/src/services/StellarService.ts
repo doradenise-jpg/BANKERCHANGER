@@ -6,6 +6,161 @@
 // ============================================================
 
 import { Account, Address, Horizon, Keypair, Networks, Operation, rpc, TransactionBuilder, xdr } from '@stellar/stellar-sdk';
+import { logger } from '../utils/logger';
+
+// ---------------------------------------------------------------------------
+// Retryable error classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Transient error codes returned in the `status` field of a sendTransaction
+ * response or wrapped inside a thrown error.  These indicate a temporary
+ * network or sequencing problem that is worth retrying.
+ *
+ * Reference: https://developers.stellar.org/docs/data/rpc/api-reference/methods/sendTransaction
+ */
+export const RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
+  // Sequence number collision — can happen under concurrent submission.
+  'tx_bad_seq',
+  // Transient RPC / network-level statuses.
+  'TRY_AGAIN_LATER',
+  'TIMEOUT',
+  // Generic HTTP-level transients surfaced as strings by the SDK.
+  'gateway_timeout',
+  'service_unavailable',
+  'too_many_requests',
+  // Internal Horizon 503 / 429 strings
+  '503',
+  '429',
+]);
+
+/**
+ * Permanent error codes that should NOT be retried.  Surfacing them
+ * immediately gives callers accurate failure information and avoids
+ * burning retry budget on hopeless submissions.
+ */
+export const NON_RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
+  'tx_insufficient_balance',
+  'tx_no_account',
+  'tx_bad_auth',
+  'tx_bad_auth_extra',
+  'tx_not_supported',
+  'tx_fee_bump_inner_failed',
+  'tx_insufficient_fee',
+  'tx_no_source_account',
+  'FAILED',
+  'ERROR',
+]);
+
+/**
+ * Extracts a normalised error-code string from either a `sendTransaction`
+ * response object or a thrown network/SDK error.
+ *
+ * Returns `null` when no recognisable code can be extracted (caller should
+ * treat unknown codes as non-retryable to be safe).
+ */
+export function classifySubmitError(error: unknown): {
+  code: string | null;
+  retryable: boolean;
+} {
+  // Case 1: the SDK returned a response object with a status field.
+  if (error !== null && typeof error === 'object' && 'status' in (error as object)) {
+    const status = String((error as Record<string, unknown>).status);
+    return {
+      code: status,
+      retryable: RETRYABLE_ERROR_CODES.has(status),
+    };
+  }
+
+  // Case 2: a thrown Error whose message contains a known code.
+  if (error instanceof Error) {
+    const msg = error.message;
+
+    for (const code of RETRYABLE_ERROR_CODES) {
+      if (msg.includes(code)) {
+        return { code, retryable: true };
+      }
+    }
+    for (const code of NON_RETRYABLE_ERROR_CODES) {
+      if (msg.includes(code)) {
+        return { code, retryable: false };
+      }
+    }
+
+    // HTTP status codes embedded in error messages (e.g. "429 Too Many Requests").
+    const httpMatch = msg.match(/\b(429|503|504|502)\b/);
+    if (httpMatch) {
+      return { code: httpMatch[1], retryable: true };
+    }
+
+    return { code: null, retryable: false };
+  }
+
+  return { code: null, retryable: false };
+}
+
+// ---------------------------------------------------------------------------
+// Exponential-backoff retry helper
+// ---------------------------------------------------------------------------
+
+const MAX_SUBMIT_RETRIES = 3;
+const BASE_BACKOFF_MS = 200;
+
+/**
+ * Calls `fn` up to `maxAttempts` times with exponential backoff between
+ * attempts.  If the thrown error is classified as non-retryable it is
+ * re-thrown immediately without consuming the remaining retry budget.
+ *
+ * Logs each retry at `warn` level with the attempt number and error code.
+ *
+ * @param fn          Async function to call.
+ * @param maxAttempts Maximum number of total attempts (default: MAX_SUBMIT_RETRIES).
+ * @param context     Optional label used in log messages for traceability.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number = MAX_SUBMIT_RETRIES,
+  context: string = 'sendTransaction',
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      const { code, retryable } = classifySubmitError(err);
+
+      if (!retryable) {
+        logger.error(
+          { context, attempt, errorCode: code },
+          `[StellarService] ${context}: non-retryable error on attempt ${attempt}/${maxAttempts} (code=${code ?? 'unknown'}) — failing immediately`,
+        );
+        throw err;
+      }
+
+      if (attempt < maxAttempts) {
+        const backoffMs = BASE_BACKOFF_MS * Math.pow(2, attempt - 1);
+        logger.warn(
+          { context, attempt, errorCode: code, backoffMs },
+          `[StellarService] ${context}: retryable error on attempt ${attempt}/${maxAttempts} (code=${code ?? 'unknown'}) — retrying in ${backoffMs}ms`,
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+      } else {
+        logger.error(
+          { context, attempt, errorCode: code },
+          `[StellarService] ${context}: retryable error on attempt ${attempt}/${maxAttempts} (code=${code ?? 'unknown'}) — max retries exhausted`,
+        );
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// ---------------------------------------------------------------------------
+// Core error type
+// ---------------------------------------------------------------------------
 
 /**
  * Thrown when a Soroban contract invocation cannot be completed —
@@ -23,6 +178,10 @@ export class StellarInvocationError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// invokeContract
+// ---------------------------------------------------------------------------
+
 /**
  * Builds, simulates, signs, and submits a Soroban contract invocation.
  *
@@ -32,7 +191,7 @@ export class StellarInvocationError extends Error {
  *   3. Simulate via RPC to get resource fee estimates
  *   4. Set transaction fee = base_fee + resource_fee
  *   5. Sign with source_keypair
- *   6. Submit via RPC sendTransaction
+ *   6. Submit via RPC sendTransaction — wrapped in withRetry for transient errors
  *   7. Poll getTransaction until status is SUCCESS or FAILED (max 30s)
  *   8. On TIMEOUT: rebuild and resubmit with bumped fee (max 3 retries)
  *
@@ -77,7 +236,7 @@ export async function invokeContract(
   const maxRetries = 3;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    // Step 1-2: Build transaction (fee bumps by one baseFee increment per retry)
+    // Step 1-2: Build transaction (fee bumps by one baseFee increment per fee-bump retry)
     const transaction = new TransactionBuilder(sourceAccount, {
       fee: (baseFee * (1 + attempt)).toString(),
       networkPassphrase,
@@ -103,8 +262,13 @@ export async function invokeContract(
     // Step 5: Sign
     transaction.sign(source_keypair);
 
-    // Step 6: Submit
-    const submitResponse = await sorobanServer.sendTransaction(transaction);
+    // Step 6: Submit — wrapped in withRetry to handle transient network errors.
+    // Non-retryable errors (e.g. tx_insufficient_balance) are re-thrown immediately.
+    const submitResponse = await withRetry(
+      () => sorobanServer.sendTransaction(transaction),
+      MAX_SUBMIT_RETRIES,
+      `invokeContract(${contract_address}::${method}) fee-bump-attempt=${attempt}`,
+    );
 
     if (submitResponse.status !== 'PENDING') {
       throw new StellarInvocationError(`Submit failed: ${submitResponse.status}`, submitResponse.hash);
@@ -132,11 +296,18 @@ export async function invokeContract(
     if (attempt >= maxRetries) {
       throw new StellarInvocationError(`Transaction timed out after ${maxRetries} retries`, txHash);
     }
-    console.log(`[StellarService] Transaction ${txHash} timed out, retrying with bumped fee (attempt ${attempt + 1}/${maxRetries})`);
+    logger.warn(
+      { attempt: attempt + 1, maxRetries, txHash },
+      `[StellarService] invokeContract: transaction ${txHash} timed out, retrying with bumped fee (attempt ${attempt + 1}/${maxRetries})`,
+    );
   }
 
   throw new StellarInvocationError('Max retries exceeded');
 }
+
+// ---------------------------------------------------------------------------
+// readContractState
+// ---------------------------------------------------------------------------
 
 /**
  * Reads contract state using simulateTransaction (no fee, no state change).
@@ -201,6 +372,10 @@ export async function readContractState<T>(
   return parseScVal(returnValue) as T;
 }
 
+// ---------------------------------------------------------------------------
+// subscribeToContractEvents
+// ---------------------------------------------------------------------------
+
 /**
  * Subscribes to the Horizon event stream for a specific contract address.
  * Uses Horizon's /contract_events endpoint with Server-Sent Events.
@@ -234,7 +409,7 @@ export function subscribeToContractEvents(
         reconnectAttempts = 0;
         backoffMs = 1000;
       } catch (err) {
-        console.error('[StellarService] Failed to parse event:', err);
+        logger.error({ err }, '[StellarService] Failed to parse event');
       }
     };
 
@@ -246,10 +421,13 @@ export function subscribeToContractEvents(
       if (reconnectAttempts < maxReconnectAttempts) {
         reconnectAttempts++;
         const delay = Math.min(backoffMs * Math.pow(2, reconnectAttempts - 1), 30000);
-        console.log(`[StellarService] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+        logger.warn(
+          { reconnectAttempts, maxReconnectAttempts, delay },
+          `[StellarService] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`,
+        );
         setTimeout(connect, delay);
       } else {
-        console.error('[StellarService] Max reconnection attempts exceeded');
+        logger.error('[StellarService] Max reconnection attempts exceeded');
       }
     };
   };
@@ -264,6 +442,10 @@ export function subscribeToContractEvents(
     }
   };
 }
+
+// ---------------------------------------------------------------------------
+// parseScVal
+// ---------------------------------------------------------------------------
 
 /**
  * Converts a raw XDR ScVal into a JavaScript-native value.
@@ -317,6 +499,10 @@ export function parseScVal(scval: xdr.ScVal): unknown {
   throw new Error(`Unsupported ScVal type: ${type}`);
 }
 
+// ---------------------------------------------------------------------------
+// getCurrentBaseFee
+// ---------------------------------------------------------------------------
+
 /**
  * Returns the current recommended base fee in stroops from the Stellar network.
  * Calls Horizon /fee_stats endpoint and returns the p70 fee.
@@ -328,6 +514,10 @@ export async function getCurrentBaseFee(): Promise<number> {
   const feeStats = await horizonServer.feeStats();
   return parseInt(feeStats.p70_accepted_fee, 10);
 }
+
+// ---------------------------------------------------------------------------
+// fetchHistoricalEvents
+// ---------------------------------------------------------------------------
 
 /**
  * Fetches historical events from Horizon for a given ledger range.
@@ -413,7 +603,7 @@ export async function fetchHistoricalEvents(
             }
           }
         } catch (err) {
-          console.error('[StellarService] Error fetching operations:', err);
+          logger.error({ err }, '[StellarService] Error fetching operations');
         }
       }
 
@@ -424,17 +614,21 @@ export async function fetchHistoricalEvents(
     } catch (err) {
       retries++;
       if (retries >= maxRetries) {
-        console.error('[StellarService] Max retries exceeded fetching historical events:', err);
+        logger.error({ err }, '[StellarService] Max retries exceeded fetching historical events');
         throw err;
       }
       const delay = Math.pow(2, retries) * 1000;
-      console.log(`[StellarService] Rate limited, retrying in ${delay}ms`);
+      logger.warn({ retries, delay }, `[StellarService] Rate limited, retrying in ${delay}ms`);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 
   return events;
 }
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
 
 export interface RawStellarEvent {
   contract_address: string;
@@ -445,6 +639,10 @@ export interface RawStellarEvent {
   ledger_close_time: string;
   tx_hash: string;
 }
+
+// ---------------------------------------------------------------------------
+// getTreasuryBalance
+// ---------------------------------------------------------------------------
 
 /**
  * Retrieves the current balance of the treasury contract or account in stroops (Issue #679).
@@ -474,6 +672,10 @@ export async function getTreasuryBalance(): Promise<string> {
   return '10000000000000';
 }
 
+// ---------------------------------------------------------------------------
+// Service facade
+// ---------------------------------------------------------------------------
+
 export const StellarService = {
   getTreasuryBalance,
   invokeContract,
@@ -483,4 +685,3 @@ export const StellarService = {
   getCurrentBaseFee,
   fetchHistoricalEvents,
 };
-
