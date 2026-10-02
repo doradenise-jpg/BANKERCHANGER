@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { createHash } from 'crypto';
 import { z } from 'zod';
 import * as authService from '../services/auth.service';
 import { AppError } from '../utils/AppError';
@@ -7,6 +8,48 @@ import { rateLimit } from '../middleware/rate-limit.middleware';
 import { requireAuth } from '../middleware/auth.middleware';
 
 const router = Router();
+const LOGIN_FAILURE_THRESHOLD = 5;
+const LOGIN_FAILURE_TTL_SECONDS = 24 * 60 * 60;
+const LOGIN_BACKOFF_BASE_SECONDS = 30;
+const LOGIN_BACKOFF_MAX_SECONDS = 60 * 60;
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  max: 10,
+  keyBy: 'ip',
+  keyPrefix: 'auth:login:15m',
+});
+
+function getLoginRedisKeys(email: string): { failures: string; backoff: string } {
+  const emailHash = createHash('sha256').update(email).digest('hex');
+  return {
+    failures: `auth:login:failures:${emailHash}`,
+    backoff: `auth:login:backoff:${emailHash}`,
+  };
+}
+
+async function getLoginBackoffSeconds(email: string): Promise<number> {
+  const { backoff } = getLoginRedisKeys(email);
+  const ttl = await redis.ttl(backoff);
+  return ttl > 0 ? ttl : 0;
+}
+
+async function recordLoginFailure(email: string): Promise<void> {
+  const { failures, backoff } = getLoginRedisKeys(email);
+  const failureCount = await incrWithExpire(redis, failures, LOGIN_FAILURE_TTL_SECONDS);
+  if (failureCount >= LOGIN_FAILURE_THRESHOLD) {
+    const exponent = Math.min(failureCount - LOGIN_FAILURE_THRESHOLD, 7);
+    const backoffSeconds = Math.min(
+      LOGIN_BACKOFF_BASE_SECONDS * 2 ** exponent,
+      LOGIN_BACKOFF_MAX_SECONDS,
+    );
+    await redis.set(backoff, '1', 'EX', backoffSeconds);
+  }
+}
+
+async function clearLoginFailures(email: string): Promise<void> {
+  const { failures, backoff } = getLoginRedisKeys(email);
+  await redis.del(failures, backoff);
+}
 
 /**
  * @swagger
@@ -72,13 +115,29 @@ router.post('/activity-feed-token', (_req: Request, res: Response) => {
  *       401:
  *         description: Invalid credentials
  */
-router.post('/login', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/login', loginLimiter, async (req: Request, res: Response, next: NextFunction) => {
+  const normalizedEmail =
+    typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   try {
-    const { email, password } = req.body;
-    if (!email || !password) throw new AppError(400, 'Email and password required');
-    const result = await authService.login(email, password);
+    const password = req.body?.password;
+    if (!normalizedEmail || !password) throw new AppError(400, 'Email and password required');
+    const retryAfterSeconds = await getLoginBackoffSeconds(normalizedEmail);
+    if (retryAfterSeconds > 0) {
+      res.set('Retry-After', String(retryAfterSeconds));
+      throw new AppError(429, 'Too many login attempts. Try again later.');
+    }
+
+    const result = await authService.login(normalizedEmail, password);
+    await clearLoginFailures(normalizedEmail);
     res.json(result);
   } catch (err) {
+    if (normalizedEmail && err instanceof AppError && err.statusCode === 401) {
+      try {
+        await recordLoginFailure(normalizedEmail);
+      } catch (redisError) {
+        return next(redisError);
+      }
+    }
     next(err);
   }
 });
