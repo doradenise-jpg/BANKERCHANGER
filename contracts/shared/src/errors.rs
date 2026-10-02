@@ -102,6 +102,9 @@ pub enum ContractError {
     WasmHashNotSet = 53,
     /// Oracle address is not whitelisted
     OracleNotWhitelisted = 54,
+    /// fight_date does not satisfy the minimum market duration requirement
+    /// (fight_date must be > ledger_timestamp + MIN_MARKET_DURATION)
+    InvalidFightDate = 55,
 
     // ── Reentrancy ─────────────────────────────────────────
     /// A claim or refund transfer is already in progress
