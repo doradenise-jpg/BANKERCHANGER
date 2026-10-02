@@ -11,8 +11,31 @@ import * as BetService from '../../services/BetService';
 import * as OracleService from '../../oracle/OracleService';
 import { db, bulkPauseMarkets, bulkCancelMarkets, updateMarketStatus } from '../../services/MarketService';
 import { pool } from '../../config/db';
+import { auditLog } from '../../services/auditLog.service';
 
 const MAX_BULK = 50;
+
+async function writeMarketStatusAudit(
+  req: Request,
+  action: string,
+  marketIds: string[],
+  beforeStates: Array<{ market_id: string; status: string }>,
+): Promise<void> {
+  const { rows: afterStates } = await pool.query(
+    'SELECT market_id, status FROM markets WHERE market_id = ANY($1::text[])',
+    [marketIds],
+  );
+  const beforeById = new Map(beforeStates.map((market) => [market.market_id, market]));
+  const afterById = new Map(afterStates.map((market) => [market.market_id, market]));
+  const adminId = ((req as unknown as Record<string, unknown>).userId as string | undefined) ?? null;
+
+  for (const marketId of marketIds) {
+    const beforeState = beforeById.get(marketId);
+    const afterState = afterById.get(marketId);
+    if (!beforeState || !afterState) continue;
+    await auditLog.write({ adminId, action, targetId: marketId, beforeState, afterState });
+  }
+}
 
 export async function bulkPause(req: Request, res: Response): Promise<void> {
   const { marketIds } = req.body as { marketIds: string[] };
@@ -22,7 +45,13 @@ export async function bulkPause(req: Request, res: Response): Promise<void> {
   if (marketIds.length > MAX_BULK) {
     throw new AppError(400, `Maximum ${MAX_BULK} markets per request`);
   }
-  res.json(await bulkPauseMarkets(marketIds));
+  const { rows: beforeStates } = await pool.query(
+    'SELECT market_id, status FROM markets WHERE market_id = ANY($1::text[])',
+    [marketIds],
+  );
+  const result = await bulkPauseMarkets(marketIds);
+  await writeMarketStatusAudit(req, 'market_pause', marketIds, beforeStates);
+  res.json(result);
 }
 
 export async function bulkCancel(req: Request, res: Response): Promise<void> {
@@ -36,7 +65,13 @@ export async function bulkCancel(req: Request, res: Response): Promise<void> {
   if (!reason || typeof reason !== 'string') {
     throw new AppError(400, 'reason is required');
   }
-  res.json(await bulkCancelMarkets(marketIds, reason));
+  const { rows: beforeStates } = await pool.query(
+    'SELECT market_id, status FROM markets WHERE market_id = ANY($1::text[])',
+    [marketIds],
+  );
+  const result = await bulkCancelMarkets(marketIds, reason);
+  await writeMarketStatusAudit(req, 'market_cancel', marketIds, beforeStates);
+  res.json(result);
 }
 
 const VALID_OUTCOMES = ['fighter_a', 'fighter_b', 'draw', 'no_contest'] as const;
@@ -252,6 +287,14 @@ export async function resolveDispute(
   );
 
   const updatedMarket = await db().findMarketById(market_id);
+  const adminId = ((req as unknown as Record<string, unknown>).userId as string | undefined) ?? null;
+  await auditLog.write({
+    adminId,
+    action: 'market_force_resolve',
+    targetId: market_id,
+    beforeState: { status: market.status, outcome: market.outcome },
+    afterState: updatedMarket ? { status: updatedMarket.status, outcome: updatedMarket.outcome } : null,
+  });
 
   res.status(200).json({
     tx_hash,
@@ -304,6 +347,14 @@ export async function cancelMarket(
   );
 
   await updateMarketStatus(market_id, 'cancelled');
+  const adminId = ((req as unknown as Record<string, unknown>).userId as string | undefined) ?? null;
+  await auditLog.write({
+    adminId,
+    action: 'market_cancel',
+    targetId: market_id,
+    beforeState: { status: market.status },
+    afterState: { status: 'cancelled' },
+  });
 
   res.json({ tx_hash: txHash });
 }

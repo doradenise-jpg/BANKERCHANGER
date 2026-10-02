@@ -9,6 +9,7 @@ import { cacheDelete, cacheDeletePattern } from './cache.service';
 import { AppError } from '../utils/AppError';
 import { Address, xdr } from '@stellar/stellar-sdk';
 import { invokeContract } from './StellarService';
+import type { QueryResultRow } from 'pg';
 
 export interface BetWithMarket extends Bet {
   market_id: string;
@@ -19,7 +20,8 @@ export interface BetWithMarket extends Bet {
 
 export interface FetchBetsResult {
   bets: BetWithMarket[];
-  total: number;
+  total?: number;
+  nextCursor: string | null;
 }
 
 export interface ProjectedPayout {
@@ -112,6 +114,8 @@ export async function fetchBetsByAddress(
   bettor_address: string,
   page: number = 1,
   limit: number = 50,
+  cursor: string | null = null,
+  legacyOffset?: number,
 ): Promise<FetchBetsResult> {
   // Validate Stellar address format
   if (!/^G[A-Z2-7]{55}$/.test(bettor_address)) {
@@ -125,36 +129,97 @@ export async function fetchBetsByAddress(
     throw AppError.badRequest('limit must be an integer between 1 and 100');
   }
 
-  const offset = (page - 1) * limit;
+  const cursorMode = cursor !== null;
+  let rows: QueryResultRow[];
+  if (cursorMode) {
+    let cursorPosition: { placedAt: string; id: number } | null = null;
+    if (cursor) {
+      try {
+        const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+        if (
+          typeof decoded.placedAt !== 'string' ||
+          !Number.isInteger(decoded.id) ||
+          decoded.id < 1 ||
+          Number.isNaN(Date.parse(decoded.placedAt))
+        ) throw new Error('Invalid cursor payload');
+        cursorPosition = decoded;
+      } catch {
+        throw AppError.badRequest('cursor is invalid');
+      }
+    }
 
-  // Get total count
-  const countResult = await pool.query(
-    'SELECT COUNT(*) as total FROM bets WHERE bettor_address = $1',
-    [bettor_address],
-  );
-  const total = Number(countResult.rows[0]?.total ?? 0);
+    const result = cursorPosition
+      ? await pool.query(
+          `SELECT
+             b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
+             b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+             m.fighter_a, m.fighter_b, m.status
+           FROM bets b
+           JOIN markets m ON b.market_id = m.market_id
+           WHERE b.bettor_address = $1 AND (b.placed_at, b.id) < ($2::timestamptz, $3::integer)
+           ORDER BY b.placed_at DESC, b.id DESC
+           LIMIT $4`,
+          [bettor_address, cursorPosition.placedAt, cursorPosition.id, limit + 1],
+        )
+      : await pool.query(
+          `SELECT
+             b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
+             b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+             m.fighter_a, m.fighter_b, m.status
+           FROM bets b
+           JOIN markets m ON b.market_id = m.market_id
+           WHERE b.bettor_address = $1
+           ORDER BY b.placed_at DESC, b.id DESC
+           LIMIT $2`,
+          [bettor_address, limit + 1],
+        );
+    rows = result.rows;
+  } else {
+    if (!Number.isInteger(page) || page < 1) {
+      throw AppError.badRequest('page must be an integer >= 1');
+    }
+    if (legacyOffset !== undefined && (!Number.isInteger(legacyOffset) || legacyOffset < 0)) {
+      throw AppError.badRequest('offset must be a non-negative integer');
+    }
+    const offset = legacyOffset ?? (page - 1) * limit;
+    const [countResult, result] = await Promise.all([
+      pool.query('SELECT COUNT(*) as total FROM bets WHERE bettor_address = $1', [bettor_address]),
+      pool.query(
+        `SELECT
+           b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
+           b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
+           m.fighter_a, m.fighter_b, m.status
+         FROM bets b
+         JOIN markets m ON b.market_id = m.market_id
+         WHERE b.bettor_address = $1
+         ORDER BY b.placed_at DESC, b.id DESC
+         LIMIT $2 OFFSET $3`,
+        [bettor_address, limit + 1, offset],
+      ),
+    ]);
+    rows = result.rows;
+    const total = Number(countResult.rows[0]?.total ?? 0);
+    const hasMore = rows.length > limit;
+    const bets = rows.slice(0, limit).map((row) => ({
+      ...row,
+      placed_at: new Date(row.placed_at),
+      claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
+    } as BetWithMarket));
+    return { bets, total, nextCursor: hasMore ? encodeBetCursor(bets[bets.length - 1]) : null };
+  }
 
-  // Get paginated bets with market info
-  const result = await pool.query(
-    `SELECT 
-       b.id, b.market_id, b.bettor_address, b.side, b.amount, b.amount_xlm,
-       b.placed_at, b.claimed, b.claimed_at, b.payout, b.tx_hash, b.ledger_sequence,
-       m.fighter_a, m.fighter_b, m.status
-     FROM bets b
-     JOIN markets m ON b.market_id = m.market_id
-     WHERE b.bettor_address = $1
-     ORDER BY b.placed_at DESC
-     LIMIT $2 OFFSET $3`,
-    [bettor_address, limit, offset],
-  );
-
-  const bets = result.rows.map((row) => ({
+  const hasMore = rows.length > limit;
+  const bets = rows.slice(0, limit).map((row) => ({
     ...row,
     placed_at: new Date(row.placed_at),
     claimed_at: row.claimed_at ? new Date(row.claimed_at) : null,
   } as BetWithMarket));
 
-  return { bets, total };
+  return { bets, nextCursor: hasMore ? encodeBetCursor(bets[bets.length - 1]) : null };
+}
+
+function encodeBetCursor(bet: BetWithMarket): string {
+  return Buffer.from(JSON.stringify({ placedAt: bet.placed_at.toISOString(), id: bet.id })).toString('base64url');
 }
 
 /**

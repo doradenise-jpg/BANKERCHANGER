@@ -93,10 +93,15 @@ router.get('/:bettor_address/stats', getBettorStats);
  *         schema:
  *           type: string
  *       - in: query
+ *         name: cursor
+ *         description: Opaque cursor returned as nextCursor by the previous response.
+ *         schema:
+ *           type: string
+ *       - in: query
  *         name: page
+ *         deprecated: true
  *         schema:
  *           type: integer
- *           default: 1
  *       - in: query
  *         name: limit
  *         schema:
@@ -105,7 +110,7 @@ router.get('/:bettor_address/stats', getBettorStats);
  *           maximum: 200
  *     responses:
  *       200:
- *         description: Paginated list of bets with total count
+ *         description: Keyset-paginated bets with a nextCursor, or deprecated page/offset pagination.
  */
 router.get('/:bettor_address', getBetsByAddress);
 

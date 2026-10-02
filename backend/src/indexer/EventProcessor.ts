@@ -110,11 +110,12 @@ export class StellarEventProcessor implements EventProcessor {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(
+      const insertedBet = await client.query(
         `INSERT INTO bets
            (market_id, bettor_address, side, amount, amount_xlm, placed_at, tx_hash, ledger_sequence)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         ON CONFLICT (tx_hash) DO NOTHING`,
+        ON CONFLICT (tx_hash) DO NOTHING
+        RETURNING tx_hash`,
         [
           p.market_id,
           p.bettor_address,
@@ -126,16 +127,18 @@ export class StellarEventProcessor implements EventProcessor {
           event.ledger_sequence,
         ]
       );
-      const col =
-        p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
-      await client.query(
-        `UPDATE markets
-          SET ${col}      = ${col} + $1,
-              total_pool  = total_pool + $1,
-              updated_at  = NOW()
-        WHERE market_id   = $2`,
-        [p.amount, p.market_id]
-      );
+      if (insertedBet.rows.length > 0) {
+        const col =
+          p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
+        await client.query(
+          `UPDATE markets
+            SET ${col}      = ${col} + $1,
+                total_pool  = total_pool + $1,
+                updated_at  = NOW()
+          WHERE market_id   = $2`,
+          [p.amount, p.market_id]
+        );
+      }
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -143,6 +146,9 @@ export class StellarEventProcessor implements EventProcessor {
     } finally {
       client.release();
     }
+
+    const { engagementService } = await import('../services/engagement.service');
+    await engagementService.recordBetPlaced(p.bettor_address, event.tx_hash);
   }
 
   private async handleMarketLocked(event: RawStellarEvent): Promise<void> {
