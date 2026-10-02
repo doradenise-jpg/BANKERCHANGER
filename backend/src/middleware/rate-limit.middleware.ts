@@ -7,6 +7,7 @@ export interface RateLimitOptions {
   windowMs: number;
   max: number;
   keyBy: 'ip' | 'userId';
+  keyPrefix?: string;
 }
 
 export function rateLimit(opts: RateLimitOptions) {
@@ -18,7 +19,7 @@ export function rateLimit(opts: RateLimitOptions) {
         ? (req as Request & { user?: { id: string } }).user?.id ?? req.ip
         : req.ip;
 
-    const key = `rl:${req.path}:${id}`;
+    const key = `rl:${opts.keyPrefix ?? req.path}:${id}`;
 
     // Use atomic Lua script to prevent race condition between INCR and EXPIRE
     const count = await incrWithExpire(redis, key, windowSec);
