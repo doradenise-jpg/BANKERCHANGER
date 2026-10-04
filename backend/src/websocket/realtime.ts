@@ -42,37 +42,7 @@ const WINDOW_MS = 1_000;
 export type ActivityEvent =
   | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
-  | { type: 'resolved'; marketId: string; winningOutcomeId: string }
-  | { type: 'cancelled'; marketId: string }
-  | { type: 'market_update'; marketId: string; eventType: string; data: Record<string, unknown> }
-  | { type: 'leaderboard_rank_update'; userId: string; rank: number; currentStreak?: number; timestamp: string }
-  | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string }
-  | { type: 'indexer_status'; status: 'running' | 'idle' | 'error' | 'syncing'; currentLedger: number; targetLedger: number; timestamp: string };
-
-export type MarketCreatedEvent = {
-  type: 'market:created';
-  marketId: string;
-  fighterA: string;
-  fighterB: string;
-};
-
-/** Pushed to leaderboard subscribers whenever one or more ranks change. */
-export interface LeaderboardRankEvent {
-  type: 'leaderboard_rank_update';
-  updates: RankUpdate[];
-  timestamp: string;
-}
-
-export type LeaderboardRankUpdateEvent = {
-  type: 'leaderboard_rank_update';
-  leaderboardId?: string;
-  userId: string;
-  rank: number;
-  score?: number;
-  currentStreak?: number;
-  displayName?: string;
-  timestamp: string;
-};
+  | { type: 'market:resolved'; marketId: string; outcome: string; winner_odds: number; timestamp: string };
 
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg =
@@ -413,11 +383,10 @@ export class ActivityFeed {
     logger.debug({ connectedClients: this.connectedClients }, 'WebSocket client disconnected');
   }
 
-  /** Publish an activity event to subscribers. */
-  publish(event: ActivityEvent | LeaderboardRankUpdateEvent): void {
-    if ('marketId' in event && event.marketId) {
-      const marketId = event.marketId;
-      if (!this.rateLimiter.allow(marketId)) return;
+  /** Publish an activity event to all subscribers of the market. */
+  publish(event: ActivityEvent): void {
+    const { marketId } = event as { marketId: string };
+    if (event.type !== 'market:resolved' && !this.rateLimiter.allow(marketId)) return;
 
       const sockets = this.subscriptions.get(marketId);
       if (!sockets?.size) return;
@@ -528,10 +497,16 @@ export function getActivityFeed(): ActivityFeed {
   return _feed;
 }
 
-export function tryGetActivityFeed(): ActivityFeed | null {
-  return _feed;
-}
-
-export function getActivityFeedIfInitialized(): ActivityFeed | null {
-  return _feed;
+export function broadcastMarketResolved(
+  marketId: string,
+  outcome: string,
+  winner_odds: number,
+): void {
+  _feed?.publish({
+    type: 'market:resolved',
+    marketId,
+    outcome,
+    winner_odds,
+    timestamp: new Date().toISOString(),
+  });
 }

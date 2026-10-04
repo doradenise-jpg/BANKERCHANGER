@@ -4,7 +4,12 @@
 import http from 'http';
 import jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
-import { ActivityFeed, type ActivityEvent } from '../../src/websocket/realtime';
+import {
+  ActivityFeed,
+  broadcastMarketResolved,
+  initActivityFeed,
+  type ActivityEvent,
+} from '../../src/websocket/realtime';
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 
@@ -39,7 +44,7 @@ describe('ActivityFeed integration', () => {
 
   beforeAll((done) => {
     server = http.createServer();
-    feed = new ActivityFeed(server);
+    feed = initActivityFeed(server);
     server.listen(0, () => {
       port = (server.address() as { port: number }).port;
       done();
@@ -85,6 +90,39 @@ describe('ActivityFeed integration', () => {
     expect(received).toEqual(tradeEvent);
 
     ws.close();
+  });
+
+  it('broadcasts market resolution payloads to every subscribed client', async () => {
+    const clients = [
+      new WebSocket(`ws://localhost:${port}`),
+      new WebSocket(`ws://localhost:${port}`),
+    ];
+
+    try {
+      await Promise.all(clients.map((ws) => new Promise<void>((resolve) => ws.once('open', resolve))));
+      for (const ws of clients) ws.send(JSON.stringify({ type: 'auth', token: generateTestToken() }));
+      await new Promise((r) => setImmediate(r));
+      for (const ws of clients) {
+        ws.send(JSON.stringify({ type: 'subscribe_activity', marketId: 'market-resolved' }));
+      }
+      await new Promise((r) => setImmediate(r));
+
+      const messagesPromise = Promise.all(clients.map((ws) => waitForMessage(ws)));
+      broadcastMarketResolved('market-resolved', 'fighter_a', 16333);
+      const messages = await messagesPromise;
+
+      for (const message of messages) {
+        expect(message).toMatchObject({
+          type: 'market:resolved',
+          marketId: 'market-resolved',
+          outcome: 'fighter_a',
+          winner_odds: 16333,
+        });
+        expect(new Date(message.timestamp).toISOString()).toBe(message.timestamp);
+      }
+    } finally {
+      for (const ws of clients) ws.close();
+    }
   });
 
   it('does not deliver events to unsubscribed markets', async () => {
@@ -188,3 +226,4 @@ describe('ActivityFeed integration', () => {
     expect(code).toBe(4001);
     expect(reason).toBe('Expected auth message');
   });
+});
