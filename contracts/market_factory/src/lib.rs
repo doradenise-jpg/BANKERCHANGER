@@ -20,8 +20,12 @@ const MARKET_MAP: &str = "MARKET_MAP";
 const ADMIN: &str = "ADMIN";
 const PENDING_ADMIN: &str = "PENDING_ADMIN";
 const PENDING_ADMIN_EXPIRY: &str = "PENDING_ADMIN_EXPIRY";
+const ADMIN_TIMELOCK: &str = "ADMIN_TIMELOCK";
+const PENDING_ADMIN_UNLOCK: &str = "PENDING_ADMIN_UNLOCK";
 /// Two-step admin transfer must be accepted within this window (7 days) or it expires.
 const PENDING_ADMIN_TTL_SECS: u64 = 604_800;
+/// Default 24-hour time-lock between propose_admin and accept_admin (configurable).
+const DEFAULT_ADMIN_TIMELOCK_SECS: u64 = 86_400;
 const ORACLE_WHITELIST: &str = "ORACLE_WHITELIST";
 const PAUSED: &str = "PAUSED";
 const DEFAULT_CONFIG: &str = "DEFAULT_CONFIG";
@@ -128,6 +132,9 @@ impl MarketFactory {
         env.storage()
             .persistent()
             .set(&OPEN_MARKETS, &Vec::<u64>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&ADMIN_TIMELOCK, &DEFAULT_ADMIN_TIMELOCK_SECS);
 
         env.storage().instance().extend_ttl(50_000, 100_000);
         env.storage().persistent().extend_ttl(&ADMIN, 50_000, 100_000);
@@ -139,7 +146,6 @@ impl MarketFactory {
         env.storage().persistent().extend_ttl(&DEFAULT_CONFIG, 50_000, 100_000);
         env.storage().persistent().extend_ttl(&MARKET_WASM_HASH, 50_000, 100_000);
         env.storage().persistent().extend_ttl(&OPEN_MARKETS, 50_000, 100_000);
-
         Ok(())
     }
 
@@ -515,11 +521,43 @@ impl MarketFactory {
         oracles.get(oracle)
     }
 
+    /// Sets the admin timelock in seconds. Only callable by admin.
+    pub fn set_admin_timelock(
+        env: Env,
+        admin: Address,
+        timelock_secs: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&ADMIN_TIMELOCK, &timelock_secs);
+        Ok(())
+    }
+
+    /// Gets the current admin timelock in seconds.
+    pub fn get_admin_timelock(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&ADMIN_TIMELOCK)
+            .unwrap_or(DEFAULT_ADMIN_TIMELOCK_SECS)
+    }
+
+    /// Returns the pending admin nominee, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&PENDING_ADMIN)
+    }
+
+    /// Returns the timestamp when the pending admin transfer can be accepted.
+    pub fn get_pending_admin_unlock(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&PENDING_ADMIN_UNLOCK)
+            .unwrap_or(0)
+    }
+
     /// Proposes a new admin address, starting the two-step transfer.
     ///
-    /// The current admin writes the candidate to `PENDING_ADMIN`.  Nothing
-    /// changes until the candidate calls `accept_admin`.  Calling this again
-    /// before acceptance overwrites the previous proposal (re-propose).
+    /// The current admin writes the candidate to `PENDING_ADMIN` with a time-lock.
+    /// Nothing changes until the candidate calls `accept_admin` after the time-lock expires.
     ///
     /// # Errors
     /// - `NotAdmin`: Caller is not the current admin
@@ -531,11 +569,17 @@ impl MarketFactory {
         current_admin.require_auth();
         Self::require_admin(&env, &current_admin)?;
 
-        let expiry = env
-            .ledger()
-            .timestamp()
-            .saturating_add(PENDING_ADMIN_TTL_SECS);
+        let timelock = env
+            .storage()
+            .persistent()
+            .get(&ADMIN_TIMELOCK)
+            .unwrap_or(DEFAULT_ADMIN_TIMELOCK_SECS);
+        let now = env.ledger().timestamp();
+        let unlock_at = now.saturating_add(timelock);
+        let expiry = now.saturating_add(PENDING_ADMIN_TTL_SECS);
+
         env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
+        env.storage().persistent().set(&PENDING_ADMIN_UNLOCK, &unlock_at);
         env.storage()
             .persistent()
             .set(&PENDING_ADMIN_EXPIRY, &expiry);
@@ -545,12 +589,12 @@ impl MarketFactory {
 
     /// Completes the two-step admin transfer.
     ///
-    /// Must be called by the exact address stored in `PENDING_ADMIN`, before
-    /// `PENDING_ADMIN_EXPIRY` elapses. Clears `PENDING_ADMIN` and promotes the
-    /// caller to `ADMIN`.
+    /// Must be called by the exact address stored in `PENDING_ADMIN`, after
+    /// `PENDING_ADMIN_UNLOCK` and before `PENDING_ADMIN_EXPIRY` elapses.
     ///
     /// # Errors
     /// - `NotAdmin`: No pending proposal exists, or caller is not the pending admin
+    /// - `AdminTimelockActive`: Time-lock has not yet expired
     /// - `PendingAdminExpired`: The proposal window has elapsed
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
         new_admin.require_auth();
@@ -565,6 +609,15 @@ impl MarketFactory {
             return Err(ContractError::NotAdmin);
         }
 
+        let unlock_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN_UNLOCK)
+            .unwrap_or(0);
+        if env.ledger().timestamp() < unlock_at {
+            return Err(ContractError::AdminTimelockActive);
+        }
+
         let expiry: u64 = env
             .storage()
             .persistent()
@@ -572,6 +625,7 @@ impl MarketFactory {
             .ok_or(ContractError::NotAdmin)?;
         if env.ledger().timestamp() > expiry {
             env.storage().persistent().remove(&PENDING_ADMIN);
+            env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
             env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
             return Err(ContractError::PendingAdminExpired);
         }
@@ -585,6 +639,7 @@ impl MarketFactory {
         // EFFECTS
         env.storage().persistent().set(&ADMIN, &new_admin);
         env.storage().persistent().remove(&PENDING_ADMIN);
+        env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
         env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
 
         boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
@@ -1350,7 +1405,7 @@ mod open_markets_cleanup_tests {
 mod admin_transfer_tests {
     use crate::{MarketFactory, MarketFactoryClient};
     use boxmeout_shared::types::FactoryConfig;
-    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, BytesN, Env};
 
     fn setup() -> (Env, MarketFactoryClient<'static>, Address) {
         let env = Env::default();
@@ -1377,7 +1432,20 @@ mod admin_transfer_tests {
         (env, client, admin)
     }
 
-    /// Happy path: propose → accept promotes the new admin and clears PENDING_ADMIN.
+    fn set_time(env: &Env, ts: u64) {
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            timestamp: ts,
+            protocol_version: 22,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+    }
+
+    /// Happy path: propose → wait timelock → accept promotes the new admin and clears PENDING_ADMIN.
     #[test]
     fn test_propose_then_accept_transfers_admin() {
         let (env, client, admin) = setup();
@@ -1385,6 +1453,16 @@ mod admin_transfer_tests {
 
         // Step 1: current admin proposes
         client.propose_admin(&admin, &new_admin);
+
+        // Early accept before timelock fails
+        let early_res = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            early_res.unwrap_err(),
+            Ok(boxmeout_shared::errors::ContractError::AdminTimelockActive)
+        );
+
+        // Advance ledger past 24h timelock
+        set_time(&env, 86_401);
 
         // Step 2: nominee accepts
         client.accept_admin(&new_admin);
@@ -1404,6 +1482,59 @@ mod admin_transfer_tests {
         );
     }
 
+    /// Tests that early acceptance before 24h time-lock is rejected.
+    #[test]
+    fn test_early_acceptance_rejected_by_timelock() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+
+        // Immediately try to accept — must be rejected
+        let early = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            early.unwrap_err(),
+            Ok(boxmeout_shared::errors::ContractError::AdminTimelockActive)
+        );
+
+        // Advance to 86,399 seconds (1 second before 24h)
+        set_time(&env, 86_399);
+        let still_early = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            still_early.unwrap_err(),
+            Ok(boxmeout_shared::errors::ContractError::AdminTimelockActive)
+        );
+
+        // Advance to exactly 86,400 seconds — must succeed
+        set_time(&env, 86_400);
+        let ok = client.try_accept_admin(&new_admin);
+        assert!(ok.is_ok());
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    /// Tests deploy-time configurable timelock
+    #[test]
+    fn test_configurable_admin_timelock() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        // Configure timelock to 3600 seconds (1 hour)
+        client.set_admin_timelock(&admin, &3600);
+        assert_eq!(client.get_admin_timelock(), 3600);
+
+        client.propose_admin(&admin, &new_admin);
+
+        set_time(&env, 3599);
+        let early = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            early.unwrap_err(),
+            Ok(boxmeout_shared::errors::ContractError::AdminTimelockActive)
+        );
+
+        set_time(&env, 3600);
+        assert!(client.try_accept_admin(&new_admin).is_ok());
+    }
+
     /// Wrong caller: a third party cannot accept a pending proposal.
     #[test]
     fn test_wrong_caller_cannot_accept_admin() {
@@ -1412,6 +1543,7 @@ mod admin_transfer_tests {
         let impostor = Address::generate(&env);
 
         client.propose_admin(&admin, &new_admin);
+        set_time(&env, 86_401);
 
         let result = client.try_accept_admin(&impostor);
         assert!(
@@ -1460,6 +1592,8 @@ mod admin_transfer_tests {
         // Re-propose with a different address before first nominee accepts
         client.propose_admin(&admin, &second_nominee);
 
+        set_time(&env, 86_401);
+
         // First nominee can no longer accept — the slot was overwritten
         let result_first = client.try_accept_admin(&first_nominee);
         assert!(
@@ -1483,6 +1617,7 @@ mod admin_transfer_tests {
         let new_admin = Address::generate(&env);
 
         client.propose_admin(&admin, &new_admin);
+        set_time(&env, 86_401);
         client.accept_admin(&new_admin);
 
         // A second accept call must fail because PENDING_ADMIN was cleared
@@ -1510,7 +1645,7 @@ mod task12_factory_market_integrity_tests {
         errors::ContractError,
         types::{FactoryConfig, FightDetails, MarketConfig},
     };
-    use crate::{MarketFactory, MarketFactoryClient};
+    use crate::{MarketFactory, MarketFactoryClient, ADMIN, MARKET_COUNT, ORACLE_WHITELIST};
 
     fn setup_factory(env: &Env) -> (MarketFactoryClient<'static>, Address, Address, Address) {
         env.mock_all_auths();
@@ -1545,6 +1680,13 @@ mod task12_factory_market_integrity_tests {
                 default_resolution_window: 86_400,
             },
         );
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(100_000, 100_000);
+            env.storage().persistent().extend_ttl(&ADMIN, 100_000, 100_000);
+            env.storage().persistent().extend_ttl(&MARKET_COUNT, 100_000, 100_000);
+            env.storage().persistent().extend_ttl(&ORACLE_WHITELIST, 100_000, 100_000);
+        });
 
         (client, admin, treasury, oracle)
     }

@@ -224,6 +224,7 @@ name = "boxmeout-market"
 version = "0.1.0"
 dependencies = [
  "boxmeout-shared",
+ "boxmeout-treasury",
  "ed25519-dalek",
  "proptest",
  "soroban-sdk",

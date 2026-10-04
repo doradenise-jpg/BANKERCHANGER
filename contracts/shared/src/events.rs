@@ -3,7 +3,7 @@
 //! All emitted events are defined here for consistency.
 //! ============================================================
 
-use soroban_sdk::{Address, Env, String, Symbol};
+use soroban_sdk::{contracttype, Address, Env, String, Symbol};
 
 use crate::types::{AuditEntry, BetPlacedPayload, BetRecord, ClaimReceipt, OddsSnapshot, Outcome};
 
@@ -46,7 +46,7 @@ pub fn emit_market_resolution_pending(
     cooldown_end_ledger: u32,
 ) {
     let topics = (Symbol::new(env, "market_resolution_pending"), market_id);
-    env.events().publish(topics, (outcome_byte, cooldown_end_ledger));
+    env.events().publish(topics, (outcome_byte as u32, cooldown_end_ledger));
 }
 
 /// Emits a `resolution_finalized` event when anyone successfully calls
@@ -56,7 +56,7 @@ pub fn emit_market_resolution_pending(
 /// Data:   `(outcome_byte: u32)`
 pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u32) {
     let topics = (Symbol::new(env, "resolution_finalized"), market_id);
-    env.events().publish(topics, outcome_byte);
+    env.events().publish(topics, outcome_byte as u32);
 }
 
 /// Emits a legacy `bet_placed` event containing only the BetRecord.
@@ -103,13 +103,27 @@ pub fn emit_refund_claimed(env: &Env, market_id: u64, bettor: Address, amount: i
     env.events().publish(topics, (bettor, amount));
 }
 
+/// Event payload for market cancellation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketCancelled {
+    pub market_id: u64,
+    pub cancelled_by: Address,
+    pub reason: String,
+}
+
 /// Emits a `market_cancelled` event when a market is cancelled.
 ///
 /// Topics: `(Symbol("market_cancelled"), market_id)`
-/// Data:   `reason: String`
-pub fn emit_market_cancelled(env: &Env, market_id: u64, reason: String) {
+/// Data:   `(cancelled_by: Address, reason: String)`
+pub fn emit_market_cancelled(
+    env: &Env,
+    market_id: u64,
+    cancelled_by: Address,
+    reason: String,
+) {
     let topics = (Symbol::new(env, "market_cancelled"), market_id);
-    env.events().publish(topics, reason);
+    env.events().publish(topics, (cancelled_by, reason));
 }
 
 /// Emits a `market_paused` event when a specific market is paused.
@@ -491,6 +505,7 @@ pub fn emit_odds_computed(
     env.events().publish(topics, (pool_a, pool_b, pool_draw, shares_out, price_impact_bps));
 }
 
+
 /// Emits an `audit_log` event for every treasury action that alters balances.
 ///
 /// Topics: `(Symbol("audit_log"), day_bucket)`
@@ -709,13 +724,16 @@ mod tests {
     #[test]
     fn test_emit_market_cancelled() {
         let (env, id) = env();
+        let canceller = addr(&env);
         env.as_contract(&id, || {
-            emit_market_cancelled(&env, 7, str(&env, "fight_postponed"));
+            emit_market_cancelled(&env, 7, canceller.clone(), str(&env, "fight_postponed"));
         });
 
         let ev = sole_event!(env);
         assert_eq!(topic_sym!(env, ev), Symbol::new(&env, "market_cancelled"));
-        let ev_reason: soroban_sdk::String = TryFromVal::try_from_val(&env, &ev.2).unwrap();
+        let (ev_canceller, ev_reason): (Address, soroban_sdk::String) =
+            TryFromVal::try_from_val(&env, &ev.2).unwrap();
+        assert_eq!(ev_canceller, canceller);
         assert_eq!(ev_reason, str(&env, "fight_postponed"));
     }
 

@@ -210,9 +210,9 @@ pub fn compute_odds(
     // In BPS: impact * 10000
 
     let reference_price_num = pool_in;
-    let reference_price_den = pool_out;
-    let executed_price_num = bet_amount;
-    let executed_price_den = shares_out;
+    let _reference_price_den = pool_out;
+    let _executed_price_num = bet_amount;
+    let _executed_price_den = shares_out;
 
     // impact_bps = ((executed - reference) / reference) * 10000
     //            = ((bet_amount / shares_out - pool_in / pool_out) / (pool_in / pool_out)) * 10000
@@ -282,6 +282,91 @@ pub fn calc_claimable_lp_fees(lp_fee_per_share: i128, lp_fee_debt: i128, lp_shar
     fee_delta.saturating_mul(lp_shares) / 1_000_000
 }
 
+/// Computes LP shares to mint when depositing liquidity into a market pool.
+///
+/// For the initial liquidity provision (`total_shares == 0` or `total_pool == 0`),
+/// shares are minted 1:1 with the deposited amount:
+/// `lp_shares = deposit_amount`
+///
+/// For subsequent deposits, shares minted are strictly proportional:
+/// `lp_shares = (deposit_amount * total_shares) / total_pool`
+///
+/// # Precision and Anti-Dilution Guarantee
+/// To prevent share dilution on large deposits due to integer truncation
+/// in the ratio calculation, the intermediate multiplication and division
+/// are performed with `u128` precision.
+///
+/// # Arguments
+/// * `deposit_amount` - The total amount being added across all pool sides (in stroops)
+/// * `total_pool`     - The total existing pool size before this deposit (in stroops)
+/// * `total_shares`   - The current total outstanding LP shares before this deposit
+///
+/// # Returns
+/// `Some(lp_shares)` if inputs are valid and calculation succeeds without overflow,
+/// or `None` if inputs are invalid (e.g. non-positive deposit or negative totals).
+pub fn calc_lp_shares_to_mint(
+    deposit_amount: i128,
+    total_pool: i128,
+    total_shares: i128,
+) -> Option<i128> {
+    if deposit_amount <= 0 {
+        return None;
+    }
+    if total_shares == 0 || total_pool == 0 {
+        return Some(deposit_amount);
+    }
+    if total_pool < 0 || total_shares < 0 {
+        return None;
+    }
+
+    // Use u128 precision for intermediate calculations to prevent dilution
+    let deposit_u = deposit_amount as u128;
+    let shares_u = total_shares as u128;
+    let pool_u = total_pool as u128;
+
+    let numerator = deposit_u.checked_mul(shares_u)?;
+    let minted_u = numerator.checked_div(pool_u)?;
+
+    if minted_u > i128::MAX as u128 {
+        return None;
+    }
+    let minted = minted_u as i128;
+    if minted <= 0 {
+        return None;
+    }
+    Some(minted)
+}
+
+/// Computes the proportional withdrawal amounts from pool A, pool B, and pool Draw
+/// when burning a given number of LP shares.
+///
+/// `withdraw_side = (pool_side * shares_to_burn) / total_shares`
+///
+/// Uses `u128` precision for intermediate products to prevent overflow and truncation.
+pub fn calc_lp_withdrawal_amounts(
+    shares_to_burn: i128,
+    total_shares: i128,
+    pool_a: i128,
+    pool_b: i128,
+    pool_draw: i128,
+) -> Option<(i128, i128, i128)> {
+    if shares_to_burn <= 0 || total_shares <= 0 || shares_to_burn > total_shares {
+        return None;
+    }
+    if pool_a < 0 || pool_b < 0 || pool_draw < 0 {
+        return None;
+    }
+
+    let burn_u = shares_to_burn as u128;
+    let total_u = total_shares as u128;
+
+    let withdraw_a = ((pool_a as u128).checked_mul(burn_u)? / total_u) as i128;
+    let withdraw_b = ((pool_b as u128).checked_mul(burn_u)? / total_u) as i128;
+    let withdraw_draw = ((pool_draw as u128).checked_mul(burn_u)? / total_u) as i128;
+
+    Some((withdraw_a, withdraw_b, withdraw_draw))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,11 +393,6 @@ mod tests {
 
     #[test]
     fn test_isqrt_non_perfect_squares() {
-        assert_eq!(isqrt(5), 2); // floor(√5) = 2
-        assert_eq!(isqrt(10), 3); // floor(√10) = 3
-        assert_eq!(isqrt(99), 9); // floor(√99) = 9
-        assert_eq!(isqrt(101), 10); // floor(√101) = 10
-
         assert_eq!(isqrt(5), Some(2));   // floor(√5) = 2
         assert_eq!(isqrt(10), Some(3));  // floor(√10) = 3
         assert_eq!(isqrt(99), Some(9));  // floor(√99) = 9
@@ -752,5 +832,102 @@ mod proptest_tests {
         // Fee delta = 1_000_000, shares = 100_000_000
         // Result = 1_000_000 * 100_000_000 / 1_000_000 = 100_000_000
         assert_eq!(fees, 100_000_000);
+    }
+
+    // ── LP share minting & anti-dilution tests ──────────────────────────────────
+
+    #[test]
+    fn test_calc_lp_shares_first_deposit() {
+        assert_eq!(calc_lp_shares_to_mint(1_000_000, 0, 0), Some(1_000_000));
+        assert_eq!(calc_lp_shares_to_mint(5_000_000, 0, 100), Some(5_000_000));
+    }
+
+    #[test]
+    fn test_calc_lp_shares_proportional() {
+        let deposit = 10_000_000i128;
+        let pool = 100_000_000i128;
+        let shares = 100_000_000i128;
+        // 10% increase in pool yields 10% increase in shares
+        assert_eq!(calc_lp_shares_to_mint(deposit, pool, shares), Some(10_000_000));
+    }
+
+    /// Acceptance Criteria: Test large deposit followed by proportional withdrawal
+    /// returns original amount ± 1 stroop.
+    #[test]
+    fn test_large_deposit_followed_by_proportional_withdrawal_returns_original_amount() {
+        let pool_a = 1_000_000_000i128; // 100 XLM
+        let pool_b = 1_000_000_000i128;
+        let pool_draw = 1_000_000_000i128;
+        let total_pool = pool_a + pool_b + pool_draw; // 3_000_000_000
+        let total_shares = 3_000_000_000i128;
+
+        // Large deposit: 10,000,000 XLM = 100_000_000_000_000 stroops
+        let large_deposit = 100_000_000_000_000i128;
+        let minted_shares = calc_lp_shares_to_mint(large_deposit, total_pool, total_shares)
+            .expect("large deposit share calculation should succeed");
+
+        let dep_a = large_deposit / 3;
+        let dep_b = large_deposit / 3;
+        let dep_draw = large_deposit - dep_a - dep_b;
+
+        let new_pool_a = pool_a + dep_a;
+        let new_pool_b = pool_b + dep_b;
+        let new_pool_draw = pool_draw + dep_draw;
+        let new_total_shares = total_shares + minted_shares;
+
+        // Proportional withdrawal of all minted shares
+        let (out_a, out_b, out_draw) = calc_lp_withdrawal_amounts(
+            minted_shares,
+            new_total_shares,
+            new_pool_a,
+            new_pool_b,
+            new_pool_draw,
+        ).expect("withdrawal calculation should succeed");
+
+        let total_returned = out_a + out_b + out_draw;
+        let diff = (total_returned - large_deposit).abs();
+        assert!(
+            diff <= 1,
+            "Expected original amount ± 1 stroop, got diff: {} (deposited: {}, returned: {})",
+            diff, large_deposit, total_returned
+        );
+    }
+}
+
+#[cfg(test)]
+mod lp_proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Acceptance Criteria: Property test: adding liquidity proportional to existing
+        /// pool does not change share price.
+        #[test]
+        fn prop_lp_proportional_deposit_does_not_change_share_price(
+            total_pool in 3_000_000i128..=10_000_000_000_000i128,
+            total_shares in 3_000_000i128..=10_000_000_000_000i128,
+            multiplier in 1i128..=1_000i128,
+            divisor in 1i128..=100i128,
+        ) {
+            let deposit = (total_pool * multiplier) / divisor;
+            if deposit > 0 && deposit <= i128::MAX / 2 {
+                if let Some(minted) = calc_lp_shares_to_mint(deposit, total_pool, total_shares) {
+                    // Pre-deposit share price in fixed-point (scaled by 1e9)
+                    let pre_price = ((total_pool as u128) * 1_000_000_000) / (total_shares as u128);
+
+                    let post_pool = total_pool + deposit;
+                    let post_shares = total_shares + minted;
+                    let post_price = ((post_pool as u128) * 1_000_000_000) / (post_shares as u128);
+
+                    let diff = if pre_price >= post_price { pre_price - post_price } else { post_price - pre_price };
+                    let max_delta = (pre_price / (post_shares as u128)).max(1);
+                    prop_assert!(
+                        diff <= max_delta * 2,
+                        "Share price changed: pre_price={}, post_price={}, diff={}, max_delta={}",
+                        pre_price, post_price, diff, max_delta
+                    );
+                }
+            }
+        }
     }
 }
