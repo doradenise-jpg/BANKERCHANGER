@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { logger } from '../utils/logger';
 
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigurationError';
+    Object.setPrototypeOf(this, ConfigurationError.prototype);
+  }
+}
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url('DATABASE_URL must be a valid URL'),
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
@@ -16,7 +24,10 @@ const envSchema = z.object({
   FACTORY_CONTRACT_ADDRESS: z.string().min(1, 'FACTORY_CONTRACT_ADDRESS is required'),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  JWT_SECRET: z.string().min(1).default('change-me-in-production'),
+  JWT_SECRET: z.string().refine(
+    (secret) => Buffer.byteLength(secret, 'utf8') >= 32,
+    'JWT_SECRET must be at least 32 bytes',
+  ),
   // Per-token-type secrets (recommended for production). Each falls back to
   // JWT_SECRET when unset, so a single compromised secret only affects the
   // token type it was actually used for once these are configured distinctly.
@@ -51,6 +62,13 @@ let validatedEnv: Env | null = null;
 export function validateEnv(): Env {
   if (validatedEnv) return validatedEnv;
 
+  if (!process.env.JWT_SECRET) {
+    const message = process.env.NODE_ENV === 'production'
+      ? 'JWT_SECRET must be set in production and must be at least 32 bytes.'
+      : 'JWT_SECRET is required and must be at least 32 bytes.';
+    throw new ConfigurationError(message);
+  }
+
   const result = envSchema.safeParse(process.env);
 
   if (!result.success) {
@@ -60,7 +78,7 @@ export function validateEnv(): Env {
     });
     logger.error('Environment validation failed:');
     errors.forEach(err => logger.error(`  - ${err}`));
-    process.exit(1);
+    throw new ConfigurationError(`Environment validation failed: ${errors.join('; ')}`);
   }
 
   validatedEnv = result.data;

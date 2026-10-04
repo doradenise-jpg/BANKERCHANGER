@@ -151,7 +151,7 @@ STELLAR_NETWORK=testnet
 FACTORY_CONTRACT_ADDRESS=<deployed-contract-address>
 
 # Secrets (CHANGE IN PRODUCTION!)
-JWT_SECRET=change-me-in-production
+JWT_SECRET=replace-this-with-a-random-secret-at-least-32-bytes
 ADMIN_JWT_SECRET=change-me-in-production
 ORACLE_PRIVATE_KEY=<your-stellar-secret-key>
 

@@ -268,7 +268,7 @@
    ```bash
    export VERIFY_EMAIL_URL=https://yourdomain.com/auth/verify-email
    export REDIS_URL=redis://your-redis-host:6379
-   export JWT_SECRET=your-secret-key
+   export JWT_SECRET=replace-this-with-a-random-secret-at-least-32-bytes
    ```
 
 5. Start server

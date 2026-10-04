@@ -7,7 +7,6 @@ import type { RankUpdate } from '../models/Engagement';
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const JWT_SECRET = process.env.JWT_ACCESS_SECRET ?? process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
 const AUTH_TIMEOUT_MS = 5_000; // 5 seconds to send auth message
 
 // ---------------------------------------------------------------------------
@@ -181,6 +180,7 @@ export class ActivityFeed {
     logger.info('ActivityFeed WebSocket server attached');
   }
 
+<<<<<<< HEAD
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   private _resolveIp(req: IncomingMessage): string {
@@ -226,8 +226,11 @@ export class ActivityFeed {
   }
 
   private verifyToken(token: string): 'full' | 'activity' | null {
+    const jwtSecret = process.env.JWT_ACCESS_SECRET ?? process.env.JWT_SECRET;
+    if (!jwtSecret) return null;
+
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+      const payload = jwt.verify(token, jwtSecret) as jwt.JwtPayload;
       if (payload.type === 'access') return 'full';
       if (
         payload.sub === 'public-market-feed' &&

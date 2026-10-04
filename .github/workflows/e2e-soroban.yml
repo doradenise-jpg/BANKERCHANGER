@@ -114,7 +114,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
           REDIS_URL: redis://localhost:6379
-          JWT_SECRET: e2e-test-secret
+          JWT_SECRET: e2e-test-secret-for-ci-0123456789abcdef
           PORT: 3001
         run: node dist/index.js &
 

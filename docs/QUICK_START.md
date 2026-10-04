@@ -125,7 +125,7 @@ VERIFY_EMAIL_URL=http://localhost:3000/auth/verify-email
 REDIS_URL=redis://localhost:6379
 
 # JWT configuration
-JWT_SECRET=your-secret-key
+JWT_SECRET=replace-this-with-a-random-secret-at-least-32-bytes
 JWT_EXPIRES_IN=15m
 REFRESH_EXPIRES_IN=7d
 ```

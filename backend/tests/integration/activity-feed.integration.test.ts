@@ -11,7 +11,8 @@ import {
   type ActivityEvent,
 } from '../../src/websocket/realtime';
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+const JWT_SECRET = process.env.JWT_SECRET ?? 'test-jwt-secret-for-websocket-0123456789';
+process.env.JWT_SECRET ??= JWT_SECRET;
 
 function generateTestToken(): string {
   return jwt.sign({ sub: 'test-user', type: 'access' }, JWT_SECRET);
