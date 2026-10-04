@@ -2,14 +2,16 @@ import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { useLeaderboard } from '../../hooks/useLeaderboard';
-import { fetchLeaderboard } from '../../services/api';
+import { fetchLeaderboard, fetchMyLeaderboardRank } from '../../services/api';
 import type { Leaderboard } from '../../types';
 
 jest.mock('../../services/api', () => ({
   fetchLeaderboard: jest.fn(),
+  fetchMyLeaderboardRank: jest.fn(),
 }));
 
 const mockFetchLeaderboard = fetchLeaderboard as jest.Mock;
+const mockFetchMyLeaderboardRank = fetchMyLeaderboardRank as jest.Mock;
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
@@ -65,6 +67,7 @@ describe('useLeaderboard', () => {
     MockWebSocket.instances = [];
     window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
     mockFetchLeaderboard.mockResolvedValue(baseLeaderboard);
+    mockFetchMyLeaderboardRank.mockResolvedValue({ rank: 500 });
   });
 
   afterEach(() => {
@@ -109,5 +112,15 @@ describe('useLeaderboard', () => {
     await waitFor(() => {
       expect(screen.getByText('1:GALPHA:99')).toBeInTheDocument();
     });
+  });
+
+  it('exposes the authenticated caller''s own rank', async () => {
+    render(<HookProbe />);
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('entry')).toHaveLength(2);
+    });
+
+    expect(mockFetchMyLeaderboardRank).toHaveBeenCalled();
   });
 });
