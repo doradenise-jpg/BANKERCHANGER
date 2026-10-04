@@ -8869,3 +8869,228 @@ mod oracle_pending_reports_ttl_tiers_tests {
         );
     }
 }
+
+// ============================================================
+// ISSUES #631, #632, #633, #634 TEST MODULE
+// ============================================================
+#[cfg(test)]
+mod issue_631_to_634_tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        token::StellarAssetClient,
+        Address, Env, Symbol,
+    };
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{
+        BetSide, FightDetails, MarketConfig, MarketState, MarketStatus,
+        OptionalOutcome, Outcome,
+    };
+    use crate::Market;
+
+    const SCHEDULED_AT: u64 = 100_000;
+    const LOCK_BEFORE_SECS: u64 = 3_600;
+
+    fn fight(env: &Env) -> FightDetails {
+        FightDetails {
+            match_id: soroban_sdk::String::from_str(env, "TEST-MATCH-2026"),
+            fighter_a: soroban_sdk::String::from_str(env, "FighterA"),
+            fighter_b: soroban_sdk::String::from_str(env, "FighterB"),
+            weight_class: soroban_sdk::String::from_str(env, "Heavyweight"),
+            scheduled_at: SCHEDULED_AT,
+            venue: soroban_sdk::String::from_str(env, "Vegas"),
+            title_fight: true,
+        }
+    }
+
+    fn config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            fee_bps: 200,
+            lock_before_secs: LOCK_BEFORE_SECS,
+            resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
+        }
+    }
+
+    fn setup(
+        env: &Env,
+        timestamp: u64,
+    ) -> (crate::MarketClient<'static>, Address, Address, Address) {
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 1,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6_311_520,
+        });
+
+        let factory = Address::generate(env);
+        let treasury = Address::generate(env);
+        let contract_id = env.register_contract(None, Market);
+        let client = crate::MarketClient::new(env, &contract_id);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury, &0u32);
+
+        let token_id = env.register_stellar_asset_contract(factory.clone());
+        (client, contract_id, factory, token_id)
+    }
+
+    // ── Issue #634: Market lock time boundary tests ─────────────
+    #[test]
+    fn test_issue_634_bet_at_exact_lock_boundary_rejected() {
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env, lock_threshold);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &1_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        assert_eq!(result.unwrap_err(), Ok(ContractError::BettingClosed));
+    }
+
+    #[test]
+    fn test_issue_634_bet_before_lock_boundary_succeeds() {
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, _contract_id, _factory, token_id) = setup(&env, lock_threshold - 1);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+
+        let result = client.try_place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &1_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        assert!(result.is_ok(), "Bet at fight_time - lock_before_secs - 1 must succeed");
+    }
+
+    // ── Issue #633: Shares burned and storage key removed after claim ─────
+    #[test]
+    fn test_issue_633_shares_burned_storage_key_removed_after_claim() {
+        let env = Env::default();
+        let (client, contract_id, _factory, token_id) = setup(&env, 1_000);
+
+        let bettor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&bettor, &10_000_000i128);
+        StellarAssetClient::new(&env, &token_id).mint(&contract_id, &10_000_000i128);
+
+        let share_key = (Symbol::new(&env, "BET"), bettor.clone());
+
+        // Count persistent storage entries before placing bet
+        let count_persistent_entries = || {
+            let mut count = 0;
+            for key in ["STATE", "BETTOR_LIST", "FACTORY", "TREASURY"] {
+                if env.as_contract(&contract_id, || env.storage().persistent().has(&key)) {
+                    count += 1;
+                }
+            }
+            if env.as_contract(&contract_id, || env.storage().persistent().has(&share_key)) {
+                count += 1;
+            }
+            count
+        };
+
+        let initial_entry_count = count_persistent_entries();
+
+        // Place a bet
+        client.place_bet(&bettor, &BetSide::FighterA, &10_000_000i128, &token_id, &0i128);
+
+        // Verify storage key exists after bet
+        let key_exists_before = env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&share_key)
+        });
+        assert!(key_exists_before, "Share key must exist after placing bet");
+        assert_eq!(count_persistent_entries(), initial_entry_count + 1);
+
+        // Manually resolve market as FighterA
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Resolved;
+            state.outcome = OptionalOutcome::Some(Outcome::FighterA);
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        // Claim winnings
+        let receipt = client.claim_winnings(&bettor, &token_id);
+        assert!(receipt.amount_won > 0);
+
+        // Verify storage key NO LONGER exists after claim
+        let key_exists_after = env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&share_key)
+        });
+        assert!(!key_exists_after, "Share key must no longer exist after claim");
+
+        // Confirm ledger entry count before bet and after claim are equal
+        let post_claim_entry_count = count_persistent_entries();
+        assert_eq!(
+            initial_entry_count, post_claim_entry_count,
+            "Ledger entry count before bet and after claim must be equal"
+        );
+    }
+
+    // ── Issue #632: Market resolution allow_draw check ───────────
+    #[test]
+    fn test_issue_632_resolving_no_draw_market_with_draw_rejected() {
+        let env = Env::default();
+        let (client, contract_id, factory, _token_id) = setup(&env, SCHEDULED_AT + 100);
+
+        // Lock market first
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Locked;
+            env.storage().persistent().set(&"STATE", &state);
+            // Market created without draw support
+            env.storage().persistent().set(&"ALLOW_DRAW", &false);
+        });
+
+        // Resolve dispute with Draw should fail with DrawNotAllowed
+        let result = client.try_resolve_dispute(&factory, &Outcome::Draw);
+        assert_eq!(result.unwrap_err(), Ok(ContractError::DrawNotAllowed));
+    }
+
+    #[test]
+    fn test_issue_632_resolving_draw_enabled_market_with_draw_succeeds() {
+        let env = Env::default();
+        let (client, contract_id, factory, _token_id) = setup(&env, SCHEDULED_AT + 100);
+
+        // Lock market first
+        env.as_contract(&contract_id, || {
+            let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+            state.status = MarketStatus::Locked;
+            env.storage().persistent().set(&"STATE", &state);
+            // Draw enabled
+            env.storage().persistent().set(&"ALLOW_DRAW", &true);
+        });
+
+        let result = client.try_resolve_dispute(&factory, &Outcome::Draw);
+        assert!(result.is_ok(), "Resolving draw-enabled market with Draw must succeed");
+        let state = client.get_state();
+        assert_eq!(state.status, MarketStatus::Resolved);
+        assert_eq!(state.outcome, OptionalOutcome::Some(Outcome::Draw));
+    }
+
+    // ── Issue #631: Payout calculation overflow in Market ───────
+    #[test]
+    fn test_issue_631_payout_calculation_overflow_returns_arithmetic_overflow() {
+        let half_max = i128::MAX / 2;
+        let res = boxmeout_shared::math::calculate_payout(half_max, 3, 1);
+        assert_eq!(res.unwrap_err(), ContractError::ArithmeticOverflow);
+    }
+}
+

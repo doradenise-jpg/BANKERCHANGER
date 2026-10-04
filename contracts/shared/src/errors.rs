@@ -80,6 +80,8 @@ pub enum ContractError {
     DisputeCooldownActive = 34,
     /// finalize_resolution called on a market not in ResolutionPending state
     ResolutionNotPending = 35,
+    /// Market was not configured to allow Draw outcome
+    DrawNotAllowed = 36,
 
     // ── Treasury ───────────────────────────────────────────
     /// Fee withdrawals are temporarily paused
@@ -120,4 +122,8 @@ pub enum ContractError {
     // ── Reserve ────────────────────────────────────────────
     /// Withdrawal would bring the treasury balance below the configured minimum reserve
     InsufficientReserve = 62,
+
+    // ── Arithmetic ─────────────────────────────────────────
+    /// Arithmetic operation resulted in overflow
+    ArithmeticOverflow = 70,
 }
