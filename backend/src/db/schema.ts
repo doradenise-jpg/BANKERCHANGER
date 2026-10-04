@@ -56,6 +56,7 @@ export const bets = pgTable(
     side: text('side').notNull(),
     amount: numeric('amount').notNull(),
     amount_xlm: numeric('amount_xlm').default('0'),
+    odds_snapshot: jsonb('odds_snapshot'),
     placed_at: timestamp('placed_at', { withTimezone: true }).defaultNow(),
     claimed: boolean('claimed').default(false),
     claimed_at: timestamp('claimed_at', { withTimezone: true }),

@@ -578,26 +578,37 @@ export async function handleMarketCreated(event: RawStellarEvent): Promise<void>
 
 export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
   const p = parsePayload(event.data);
+  const eventValue = asRecord(p.value) ?? p;
+  const bet = asRecord(eventValue.bet) ?? asRecord(p.bet) ?? eventValue;
+  const oddsSnapshot =
+    asRecord(eventValue.odds_at_bet_time) ??
+    asRecord(p.odds_at_bet_time) ??
+    asRecord(eventValue.odds_snapshot) ??
+    asRecord(p.odds_snapshot) ??
+    null;
+  const marketId = bet.market_id ?? eventValue.market_id ?? p.market_id;
+  const bettorAddress = bet.bettor_address ?? bet.bettor;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query(
       `INSERT INTO bets
-         (market_id, bettor_address, side, amount, amount_xlm, placed_at, tx_hash, ledger_sequence)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (market_id, bettor_address, side, amount, amount_xlm, odds_snapshot, placed_at, tx_hash, ledger_sequence)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (tx_hash) DO NOTHING`,
       [
-        p.market_id,
-        p.bettor_address,
-        p.side,
-        p.amount,
-        Number(p.amount) / 10_000_000,
-        p.placed_at ?? new Date(),
+        marketId,
+        bettorAddress,
+        bet.side,
+        bet.amount,
+        Number(bet.amount) / 10_000_000,
+        oddsSnapshot,
+        bet.placed_at ?? eventValue.placed_at ?? new Date(),
         event.tx_hash,
         event.ledger_sequence,
       ],
     );
-    const col = p.side === 'fighter_a' ? 'pool_a' : p.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
+    const col = bet.side === 'fighter_a' ? 'pool_a' : bet.side === 'fighter_b' ? 'pool_b' : 'pool_draw';
     const { rows: [pools] } = await client.query(
       `UPDATE markets
           SET ${col}      = ${col} + $1,
@@ -605,7 +616,7 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
               updated_at  = NOW()
         WHERE market_id   = $2
         RETURNING ${col} AS side_pool, total_pool`,
-      [p.amount, p.market_id],
+      [bet.amount, marketId],
     );
     await client.query('COMMIT');
 
@@ -613,10 +624,10 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
     const sidePool = Number(pools?.side_pool ?? 0);
     publishActivity({
       type: 'trade',
-      marketId: String(p.market_id),
-      outcomeId: String(p.side),
-      side: String(p.side),
-      sharesAmount: Number(p.amount),
+      marketId: String(marketId),
+      outcomeId: String(bet.side),
+      side: String(bet.side),
+      sharesAmount: Number(bet.amount),
       priceBps: totalPool > 0 ? Math.round((sidePool / totalPool) * 10_000) : 0,
       timestamp: new Date().toISOString(),
     });
@@ -626,6 +637,12 @@ export async function handleBetPlaced(event: RawStellarEvent): Promise<void> {
   } finally {
     client.release();
   }
+}
+
+function asRecord(value: unknown): Record<string, any> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : null;
 }
 
 export async function handleMarketLocked(event: RawStellarEvent): Promise<void> {

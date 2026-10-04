@@ -13,6 +13,8 @@ export interface Bet {
   amount: string;
   /** Denormalized XLM amount for display queries */
   amount_xlm: number;
+  /** Outcome odds in basis points when the bet was placed */
+  odds_snapshot?: OddsSnapshot | null;
   placed_at: Date;
   claimed: boolean;
   claimed_at: Date | null;
@@ -24,3 +26,9 @@ export interface Bet {
 }
 
 export type BetSideDB = 'fighter_a' | 'fighter_b' | 'draw';
+
+export interface OddsSnapshot {
+  odds_a: number;
+  odds_b: number;
+  odds_draw: number;
+}

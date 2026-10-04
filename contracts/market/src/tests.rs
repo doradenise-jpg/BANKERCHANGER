@@ -5799,7 +5799,9 @@ mod storage_integrity_and_lifecycle_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// A min_shares_out above the executable share count must be rejected with
@@ -7428,7 +7430,9 @@ mod oracle_pending_reports_ttl_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// Slippage boundary: impact == MAX_SLIPPAGE_BPS must be accepted (tier 10).
@@ -7905,7 +7909,9 @@ mod amm_slippage_tier12_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// Large bet into thin pool is rejected as BetTooLarge (tier 12).
@@ -8365,7 +8371,9 @@ mod amm_slippage_tier14_tests {
         env: &Env,
         event: &(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val),
     ) -> BetRecord {
-        soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap()
+        let payload: boxmeout_shared::types::BetPlacedPayload =
+            soroban_sdk::TryFromVal::try_from_val(env, &event.2).unwrap();
+        payload.bet
     }
 
     /// Large bet into thin pool rejected as BetTooLarge (tier 14).

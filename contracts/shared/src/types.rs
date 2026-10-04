@@ -193,6 +193,23 @@ pub struct BetRecord {
     pub claimed: bool,
 }
 
+/// Outcome probabilities captured in basis points when a bet is placed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OddsSnapshot {
+    pub odds_a: u32,
+    pub odds_b: u32,
+    pub odds_draw: u32,
+}
+
+/// BetPlaced event payload including the odds offered before the stake is added.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BetPlacedPayload {
+    pub bet: BetRecord,
+    pub odds_at_bet_time: OddsSnapshot,
+}
+
 /// Optional outcome — used in MarketState to avoid Option<EnumType> which
 /// is not supported by #[contracttype] in soroban-sdk 20.x.
 #[contracttype]
