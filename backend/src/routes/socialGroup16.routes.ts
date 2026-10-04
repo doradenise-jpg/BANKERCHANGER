@@ -425,4 +425,96 @@ router.get(
   }
 );
 
+import { isProfaneContent, addBlockedWords, getBlockedWords } from '../services/profanity.service';
+import { requireAdminJwt } from '../middleware/requireAdminJwt.middleware';
+
+/**
+ * @swagger
+ * /api/v2/social/comments:
+ *   post:
+ *     summary: Post a comment or reaction on social features (with profanity filter)
+ *     tags: [Social Group 16]
+ */
+router.post(
+  '/comments',
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { content, syndicateId, targetType = 'syndicate' } = req.body;
+      const text = typeof content === 'string' ? content : req.body.text || req.body.comment;
+
+      if (!text || typeof text !== 'string' || text.trim().length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Comment content is required',
+        });
+        return;
+      }
+
+      // Profanity filtering (Issue #677)
+      if (isProfaneContent(text)) {
+        res.status(422).json({
+          success: false,
+          error: 'Content policy violation',
+          message: 'Content policy violation',
+        });
+        return;
+      }
+
+      const comment = {
+        id: `cmt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        content: text.trim(),
+        syndicateId: syndicateId || null,
+        targetType,
+        userId: (req as any).userId || (req as any).user?.id || 'user',
+        createdAt: new Date().toISOString(),
+      };
+
+      res.status(201).json({
+        success: true,
+        message: 'Comment posted successfully',
+        data: comment,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/v2/social/admin/blocked-words:
+ *   post:
+ *     summary: Admin API to add custom blocked words for profanity filtering
+ *     tags: [Social Group 16]
+ */
+router.post(
+  '/admin/blocked-words',
+  requireAdminJwt,
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { words, word } = req.body;
+      const toAdd = words ? words : word ? [word] : [];
+
+      if (!toAdd || toAdd.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'No words specified to add to blocked list',
+        });
+        return;
+      }
+
+      const updatedList = addBlockedWords(toAdd);
+
+      res.status(200).json({
+        success: true,
+        message: 'Custom blocked words updated successfully',
+        blocked_words: updatedList,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 export default router;

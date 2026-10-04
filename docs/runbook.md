@@ -5,13 +5,384 @@
 This runbook provides step-by-step procedures for responding to common production incidents in the BANKERCHANGER platform. Each incident type includes observable symptoms, diagnostic procedures, resolution steps, and escalation protocols.
 
 **Table of Contents:**
-1. [Oracle Failures & Unresolved Markets](#oracle-failures--unresolved-markets)
-2. [Oracle Resolution Failure (Sustained) — User Funds Locked](#oracle-resolution-failure-sustained--user-funds-locked)
-3. [Treasury Withdrawal Limits Exceeded](#treasury-withdrawal-limits-exceeded)
-4. [Contract Pause Events](#contract-pause-events)
-5. [High Dispute Volumes](#high-dispute-volumes)
-6. [RPC Node Outages](#rpc-node-outages)
-7. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+1. [Database Backup & Disaster Recovery](#database-backup--disaster-recovery)
+2. [Oracle Failures & Unresolved Markets](#oracle-failures--unresolved-markets)
+3. [Oracle Resolution Failure (Sustained) — User Funds Locked](#oracle-resolution-failure-sustained--user-funds-locked)
+4. [Treasury Withdrawal Limits Exceeded](#treasury-withdrawal-limits-exceeded)
+5. [Contract Pause Events](#contract-pause-events)
+6. [High Dispute Volumes](#high-dispute-volumes)
+7. [RPC Node Outages](#rpc-node-outages)
+8. [Quick Reference: CLI Commands](#quick-reference-cli-commands)
+
+---
+
+## Database Backup & Disaster Recovery
+
+### Overview
+
+BANKERCHANGER maintains automated daily backups of the PostgreSQL database with encryption and redundant storage in AWS S3. This section covers backup operations, restore procedures, and disaster recovery scenarios.
+
+**Backup Strategy:**
+- **Frequency:** Daily automated backups at 2:00 AM UTC
+- **Retention:** 30-day rolling window (configurable)
+- **Encryption:** AES-256 at rest using OpenSSL
+- **Storage:** AWS S3 with versioning and lifecycle policies
+- **Verification:** Weekly integrity checks (Sundays 3:00 AM UTC)
+- **Cleanup:** Monthly retention enforcement (1st of month 4:00 AM UTC)
+
+### Backup Status & Monitoring
+
+#### Check Last Backup
+
+```bash
+# List all available backups
+cd /app && ./backend/scripts/manage-backups.sh --list
+
+# Show storage statistics
+cd /app && ./backend/scripts/manage-backups.sh --stats
+
+# Generate full backup report
+cd /app && ./backend/scripts/manage-backups.sh --report
+```
+
+#### Verify Backup Integrity
+
+Run weekly to ensure all backups are accessible and not corrupted:
+
+```bash
+# Verify all backups
+cd /app && ./backend/scripts/manage-backups.sh --verify-integrity
+
+# Expected output: ✓ VALID for each backup
+```
+
+#### Monitor Backup Logs
+
+```bash
+# Daily backup log
+tail -f /var/log/backups/cron-backup.log
+
+# Verification log
+tail -f /var/log/backups/cron-verify.log
+
+# Cleanup log
+tail -f /var/log/backups/cron-cleanup.log
+```
+
+### Disaster Recovery Procedures
+
+#### Scenario 1: Restore Most Recent Backup
+
+Use this procedure to restore from the latest available backup (typical recovery scenario).
+
+**Prerequisites:**
+- Access to AWS account with S3 access
+- PostgreSQL client tools installed
+- Encryption key available (`$BACKUP_ENCRYPTION_KEY_FILE`)
+
+**Steps:**
+
+1. **List available backups:**
+   ```bash
+   cd /app && ./backend/scripts/manage-backups.sh --list
+   ```
+
+2. **Restore latest backup to temporary database:**
+   ```bash
+   # Restore to test database first (non-destructive)
+   cd /app && ./backend/scripts/restore-db.sh \
+     --latest \
+     --target-db bankerchanger_restore_test
+   ```
+
+3. **Verify restored database:**
+   ```bash
+   # Connect to restored database
+   psql postgresql://bankerchanger:password@localhost:5432/bankerchanger_restore_test
+
+   # Run validation queries
+   SELECT COUNT(*) FROM markets;
+   SELECT COUNT(*) FROM bets;
+   SELECT COUNT(*) FROM users;
+   ```
+
+4. **Swap databases (if validation passes):**
+   ```bash
+   # Create backup of current production database
+   pg_dump postgresql://bankerchanger:password@localhost:5432/bankerchanger \
+     > /backups/prod_backup_$(date +%Y%m%d_%H%M%S).sql
+
+   # Drop current database
+   psql postgresql://bankerchanger:password@localhost:5432 \
+     -c "DROP DATABASE bankerchanger;"
+
+   # Rename restored database
+   psql postgresql://bankerchanger:password@localhost:5432 \
+     -c "ALTER DATABASE bankerchanger_restore_test RENAME TO bankerchanger;"
+
+   # Restart application
+   systemctl restart bankerchanger-backend
+   ```
+
+#### Scenario 2: Restore Specific Backup by Timestamp
+
+Use this to restore from a known point in time.
+
+1. **Find backup timestamp:**
+   ```bash
+   # View all backups with timestamps
+   cd /app && ./backend/scripts/manage-backups.sh --list
+
+   # Example output:
+   # 20240115_020000  123.5MB  bankerchanger  2024-01-15 02:00:00
+   # 20240114_020000  122.8MB  bankerchanger  2024-01-14 02:00:00
+   ```
+
+2. **Restore specific backup:**
+   ```bash
+   cd /app && ./backend/scripts/restore-db.sh \
+     --backup-timestamp 20240115_020000 \
+     --target-db bankerchanger_restore_test
+   ```
+
+3. **Follow verification and swap steps from Scenario 1**
+
+#### Scenario 3: Full Database Loss (Critical Recovery)
+
+Perform complete database restoration from backup in case of data corruption or total failure.
+
+1. **Stop application immediately:**
+   ```bash
+   systemctl stop bankerchanger-backend
+   systemctl stop bankerchanger-indexer
+   ```
+
+2. **Verify PostgreSQL is running:**
+   ```bash
+   systemctl status postgresql
+   # If not running, start it:
+   systemctl start postgresql
+   ```
+
+3. **Drop corrupted database (if exists):**
+   ```bash
+   psql postgresql://postgres:password@localhost:5432 \
+     -c "DROP DATABASE IF EXISTS bankerchanger;"
+   ```
+
+4. **Restore from latest backup:**
+   ```bash
+   cd /app && ./backend/scripts/restore-db.sh --latest
+
+   # This will restore to default database: bankerchanger
+   ```
+
+5. **Verify database integrity:**
+   ```bash
+   # Connect and run schema validation
+   psql postgresql://bankerchanger:password@localhost:5432/bankerchanger \
+     -c "SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = 'public';"
+
+   # Should return table count > 10
+   ```
+
+6. **Restart application:**
+   ```bash
+   systemctl start bankerchanger-backend
+   systemctl start bankerchanger-indexer
+
+   # Monitor startup
+   journalctl -u bankerchanger-backend -f
+   ```
+
+7. **Verify connectivity:**
+   ```bash
+   # Health check
+   curl -s http://localhost:3001/api/health | jq '.'
+
+   # Check recent data
+   curl -s http://localhost:3001/api/markets?limit=5 | jq '.markets[].title'
+   ```
+
+### Backup Encryption & Key Management
+
+#### Initialize Encryption Key
+
+Generate a new AES-256 encryption key (do this once, then secure the key):
+
+```bash
+# Generate and store locally
+cd /app && ./backend/scripts/generate-backup-key.sh \
+  --key-file /secure/backups/encryption.key
+
+# Or store in AWS Secrets Manager
+cd /app && ./backend/scripts/generate-backup-key.sh --to-secrets-manager
+```
+
+#### Encryption Key Location
+
+Configure where backup scripts find the encryption key:
+
+```bash
+# Option 1: Local file (secure, restricted permissions)
+export BACKUP_ENCRYPTION_KEY_FILE=/secure/backups/encryption.key
+
+# Option 2: AWS Secrets Manager (recommended for production)
+# Script automatically fetches from Secrets Manager if key file not found
+export BACKUP_KEY_SECRET_NAME=bankerchanger/db-backup-key
+```
+
+#### Key Rotation
+
+To rotate encryption keys (every 90 days recommended):
+
+```bash
+# 1. Generate new key
+cd /app && ./backend/scripts/generate-backup-key.sh --key-file /secure/backups/encryption.key.new
+
+# 2. Update environment variable
+export BACKUP_ENCRYPTION_KEY_FILE=/secure/backups/encryption.key.new
+
+# 3. Verify next backup uses new key
+# 4. Securely destroy old key after verification period
+# shred -vfz /secure/backups/encryption.key
+```
+
+### Manual Backup Operations
+
+#### Create On-Demand Backup
+
+Trigger a backup manually outside the scheduled cron job:
+
+```bash
+# Ensure environment variables are set
+export DATABASE_URL=postgresql://bankerchanger:password@localhost:5432/bankerchanger
+export AWS_S3_BACKUP_BUCKET=my-backups-bucket
+export AWS_REGION=us-east-1
+export BACKUP_ENCRYPTION_KEY_FILE=/secure/backups/encryption.key
+
+# Run backup
+cd /app && ./backend/scripts/backup-db.sh
+
+# Monitor progress in log
+tail -f /var/log/backups/backup-$(date +%Y%m).log
+```
+
+#### Cleanup Old Backups Manually
+
+Force cleanup of backups older than retention period:
+
+```bash
+# Run cleanup (respects BACKUP_RETENTION_DAYS)
+cd /app && ./backend/scripts/manage-backups.sh --cleanup
+
+# Show what would be deleted (verify retention date)
+export RETENTION_DAYS=30
+cutoff_date=$(date -d "$RETENTION_DAYS days ago" +%Y-%m-%d)
+echo "Will delete backups before: $cutoff_date"
+```
+
+### Cron Job Setup & Configuration
+
+#### Install Automated Cron Jobs
+
+Set up daily backups, weekly verification, and monthly cleanup:
+
+```bash
+# Install cron jobs (requires sudo)
+sudo ./backend/scripts/backup-cron-setup.sh \
+  --user backup \
+  --app-dir /app
+
+# Verify installation
+crontab -u backup -l | grep BANKERCHANGER_DB_BACKUP
+```
+
+#### Cron Schedule
+
+| Job | Schedule | Time (UTC) | Purpose |
+|-----|----------|-----------|---------|
+| Daily Backup | 0 2 * * * | 2:00 AM | Create encrypted backup |
+| Weekly Verify | 0 3 * * 0 | 3:00 AM Sunday | Integrity check all backups |
+| Monthly Cleanup | 0 4 1 * * | 4:00 AM 1st | Delete backups >30 days old |
+
+#### Remove Cron Jobs
+
+If decommissioning backups:
+
+```bash
+# Remove all backup cron jobs
+sudo ./backend/scripts/backup-cron-setup.sh --remove
+```
+
+### Troubleshooting
+
+#### Backup Failed
+
+```bash
+# Check error in logs
+tail -100 /var/log/backups/backup-$(date +%Y%m).log
+
+# Common issues:
+# 1. Missing AWS credentials
+aws sts get-caller-identity
+
+# 2. S3 bucket not accessible
+aws s3 ls s3://$AWS_S3_BACKUP_BUCKET --region $AWS_REGION
+
+# 3. Database connection failed
+psql $DATABASE_URL -c "SELECT 1"
+
+# 4. Encryption key missing
+ls -la $BACKUP_ENCRYPTION_KEY_FILE
+```
+
+#### Restore Failed
+
+```bash
+# Check restore log
+tail -100 /var/log/backups/restore-*.log
+
+# Verify S3 backup exists
+aws s3 ls "s3://$AWS_S3_BACKUP_BUCKET/db-backups/" --region $AWS_REGION --recursive
+
+# Verify encryption key
+cat $BACKUP_ENCRYPTION_KEY_FILE
+
+# Test decryption manually
+openssl enc -aes-256-cbc -d -in backup.sql.gz.enc -pass file:$BACKUP_ENCRYPTION_KEY_FILE | gunzip > test.sql
+```
+
+#### S3 Upload Fails
+
+```bash
+# Verify AWS credentials
+aws sts get-caller-identity
+
+# Check S3 bucket policy allows uploads
+aws s3api get-bucket-policy --bucket $AWS_S3_BACKUP_BUCKET
+
+# Verify S3 bucket exists and is in correct region
+aws s3api head-bucket --bucket $AWS_S3_BACKUP_BUCKET --region $AWS_REGION
+```
+
+### Escalation Protocol
+
+| Level | Timeframe | Symptoms | Action |
+|-------|-----------|----------|--------|
+| **Level 1** | - | Backup missed | Check cron logs; verify S3/encryption access; re-run manually |
+| **Level 2** | 6 hours | Multiple backups failed | Notify ops; verify database connectivity; check AWS service status |
+| **Level 3** | 24 hours | Total backup failure + data access needed | Activate disaster recovery; consider point-in-time restore; notify users if needed |
+
+### Prevention & Best Practices
+
+- **Test restores monthly:** Verify restore procedures work before crisis
+- **Key escrow:** Store backup keys in separate secure location
+- **Monitor backup age:** Alert if latest backup >24 hours old
+- **Verify integrity:** Run weekly verification to catch corruption early
+- **Document RTO/RPO:** Backup strategy supports <1 hour RPO, <4 hour RTO
+- **Encrypt keys:** Never commit encryption keys to version control
+- **Audit access:** Log all restore operations for compliance
 
 ---
 

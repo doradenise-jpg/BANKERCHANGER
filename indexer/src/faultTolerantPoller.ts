@@ -260,6 +260,8 @@ function calculateBackoff(attempt: number): number {
   return Math.min(backoff, MAX_BACKOFF_MS);
 }
 
+import { indexerPollDurationSeconds, indexerPollFailuresTotal } from "./metrics";
+
 // ─── Fault-Tolerant Polling ──────────────────────────────────────────────────
 
 export async function pollWithFaultTolerance(
@@ -269,6 +271,7 @@ export async function pollWithFaultTolerance(
   let attempt = 0;
 
   while (attempt < MAX_RETRY_ATTEMPTS) {
+    const endTimer = indexerPollDurationSeconds.startTimer();
     try {
       // Check for re-orgs
       const reorg = await detectReorg(server, currentLedger);
@@ -291,24 +294,38 @@ export async function pollWithFaultTolerance(
       await saveCursor(currentLedger);
       await updateLastLedger(currentLedger);
 
+      endTimer();
       return currentLedger + 1;
     } catch (error: any) {
+      endTimer();
       attempt++;
+
       const isRpcError = error?.message?.includes("rpc") || error?.status === 429;
+      const reason =
+        error?.status === 429
+          ? "rate_limit"
+          : error?.code === "ECONNREFUSED" || error?.message?.includes("network")
+          ? "network_error"
+          : isRpcError
+          ? "rpc_error"
+          : "poll_error";
+
+      indexerPollFailuresTotal.inc({ reason });
 
       if (isRpcError) {
         const backoffMs = calculateBackoff(attempt);
         logger.warn(
-          { err: error, attempt, backoffMs },
-          "RPC error, retrying with backoff",
+          { err: error, attempt, backoffMs, reason },
+          "RPC error during poll, retrying with backoff",
         );
         await new Promise((resolve) => setTimeout(resolve, backoffMs));
       } else {
-        logger.error({ err: error, attempt }, "Non-RPC error during polling");
+        logger.error({ err: error, attempt, reason }, "Non-RPC error during polling");
         throw error;
       }
     }
   }
 
+  indexerPollFailuresTotal.inc({ reason: "max_retries_exceeded" });
   throw new Error(`Max retry attempts (${MAX_RETRY_ATTEMPTS}) exceeded`);
 }

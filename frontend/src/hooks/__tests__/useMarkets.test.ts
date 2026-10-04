@@ -2,13 +2,95 @@
  * Unit tests for useMarkets hook using @testing-library/react and MSW.
  */
 
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, screen, waitFor } from '@testing-library/react';
+import { createElement } from 'react';
 import { useMarkets } from '../../hooks/useMarkets';
 import { server } from '../mocks/handlers';
 import { mockMarkets } from '../mocks/handlers';
 import { http, HttpResponse } from 'msw';
+import { ToastProvider } from '../../components/ui/ToastProvider';
+
+class MockWebSocket {
+  static instances: MockWebSocket[] = [];
+  readyState = 1;
+  listeners = new Map<string, Array<(event: any) => void>>();
+  sent: string[] = [];
+
+  constructor(_url: string) {
+    MockWebSocket.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: (event: any) => void) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+    if (type === 'open') listener({});
+  }
+
+  send(data: string) {
+    this.sent.push(data);
+  }
+
+  close() {
+    this.readyState = 3;
+  }
+
+  emitMessage(data: unknown) {
+    for (const listener of this.listeners.get('message') ?? []) {
+      listener({ data: JSON.stringify(data) });
+    }
+  }
+}
 
 describe('useMarkets', () => {
+  let originalWebSocket: typeof WebSocket;
+
+  beforeEach(() => {
+    originalWebSocket = window.WebSocket;
+  });
+
+  afterEach(() => {
+    window.WebSocket = originalWebSocket;
+  });
+
+  it('prepends a newly created market and marks it new', async () => {
+    MockWebSocket.instances = [];
+    window.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    const newMarket = {
+      ...mockMarkets[0],
+      market_id: 'market-new',
+      fighter_a: 'Alpha',
+      fighter_b: 'Beta',
+    };
+    server.use(
+      http.post('http://localhost:3001/auth/activity-feed-token', () =>
+        HttpResponse.json({ accessToken: 'activity-token' }),
+      ),
+      http.get('http://localhost:3001/api/markets/market-new', () => HttpResponse.json(newMarket)),
+    );
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      createElement(ToastProvider, null, children);
+
+    const { result } = renderHook(() => useMarkets(), { wrapper });
+    await waitFor(() => expect(result.current.markets).toHaveLength(mockMarkets.length));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+
+    const socket = MockWebSocket.instances[0];
+    await waitFor(() => expect(socket.sent).toHaveLength(2));
+    act(() => {
+      socket.emitMessage({
+        type: 'market:created',
+        marketId: 'market-new',
+        fighterA: 'Alpha',
+        fighterB: 'Beta',
+      });
+    });
+
+    await waitFor(() => expect(result.current.markets[0].market_id).toBe('market-new'));
+    expect(result.current.newMarketIds.has('market-new')).toBe(true);
+    expect(screen.getByText('New market: Alpha vs Beta')).toBeTruthy();
+  });
+
   describe('Initial loading state', () => {
     it('should start with isLoading = true', () => {
       const { result } = renderHook(() => useMarkets());
@@ -254,7 +336,7 @@ describe('useMarkets', () => {
 
     it('should auto-poll markets every 30 seconds', async () => {
       let callCount = 0;
-      
+
       server.use(
         http.get('http://localhost:3001/api/markets', () => {
           callCount++;
@@ -310,7 +392,7 @@ describe('useMarkets', () => {
             page: 1,
             limit: 20,
           });
-        }),
+        })
       );
 
       // Render with an inline object — simulates the page.tsx pattern
@@ -348,7 +430,7 @@ describe('useMarkets', () => {
             page: 1,
             limit: 20,
           });
-        }),
+        })
       );
 
       const { result, rerender } = renderHook(
@@ -376,7 +458,7 @@ describe('useMarkets', () => {
             page: 1,
             limit: 20,
           });
-        })
+        }),
       );
 
       const { result } = renderHook(() => useMarkets());
@@ -401,7 +483,7 @@ describe('useMarkets', () => {
             page: 1,
             limit: 20,
           });
-        })
+        }),
       );
 
       const { result } = renderHook(() => useMarkets());

@@ -4,8 +4,13 @@
 
 import { useState, useCallback, useMemo } from 'react';
 import type { BetSide, Market, TxStatus } from '../types';
-import { submitBet } from '../services/wallet';
+import {
+  submitBet,
+  WalletTransactionCancelledError,
+  WALLET_TRANSACTION_CANCELLED_MESSAGE,
+} from '../services/wallet';
 import { useAppStore } from '../store';
+import { useToast } from '../components/ui/ToastProvider';
 
 export interface UseBetResult {
   side: BetSide | null;
@@ -41,6 +46,7 @@ export function useBet(market: Market): UseBetResult {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { lastTxStatus, setTxStatus, walletAddress } = useAppStore();
+  const toast = useToast();
 
   const estimatedPayout = useMemo(() => {
     if (!side) return null;
@@ -59,13 +65,20 @@ export function useBet(market: Market): UseBetResult {
       const hash = await submitBet(market.market_id, side, xlm);
       setTxStatus({ hash, status: 'success', error: null });
     } catch (e: any) {
+      if (e instanceof WalletTransactionCancelledError) {
+        setError(null);
+        setTxStatus({ hash: null, status: 'idle', error: null });
+        toast.error(WALLET_TRANSACTION_CANCELLED_MESSAGE);
+        return;
+      }
+
       const msg = e?.message ?? 'Transaction failed';
       setError(msg);
       setTxStatus({ hash: null, status: 'error', error: msg });
     } finally {
       setIsSubmitting(false);
     }
-  }, [side, amount, market, walletAddress, setTxStatus]);
+  }, [side, amount, market, walletAddress, setTxStatus, toast]);
 
   const reset = useCallback(() => {
     setSide(null);

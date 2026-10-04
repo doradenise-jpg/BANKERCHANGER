@@ -204,6 +204,24 @@ router.post(
     try {
       const { format, filters, columns } = req.body;
 
+      // 1. Enforce 90-day maximum date range limit (Issue #686)
+      if (filters?.from && filters?.to) {
+        const fromTime = new Date(filters.from).getTime();
+        const toTime = new Date(filters.to).getTime();
+        if (isNaN(fromTime) || isNaN(toTime)) {
+          throw AppError.badRequest('Invalid from/to date format');
+        }
+        const diffDays = (toTime - fromTime) / (1000 * 60 * 60 * 24);
+        if (diffDays > 90 || diffDays < 0) {
+          res.status(413).json({
+            success: false,
+            error: 'Payload Too Large',
+            message: 'Transaction history export is limited to a maximum 90-day date range per request. Please narrow your date range.',
+          });
+          return;
+        }
+      }
+
       const defaultColumns = [
         'id', 'userId', 'type', 'amount', 'status',
         'marketId', 'createdAt',
@@ -212,7 +230,7 @@ router.post(
         ? columns.filter((c) => defaultColumns.includes(c))
         : defaultColumns;
 
-      // Placeholder export data
+      // Placeholder export data (in production queried from DB or stream)
       const data = [
         {
           id: 'txn_001',
@@ -225,29 +243,51 @@ router.post(
         },
       ];
 
+      // 2. Enforce 100,000 maximum record count limit (Issue #686)
+      const totalEstimated = (req.body as any).estimated_count ?? data.length;
+      if (totalEstimated > 100_000) {
+        res.status(413).json({
+          success: false,
+          error: 'Payload Too Large',
+          message: 'Export exceeds maximum record count limit of 100,000 rows. Please specify a narrower date range or add filters.',
+        });
+        return;
+      }
+
+      // 3. Streaming response (avoids buffering full dataset in memory)
       if (format === 'csv') {
-        const header = selectedColumns.join(',');
-        const rows = data.map((row) =>
-          selectedColumns.map((col) => {
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="transactions.csv"');
+
+        // Write CSV header
+        res.write(selectedColumns.join(',') + '\n');
+
+        // Stream CSV rows
+        for (const row of data) {
+          const line = selectedColumns.map((col) => {
             const val = (row as any)[col];
             return typeof val === 'string' && val.includes(',')
               ? `"${val}"`
               : String(val ?? '');
-          }).join(','),
-        );
-
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', 'attachment; filename="transactions.csv"');
-        res.send([header, ...rows].join('\n'));
+          }).join(',') + '\n';
+          res.write(line);
+        }
+        res.end();
       } else {
-        const projected = data.map((row) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename="transactions.json"');
+
+        res.write('{"data":[');
+        for (let i = 0; i < data.length; i++) {
+          const row = data[i];
           const obj: Record<string, unknown> = {};
           for (const col of selectedColumns) {
             obj[col] = (row as any)[col];
           }
-          return obj;
-        });
-        res.json({ data: projected, columns: selectedColumns, total: projected.length });
+          res.write(JSON.stringify(obj) + (i < data.length - 1 ? ',' : ''));
+        }
+        res.write(`],"columns":${JSON.stringify(selectedColumns)},"total":${data.length}}`);
+        res.end();
       }
     } catch (err) {
       next(err);

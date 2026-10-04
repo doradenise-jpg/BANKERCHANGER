@@ -1,5 +1,5 @@
 import { rpc, scValToNative } from '@stellar/stellar-sdk';
-import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice } from './db';
+import { getCursor, saveCursor, getLastKnownLedger, upsertInvoice, saveEventsAndCursorAtomic } from './db';
 import { updateLastLedger } from './health';
 import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
 import { calculateBackoff, loadBackoffConfigFromEnv } from './backoff';
@@ -9,8 +9,30 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '5000', 10);
-const LOCK_TTL_SECONDS = Math.ceil((2 * POLL_INTERVAL_MS) / 1000);
+export const DEFAULT_BATCH_SIZE = 50;
+export const MAX_BATCH_SIZE = 500;
+
+export function resolveBatchSize(envVal: string | undefined = process.env.INDEXER_BATCH_SIZE): number {
+  if (!envVal) return DEFAULT_BATCH_SIZE;
+  const parsed = parseInt(envVal, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    console.warn(`[WARN] Invalid INDEXER_BATCH_SIZE="${envVal}", falling back to default ${DEFAULT_BATCH_SIZE}`);
+    return DEFAULT_BATCH_SIZE;
+  }
+  if (parsed > MAX_BATCH_SIZE) {
+    console.warn(`[WARN] INDEXER_BATCH_SIZE ${parsed} exceeds maximum ${MAX_BATCH_SIZE}; capping at ${MAX_BATCH_SIZE}`);
+    return MAX_BATCH_SIZE;
+  }
+  return parsed;
+}
+
+export function computeEffectiveBatchSize(ledgerLag: number): number {
+  const baseSize = resolveBatchSize();
+  if (ledgerLag > 1000) {
+    return MAX_BATCH_SIZE;
+  }
+  return baseSize;
+}
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.FACTORY_CONTRACT_ADDRESS;
@@ -50,6 +72,17 @@ let pollerHealth: PollerHealth = {
 
 export function getPollerHealth(): PollerHealth {
   return { ...pollerHealth };
+}
+
+// ── Duplicate events skipped metric (Issue #687) ───────────────────────────
+export let indexer_duplicate_events_skipped_total = 0;
+
+export function getIndexerDuplicateEventsSkippedTotal(): number {
+  return indexer_duplicate_events_skipped_total;
+}
+
+export function resetIndexerDuplicateEventsSkippedTotal(): void {
+  indexer_duplicate_events_skipped_total = 0;
 }
 
 // ── Exponential backoff strategy (tunable via POLLER_*_BACKOFF_MS env vars) ─
@@ -130,6 +163,10 @@ export async function pollEvents() {
         cursor = '';
       }
 
+      const latestLedger = await getLatestLedger().catch(() => lastProcessedLedger ?? 0);
+      const lag = Math.max(0, latestLedger - (lastProcessedLedger ?? latestLedger));
+      const batchLimit = computeEffectiveBatchSize(lag);
+
       // Build request with proper typing (use any to bypass strict filter type checking)
       const request: any = (cursor && resyncLedger === null)
         ? {
@@ -141,10 +178,10 @@ export async function pollEvents() {
                 topics: [['*']]
               }
             ],
-            limit: 100
+            limit: batchLimit
           }
         : {
-            startLedger: resyncLedger ?? (await getLatestLedger()),
+            startLedger: resyncLedger ?? latestLedger,
             filters: [
               {
                 type: 'contract',
@@ -152,7 +189,7 @@ export async function pollEvents() {
                 topics: [['*']]
               }
             ],
-            limit: 100
+            limit: batchLimit
           };
 
       // Poll for events with pagination support
@@ -174,7 +211,7 @@ export async function pollEvents() {
         // Build request with proper typing
         let paginatedRequest: any = {
           filters,
-          limit: 100,
+          limit: batchLimit,
         };
 
         // Set cursor or startLedger
@@ -186,12 +223,17 @@ export async function pollEvents() {
 
         const response = await server.getEvents(paginatedRequest);
 
-        // Process all events on this page
+        // Process all events on this page grouped by ledger sequence
         if (response.events && response.events.length > 0) {
+          const eventsByLedger: Map<number, rpc.Api.EventResponse[]> = new Map();
           for (const event of response.events) {
-            const eventLedger = event.ledger;
+            const l = event.ledger || 0;
+            if (!eventsByLedger.has(l)) eventsByLedger.set(l, []);
+            eventsByLedger.get(l)!.push(event);
+          }
 
-            if (eventLedger) {
+          for (const [eventLedger, ledgerEvents] of eventsByLedger) {
+            if (eventLedger > 0) {
               const anomaly = detectLedgerAnomaly(eventLedger, lastProcessedLedger);
 
               if (anomaly.type === 'reorg') {
@@ -224,9 +266,13 @@ export async function pollEvents() {
               }
             }
 
-            processEvent(event);
+            // Commit all events in this ledger first
+            for (const event of ledgerEvents) {
+              processEvent(event);
+            }
 
-            if (eventLedger) {
+            // Last processed ledger saved ONLY after all events in that ledger are committed (Issue #687)
+            if (eventLedger > 0) {
               lastProcessedLedger = eventLedger;
               updateLastLedger(eventLedger);
             }
@@ -337,7 +383,7 @@ async function getLatestLedger(): Promise<number> {
   }
 }
 
-export function processEvent(event: rpc.Api.EventResponse) {
+export function processEvent(event: rpc.Api.EventResponse): boolean {
   // Topics are scVals, typically symbol strings
   const topics = event.topic.map((t: any) => {
     try {
@@ -348,7 +394,29 @@ export function processEvent(event: rpc.Api.EventResponse) {
   });
 
   const eventType = topics[0]; // e.g. 'submitted', 'funded', 'paid', 'defaulted'
-  if (!eventType) return;
+  if (!eventType) return false;
+
+  const txHash = (event as any).txHash || (event as any).id || (event as any).pagingToken || `evt-${event.ledger ?? 0}-${Date.now()}`;
+  const eventIndex = (event as any).eventIndex ?? (event as any).inTxOrder ?? 0;
+
+  // Deduplicate event using INSERT ... ON CONFLICT (tx_hash, event_index) DO NOTHING (Issue #687)
+  const isNew = recordProcessedEvent(
+    txHash,
+    eventIndex,
+    String(eventType),
+    event.ledger,
+    JSON.stringify(event.value),
+  );
+  if (!isNew) {
+    indexer_duplicate_events_skipped_total++;
+    log('info', 'Duplicate event skipped across restarts', {
+      txHash,
+      eventIndex,
+      eventType,
+      ledger: event.ledger,
+    });
+    return false;
+  }
 
   try {
     const data = scValToNative(event.value);

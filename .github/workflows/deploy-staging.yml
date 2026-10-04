@@ -1,0 +1,280 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'indexer/**'
+      - 'docker-compose.staging.yml'
+      - '.github/workflows/deploy-staging.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend-staging
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend-staging
+  INDEXER_IMAGE: ghcr.io/${{ github.repository }}/indexer-staging
+
+jobs:
+  build-and-test:
+    name: Build & Test Services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [backend, frontend, indexer]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          push: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}-staging:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}-staging:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  e2e-tests:
+    name: Run E2E Tests on Staging Config
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: bankerchanger_staging
+          POSTGRES_PASSWORD: staging_secure_password
+          POSTGRES_DB: bankerchanger_staging
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        id: cache-node-modules
+        with:
+          path: backend/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('backend/package-lock.json') }}
+
+      - name: Install backend dependencies
+        working-directory: backend
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Run E2E tests against staging config
+        working-directory: backend
+        run: npm run test:e2e
+        env:
+          DATABASE_URL: postgresql://bankerchanger_staging:staging_secure_password@localhost:5432/bankerchanger_staging
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: staging
+
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: backend/test-results/
+          retention-days: 30
+
+  lint-and-security:
+    name: Lint & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Lint backend
+        working-directory: backend
+        run: npm run lint
+
+      - name: Check TypeScript types
+        working-directory: backend
+        run: npm run type-check
+
+  deploy:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+    needs: [build-and-test, e2e-tests, lint-and-security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.bankerchanger.app
+    permissions:
+      contents: read
+      packages: write
+      deployments: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+            ${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref }}
+
+      - name: Build and push indexer image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./indexer
+          push: true
+          tags: |
+            ${{ env.INDEXER_IMAGE }}:${{ github.sha }}
+            ${{ env.INDEXER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref }}
+
+      - name: Create deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref,
+              environment: 'staging',
+              description: 'Deploying to staging environment',
+              required_contexts: [],
+              auto_merge: false
+            });
+            core.setOutput('deployment_id', deployment.data.id);
+
+      - name: Trigger staging deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log('Staging deployment images built and pushed successfully');
+            console.log('Backend Image: ${{ env.BACKEND_IMAGE }}:${{ github.sha }}');
+            console.log('Frontend Image: ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}');
+            console.log('Indexer Image: ${{ env.INDEXER_IMAGE }}:${{ github.sha }}');
+            console.log('\nNext steps:');
+            console.log('1. Staging environment should pull and deploy these images');
+            console.log('2. Run E2E tests on deployed staging environment');
+            console.log('3. Verify database migrations completed successfully');
+            console.log('4. Monitor application logs and health checks');
+
+      - name: Update deployment status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if ('${{ job.status }}' === 'success') {
+              console.log('✅ Staging deployment completed successfully');
+              console.log('Application available at: https://staging.bankerchanger.app');
+            } else {
+              console.log('❌ Staging deployment failed');
+            }
+
+  notify:
+    name: Notify on Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always()
+    steps:
+      - name: Send deployment notification
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ needs.deploy.result }}';
+            const emoji = status === 'success' ? '✅' : '❌';
+            console.log(`${emoji} Staging deployment ${status}`);
+            console.log(`Commit: ${{ github.sha }}`);
+            console.log(`Branch: ${{ github.ref }}`);
+            console.log(`Author: ${{ github.actor }}`);

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId } from 'react';
 import type { BetSide, Market } from '../../types';
 import { useBet } from '../../hooks/useBet';
 import { useWallet } from '../../hooks/useWallet';
@@ -27,6 +27,9 @@ export function BetPanel({ market }: BetPanelProps): JSX.Element {
   const [showModal, setShowModal] = useState(false);
   const toast = useToast();
 
+  const amountId = useId();
+  const amountHintId = useId();
+
   const amountNum = parseFloat(amount);
   const isAmountValid = !isNaN(amountNum) && amountNum > 0;
   const canSubmit = isConnected && !!side && isAmountValid && !isSubmitting && market.status === 'open';
@@ -46,12 +49,14 @@ export function BetPanel({ market }: BetPanelProps): JSX.Element {
 
   return (
     <div className="rounded-xl bg-gray-900 p-6 space-y-4 text-white">
-      {/* Side selector */}
-      <div className="flex gap-2">
+      {/* Side selector — grouped so screen readers announce the shared purpose */}
+      <div role="group" aria-label="Choose your outcome" className="flex gap-2">
         {SIDES.map(({ value, label }) => (
           <button
             key={value}
+            type="button"
             onClick={() => setSide(value)}
+            aria-pressed={side === value}
             className={`flex-1 min-h-[44px] rounded-lg text-sm font-semibold transition-colors ${
               side === value
                 ? 'bg-amber-500 text-black'
@@ -65,17 +70,25 @@ export function BetPanel({ market }: BetPanelProps): JSX.Element {
 
       {/* Amount input */}
       <div>
-        <label className="block text-xs text-gray-400 mb-1">Amount (XLM)</label>
+        <label htmlFor={amountId} className="block text-xs text-gray-400 mb-1">
+          Amount (XLM)
+        </label>
         <input
+          id={amountId}
           type="number"
           min="1"
           step="0.01"
+          inputMode="decimal"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
           placeholder="0.00"
+          aria-describedby={amountHintId}
+          aria-invalid={amount !== '' && !isAmountValid}
           className="w-full bg-gray-800 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
         />
-        <p className="text-xs text-gray-500 mt-1">Min: 1 XLM</p>
+        <p id={amountHintId} className="text-xs text-gray-500 mt-1">
+          Min: 1 XLM
+        </p>
       </div>
 
       {/* Payout preview */}
@@ -92,8 +105,10 @@ export function BetPanel({ market }: BetPanelProps): JSX.Element {
 
       {/* Submit */}
       <button
+        type="button"
         disabled={!canSubmit}
         onClick={() => setShowModal(true)}
+        aria-busy={isSubmitting}
         className="w-full min-h-[44px] rounded-lg bg-amber-500 hover:bg-amber-400 font-semibold text-black disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {isSubmitting ? 'Placing Bet…' : 'Place Bet'}

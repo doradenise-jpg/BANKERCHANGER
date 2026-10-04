@@ -14,7 +14,7 @@ import { stellarExplorerUrl } from '../../../services/wallet';
 import { fetchBetsByMarket } from '../../../services/api';
 import { ClaimWinningsPanel } from '../../../components/market/ClaimWinningsPanel';
 import { useToast } from '../../../components/ui/ToastProvider';
-import { useAppStore } from '../../../store';
+import { MarketDetailSkeleton } from '../../../components/market/MarketDetailSkeleton';
 import type { Bet } from '../../../types';
 
 export default function MarketDetailContent({ market_id }: { market_id: string }): JSX.Element {
@@ -40,7 +40,7 @@ export default function MarketDetailContent({ market_id }: { market_id: string }
   }, [market_id, market?.status]);
 
   if (isLoading) {
-    return <main className="max-w-6xl mx-auto px-4 py-8 text-gray-400">Loading…</main>;
+    return <MarketDetailSkeleton />;
   }
 
   if (isNotFound) {

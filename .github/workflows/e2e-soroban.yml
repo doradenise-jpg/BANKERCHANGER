@@ -9,6 +9,7 @@ jobs:
   e2e:
     name: Full Bet Flow (Soroban local node)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -159,7 +160,15 @@ jobs:
           BASE_URL: http://localhost:3000
           SOROBAN_TEST_PUBLIC_KEY: ${{ steps.keypair.outputs.public_key }}
           SOROBAN_MARKET_CONTRACT_ID: ${{ steps.deploy_market.outputs.market_id }}
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
         run: npx playwright test e2e/soroban-bet-flow.spec.ts
+
+      - name: Clean up E2E database records
+        if: always()
+        working-directory: frontend
+        env:
+          DATABASE_URL: postgresql://bankerchanger:bankerchanger@localhost:5432/bankerchanger
+        run: npm run e2e:cleanup
 
       - name: Upload Playwright report
         if: always()

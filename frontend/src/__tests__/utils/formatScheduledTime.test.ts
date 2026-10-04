@@ -21,6 +21,15 @@ describe('formatScheduledTime', () => {
   });
 
   describe('formatScheduledTimeWithTz', () => {
+    it('should format the same timestamp in the requested local timezone', () => {
+      const winterDate = '2025-01-01T14:00:00Z';
+
+      expect(formatScheduledTimeWithTz(winterDate, 'America/Los_Angeles'))
+        .toBe('Wed, Jan 1 · 6:00 AM PST');
+      expect(formatScheduledTimeWithTz(winterDate, 'America/New_York'))
+        .toBe('Wed, Jan 1 · 9:00 AM EST');
+    });
+
     it('should include timezone abbreviation in output', () => {
       const result = formatScheduledTimeWithTz(testDate);
       // Should match pattern: "Jun 29, X:XX AM/PM TZ"

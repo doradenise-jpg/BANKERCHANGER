@@ -69,6 +69,31 @@ export class WalletSignError extends Error {
   }
 }
 
+export const WALLET_TRANSACTION_CANCELLED_MESSAGE =
+  'Transaction cancelled — you declined the request in Freighter';
+
+export class WalletTransactionCancelledError extends Error {
+  constructor() {
+    super(WALLET_TRANSACTION_CANCELLED_MESSAGE);
+    this.name = 'WalletTransactionCancelledError';
+  }
+}
+
+function createWalletSignError(error: unknown): Error {
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'name' in error &&
+    error.name === 'UserDeclinedAccess'
+  ) {
+    return new WalletTransactionCancelledError();
+  }
+
+  return new WalletSignError(
+    error instanceof Error ? error.message : 'User rejected transaction signing',
+  );
+}
+
 export class TxSubmissionError extends Error {
   constructor(message: string, public readonly details?: unknown) {
     super(message);
@@ -120,9 +145,7 @@ async function buildAndSubmitWithStages(
     });
     signedTxXdr = result.signedTxXdr;
   } catch (error) {
-    throw new WalletSignError(
-      error instanceof Error ? error.message : 'User rejected transaction signing',
-    );
+    throw createWalletSignError(error);
   }
 
   // Phase 2: Broadcasting
@@ -343,7 +366,7 @@ export async function submitClaimWithStages(
     const result = await freighter.signTransaction(txXdr, { networkPassphrase: NETWORK_PASSPHRASE });
     signedTxXdr = result.signedTxXdr;
   } catch (error) {
-    throw new WalletSignError(error instanceof Error ? error.message : 'User rejected transaction signing');
+    throw createWalletSignError(error);
   }
 
   onStage('broadcasting');

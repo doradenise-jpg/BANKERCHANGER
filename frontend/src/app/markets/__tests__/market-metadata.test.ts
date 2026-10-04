@@ -36,16 +36,18 @@ describe('Market Detail Page Metadata', () => {
 
     const metadata = await generateMetadata({ params: { market_id: 'test-market-123' } });
 
-    expect(metadata.title).toBe('Jon Doe vs Jane Smith — BANKERCHANGER');
+    expect(metadata.title).toBe('Jon Doe vs Jane Smith — Bet on BANKERCHANGER');
     expect(metadata.description).toContain('Jon Doe vs Jane Smith');
     expect(metadata.canonical).toContain('/markets/test-market-123');
-    expect(metadata.openGraph?.title).toBe('Jon Doe vs Jane Smith — BANKERCHANGER');
+    expect(metadata.openGraph?.title).toBe('Jon Doe vs Jane Smith — Bet on BANKERCHANGER');
     expect(metadata.openGraph?.description).toContain('Heavyweight');
     expect(metadata.openGraph?.type).toBe('website');
     expect(metadata.openGraph?.url).toContain('/markets/test-market-123');
     expect(metadata.openGraph?.images).toHaveLength(1);
     expect(metadata.openGraph?.images?.[0]?.width).toBe(1200);
     expect(metadata.openGraph?.images?.[0]?.height).toBe(630);
+    // AC #3 — dynamic OG image route
+    expect(metadata.openGraph?.images?.[0]?.url).toContain('/api/og?market=test-market-123');
   });
 
   it('should include Twitter card metadata', async () => {
@@ -75,7 +77,7 @@ describe('Market Detail Page Metadata', () => {
     const metadata = await generateMetadata({ params: { market_id: 'test-market-456' } });
 
     expect(metadata.twitter?.card).toBe('summary_large_image');
-    expect(metadata.twitter?.title).toBe('Fighter A vs Fighter B — BANKERCHANGER');
+    expect(metadata.twitter?.title).toBe('Fighter A vs Fighter B — Bet on BANKERCHANGER');
     expect(metadata.twitter?.description).toContain('Middleweight');
     expect(metadata.twitter?.images).toHaveLength(1);
   });

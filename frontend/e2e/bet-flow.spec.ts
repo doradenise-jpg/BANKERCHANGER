@@ -8,13 +8,16 @@
  *   - POST /api/tx (or Horizon) → mocked via route interception
  */
 
-import { test, expect, Page } from '@playwright/test';
+import { afterAll, test, expect, Page } from '@playwright/test';
+import { cleanupE2eData } from './cleanup';
+
+afterAll(cleanupE2eData);
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const MOCK_MARKET = {
-  market_id: 'mkt-001',
-  match_id: 'match-001',
+  market_id: 'e2e_test_mkt-001',
+  match_id: 'e2e_test_match-001',
   fighter_a: 'Canelo Alvarez',
   fighter_b: 'Gennady Golovkin',
   weight_class: 'Super-Middleweight',

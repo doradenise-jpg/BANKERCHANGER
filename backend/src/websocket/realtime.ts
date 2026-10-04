@@ -49,6 +49,13 @@ export type ActivityEvent =
   | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string }
   | { type: 'indexer_status'; status: 'running' | 'idle' | 'error' | 'syncing'; currentLedger: number; targetLedger: number; timestamp: string };
 
+export type MarketCreatedEvent = {
+  type: 'market:created';
+  marketId: string;
+  fighterA: string;
+  fighterB: string;
+};
+
 /** Pushed to leaderboard subscribers whenever one or more ranks change. */
 export interface LeaderboardRankEvent {
   type: 'leaderboard_rank_update';
@@ -70,6 +77,7 @@ export type LeaderboardRankUpdateEvent = {
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg =
   | { type: 'subscribe_activity'; marketId: string }
+  | { type: 'subscribe_market_created' }
   | { type: 'subscribe_leaderboard'; leaderboardId?: string }
   | { type: 'unsubscribe_leaderboard'; leaderboardId?: string };
 
@@ -134,10 +142,11 @@ export class ActivityFeed {
   private leaderboardSubscriptions = new Map<string, Set<WebSocket>>();
   // global leaderboard subscriptions
   private globalLeaderboardSubs = new Set<WebSocket>();
+  private globalMarketCreatedSubs = new Set<WebSocket>();
   private rateLimiter = new MarketRateLimiter();
   private clientRateLimiter = new ClientRateLimiter();
   // Track authenticated connections
-  private authenticated = new WeakSet<WebSocket>();
+  private authScopes = new WeakMap<WebSocket, 'full' | 'activity'>();
   // Track auth timeout timers per socket
   private authTimeouts = new WeakMap<WebSocket, NodeJS.Timeout>();
 
@@ -246,12 +255,18 @@ export class ActivityFeed {
     }
   }
 
-  private verifyToken(token: string): boolean {
+  private verifyToken(token: string): 'full' | 'activity' | null {
     try {
-      jwt.verify(token, JWT_SECRET);
-      return true;
+      const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+      if (payload.type === 'access') return 'full';
+      if (
+        payload.sub === 'public-market-feed' &&
+        payload.type === 'ws_activity' &&
+        payload.scope === 'market_activity:read'
+      ) return 'activity';
+      return null;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -268,19 +283,20 @@ export class ActivityFeed {
       return;
     }
 
-    if (!this.authenticated.has(ws)) {
+    if (!this.authScopes.has(ws)) {
       const authMsg = msg as AuthMsg;
       if (authMsg.type !== 'auth' || typeof authMsg.token !== 'string') {
         ws.close(4001, 'Expected auth message');
         return;
       }
 
-      if (!this.verifyToken(authMsg.token)) {
+      const scope = this.verifyToken(authMsg.token);
+      if (!scope) {
         ws.close(4001, 'Invalid token');
         return;
       }
 
-      this.authenticated.add(ws);
+      this.authScopes.set(ws, scope);
       const timeout = this.authTimeouts.get(ws);
       if (timeout) {
         clearTimeout(timeout);
@@ -309,7 +325,17 @@ export class ActivityFeed {
       return;
     }
 
+    if (msg.type === 'subscribe_market_created') {
+      this.globalMarketCreatedSubs.add(ws);
+      return;
+    }
+
     if (msg.type === 'subscribe_leaderboard') {
+      if (this.authScopes.get(ws) !== 'full') {
+        ws.send(JSON.stringify({ type: 'error', code: 403, message: 'INSUFFICIENT_SCOPE' }));
+        return;
+      }
+
       // Deduplicate global leaderboard subscription
       if (!this.subscribedGlobalLeaderboard.has(ws)) {
         this.subscribedGlobalLeaderboard.add(ws);
@@ -334,6 +360,8 @@ export class ActivityFeed {
     }
 
     if (msg.type === 'unsubscribe_leaderboard') {
+      if (this.authScopes.get(ws) !== 'full') return;
+
       this.globalLeaderboardSubs.delete(ws);
       // Allow re-subscribe after unsubscribe
       // (we can't delete from a WeakSet, but the subscription set is the source of truth)
@@ -366,6 +394,7 @@ export class ActivityFeed {
 
     // ── Market subscriptions ──────────────────────────────────────────────
     this.globalLeaderboardSubs.delete(ws);
+    this.globalMarketCreatedSubs.delete(ws);
 
     for (const [marketId, sockets] of this.subscriptions.entries()) {
       sockets.delete(ws);
@@ -416,6 +445,13 @@ export class ActivityFeed {
       for (const ws of this.globalLeaderboardSubs) {
         if (ws.readyState === WebSocket.OPEN) ws.send(payload);
       }
+    }
+  }
+
+  publishMarketCreated(event: MarketCreatedEvent): void {
+    const payload = JSON.stringify(event);
+    for (const ws of this.globalMarketCreatedSubs) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
     }
   }
 
@@ -474,6 +510,7 @@ export class ActivityFeed {
       dist[`leaderboard:${leaderboardId}`] = sockets.size;
     }
     dist['leaderboard:global'] = this.globalLeaderboardSubs.size;
+    dist['market:created'] = this.globalMarketCreatedSubs.size;
     return dist;
   }
 }

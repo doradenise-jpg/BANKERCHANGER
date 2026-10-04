@@ -98,8 +98,20 @@ Deployed addresses are saved to `contracts/deployments.json`:
 
 Deployment order: `shared` (build only) → `treasury` → `market_factory` → `market` (wasm upload).
 
+## Staging Environment
+
+A production-like environment for pre-production validation:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.staging.yml up
+# Frontend: http://localhost:3000 | Backend: http://localhost:3001
+```
+
+Automated deployment on main branch push. Full guide: [docs/STAGING_ENVIRONMENT.md](docs/STAGING_ENVIRONMENT.md)
+
 ## Documentation
 
+- **[Staging Environment Guide](docs/STAGING_ENVIRONMENT.md)** — Pre-production validation setup
 - **[Getting Started Guide](docs/GETTING_STARTED.md)** — Complete setup guide with Docker
 - [Contributing Guidelines](docs/contributing.md)
 - [Architecture Overview](docs/architecture.md) — System diagram, data flows, sequence diagrams

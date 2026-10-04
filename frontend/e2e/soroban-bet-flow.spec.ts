@@ -17,7 +17,10 @@
  *   NEXT_PUBLIC_API_URL             — backend URL (http://localhost:3001)
  */
 
-import { test, expect, Page } from '@playwright/test';
+import { afterAll, test, expect, Page } from '@playwright/test';
+import { cleanupE2eData } from './cleanup';
+
+afterAll(cleanupE2eData);
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -35,8 +38,8 @@ const BET_AMOUNT_XLM = '5';
 
 // Mock market returned by the backend (backed by the local contract)
 const LOCAL_MARKET = {
-  market_id: 'local-market-001',
-  match_id: 'local-match-001',
+  market_id: 'e2e_test_local-market-001',
+  match_id: 'e2e_test_local-match-001',
   fighter_a: 'Fighter Alpha',
   fighter_b: 'Fighter Beta',
   weight_class: 'Lightweight',

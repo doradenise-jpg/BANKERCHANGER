@@ -33,13 +33,17 @@ export function loadBackoffConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * Computes the delay before the next retry, doubling (by default) on each
- * consecutive failure up to maxMs, with +/-50% jitter to avoid a thundering
- * herd of retries all firing at once.
+ * Computes the delay before the next retry with bounded jitter so that
+ * base_delay + jitter <= maxMs is always strictly guaranteed.
  */
 export function calculateBackoff(failureCount: number, config: BackoffConfig = DEFAULT_BACKOFF_CONFIG): number {
-  const backoff = config.minMs * Math.pow(config.multiplier, failureCount - 1);
-  const cappedBackoff = Math.min(backoff, config.maxMs);
-  const jitter = cappedBackoff * (0.5 + Math.random() * 0.5);
-  return Math.round(jitter);
+  if (failureCount <= 0) return 0;
+  const rawBase = config.minMs * Math.pow(config.multiplier, failureCount - 1);
+  const base = Math.min(rawBase, config.maxMs);
+  const maxJitter = Math.max(0, Math.min(base, config.maxMs - base));
+  const jitter = Math.random() * maxJitter;
+  const delay = Math.round(base + jitter);
+  return Math.min(delay, config.maxMs);
 }
+
+export const computeBackoff = calculateBackoff;

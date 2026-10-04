@@ -97,3 +97,7 @@ export function useToast(): ToastContextValue {
   if (!ctx) throw new Error('useToast must be used within ToastProvider');
   return ctx;
 }
+
+export function useOptionalToast(): ToastContextValue | null {
+  return useContext(ToastContext);
+}

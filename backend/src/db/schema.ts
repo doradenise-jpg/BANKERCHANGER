@@ -182,6 +182,7 @@ export const users = pgTable(
     two_factor_secret: text('two_factor_secret'), // AES-GCM encrypted
     role: text('role').default('user'), // 'user' | 'admin'
     session_version: integer('session_version').default(0),
+    password_version: integer('password_version').default(0),
     created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },
@@ -394,6 +395,25 @@ export const user_notifications = pgTable(
   }),
 );
 
+export const refresh_token_issuances = pgTable(
+  'refresh_token_issuances',
+  {
+    id: serial('id').primaryKey(),
+    user_id: text('user_id').notNull().references(() => users.id),
+    token_hash: text('token_hash').notNull().unique(),
+    issued_at: timestamp('issued_at', { withTimezone: true }).notNull(),
+    expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revoked_at: timestamp('revoked_at', { withTimezone: true }),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => ({
+    user_id_idx: index('refresh_token_issuances_user_id_idx').on(table.user_id),
+    token_hash_idx: index('refresh_token_issuances_token_hash_idx').on(table.token_hash),
+    issued_at_idx: index('refresh_token_issuances_issued_at_idx').on(table.issued_at),
+    user_revoked_idx: index('refresh_token_issuances_user_revoked_idx').on(table.user_id, table.revoked_at),
+  }),
+);
+
 export type Market = typeof markets.$inferSelect;
 export type NewMarket = typeof markets.$inferInsert;
 export type Bet = typeof bets.$inferSelect;
@@ -512,3 +532,5 @@ export type ReferralPayout = typeof referral_payouts.$inferSelect;
 export type NewReferralPayout = typeof referral_payouts.$inferInsert;
 export type UserNotification = typeof user_notifications.$inferSelect;
 export type NewUserNotification = typeof user_notifications.$inferInsert;
+export type RefreshTokenIssuance = typeof refresh_token_issuances.$inferSelect;
+export type NewRefreshTokenIssuance = typeof refresh_token_issuances.$inferInsert;

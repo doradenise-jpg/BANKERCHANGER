@@ -88,6 +88,23 @@ describe('AuthService', () => {
     db = drizzle(pool);
   });
 
+  describe('createActivityFeedToken', () => {
+    it('issues a short-lived token limited to market activity reads', () => {
+      mockJwt.sign.mockReturnValue('activity-token');
+
+      expect(authService.createActivityFeedToken()).toBe('activity-token');
+      expect(mockJwt.sign).toHaveBeenCalledWith(
+        {
+          sub: 'public-market-feed',
+          type: 'ws_activity',
+          scope: 'market_activity:read',
+        },
+        'test-jwt-secret',
+        { expiresIn: '5m' },
+      );
+    });
+  });
+
   // =========================================================================
   // USER REGISTRATION
   // =========================================================================
@@ -603,6 +620,255 @@ describe('AuthService', () => {
       const payload = authService.verifyJwt('valid_token', 'access');
       expect(payload.sub).toBe('user1');
       expect(payload.type).toBe('access');
+    });
+  });
+
+  // =========================================================================
+  // REFRESH TOKEN MAXIMUM LIFETIME (30 DAYS)
+  // =========================================================================
+  describe('Refresh token maximum absolute lifetime (30 days)', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-06-01T12:00:00Z'));
+      
+      authService.users.set('user1', {
+        id: 'user1',
+        email: 'user@example.com',
+        passwordHash: 'hashed_password',
+        emailVerified: true,
+        twoFactorEnabled: false,
+        sessionVersion: 0,
+      });
+
+      mockCacheService.redis.get.mockResolvedValue(null);
+      mockCacheService.redis.set.mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+      mockJwt.verify.mockReset();
+      mockCacheService.redis.get.mockReset();
+    });
+
+    it('should include iat claim in refresh token payload', async () => {
+      mockBcrypt.compare.mockResolvedValue(true as never);
+      mockJwt.sign.mockReturnValue('refresh_token' as never);
+
+      await authService.login('user@example.com', 'password123');
+
+      // Verify that signRefresh includes iat claim
+      expect(mockJwt.sign).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sub: 'user1',
+          type: 'refresh',
+          sv: 0,
+          iat: expect.any(Number),
+        }),
+        expect.any(String),
+        expect.any(Object),
+      );
+    });
+
+    it('should accept refresh token within 30-day window', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000);
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60, // 7 days from now
+      } as never);
+
+      mockCacheService.redis.get.mockResolvedValue('user1');
+
+      const result = await authService.refreshAccessToken('valid_refresh_token');
+      expect(result.accessToken).toBeDefined();
+      expect(mockJwt.sign).toHaveBeenCalled();
+    });
+
+    it('should reject refresh token after 30 days with 401 status', async () => {
+      // Issue token at 2026-05-02 (30 days ago from test time 2026-06-01)
+      const issuedAt = Math.floor(new Date('2026-05-02T12:00:00Z').getTime() / 1000);
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60, // JWT expiry still valid
+      } as never);
+
+      expect.assertions(2);
+      try {
+        await authService.refreshAccessToken('old_refresh_token');
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).statusCode).toBe(401);
+      }
+    });
+
+    it('should reject refresh token after 30 days regardless of JWT expiry claim', async () => {
+      // Token issued 31 days ago, but JWT exp claims it's still valid for 60 more days
+      const issuedAt = Math.floor(new Date('2026-05-01T12:00:00Z').getTime() / 1000);
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: Math.floor(Date.now() / 1000) + 60 * 24 * 60 * 60, // Still valid for 60 days
+      } as never);
+
+      expect.assertions(3);
+      try {
+        await authService.refreshAccessToken('token_with_extended_exp');
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).statusCode).toBe(401);
+        expect((err as AppError).message).toContain('30 days');
+      }
+    });
+
+    it('should accept refresh token at exactly 30 days boundary', async () => {
+      // Issue token at exactly 30 days ago
+      const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
+      const issuedAt = Math.floor(Date.now() / 1000) - THIRTY_DAYS_SECONDS;
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60,
+      } as never);
+
+      mockCacheService.redis.get.mockResolvedValue('user1');
+
+      // Should still be valid at exactly 30 days (not exceeding)
+      const result = await authService.refreshAccessToken('token_at_boundary');
+      expect(result.accessToken).toBeDefined();
+    });
+
+    it('should reject refresh token just after 30 days (one second)', async () => {
+      // Issue token 30 days + 1 second ago
+      const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
+      const issuedAt = Math.floor(Date.now() / 1000) - THIRTY_DAYS_SECONDS - 1;
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60,
+      } as never);
+
+      expect.assertions(2);
+      try {
+        await authService.refreshAccessToken('token_after_boundary');
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).statusCode).toBe(401);
+      }
+    });
+
+    it('should handle missing iat claim gracefully (treat as 0)', async () => {
+      // Token without iat claim should fail since token age would be very large
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        // iat is missing
+        exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+      } as never);
+
+      expect.assertions(2);
+      try {
+        await authService.refreshAccessToken('token_without_iat');
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).statusCode).toBe(401);
+      }
+    });
+
+    it('should still validate session revocation after checking lifetime', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000);
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60,
+      } as never);
+
+      // Session is revoked
+      mockCacheService.redis.get.mockImplementation((key: string) => {
+        if (key.includes('session:blocked')) {
+          return Promise.resolve('1');
+        }
+        return Promise.resolve(null);
+      });
+
+      expect.assertions(1);
+      try {
+        await authService.refreshAccessToken('valid_token_revoked_session');
+      } catch (err) {
+        expect((err as AppError).message).toContain('Session has been invalidated');
+      }
+    });
+
+    it('should still validate refresh token revocation after checking lifetime', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000);
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60,
+      } as never);
+
+      // Token is revoked
+      mockCacheService.redis.get.mockResolvedValue(null);
+
+      expect.assertions(1);
+      try {
+        await authService.refreshAccessToken('revoked_refresh_token');
+      } catch (err) {
+        expect((err as AppError).message).toContain('revoked');
+      }
+    });
+
+    it('should advance time and test token expiry transitions correctly', async () => {
+      const issuedAt = Math.floor(Date.now() / 1000);
+      
+      mockJwt.verify.mockReturnValue({
+        sub: 'user1',
+        type: 'refresh',
+        sv: 0,
+        iat: issuedAt,
+        exp: issuedAt + 7 * 24 * 60 * 60,
+      } as never);
+
+      mockCacheService.redis.get.mockResolvedValue('user1');
+
+      // Token is valid now
+      let result = await authService.refreshAccessToken('token_before_expiry');
+      expect(result.accessToken).toBeDefined();
+
+      // Advance 31 days
+      jest.advanceTimersByTime(31 * 24 * 60 * 60 * 1000);
+
+      // Now token should be expired
+      expect.assertions(3);
+      try {
+        await authService.refreshAccessToken('token_after_expiry');
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).statusCode).toBe(401);
+        expect((err as AppError).message).toContain('30 days');
+      }
     });
   });
 });

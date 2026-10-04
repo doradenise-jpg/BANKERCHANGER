@@ -1,0 +1,134 @@
+version: '3.9'
+
+# Staging Environment - mirrors production configuration for pre-production validation
+# Use with: docker-compose -f docker-compose.yml -f docker-compose.staging.yml up
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bankerchanger_staging}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-staging_secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:-bankerchanger_staging}
+    ports:
+      - '${POSTGRES_PORT:-5434}:5432'
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-bankerchanger_staging}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - staging
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-staging_redis_password}
+    ports:
+      - '${REDIS_PORT:-6380}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - staging
+
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./indexer/.env.staging
+    environment:
+      - NODE_ENV=staging
+      - FACTORY_CONTRACT_ADDRESS=${FACTORY_CONTRACT_ADDRESS}
+      - SOROBAN_RPC_URL=${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+    ports:
+      - '${INDEXER_PORT:-3003}:3002'
+    volumes:
+      - indexer_staging_data:/app/data
+    networks:
+      - staging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      indexer:
+        condition: service_started
+    env_file:
+      - ./backend/.env.staging
+    environment:
+      - NODE_ENV=staging
+      - PORT=${BACKEND_PORT:-3001}
+    ports:
+      - '${BACKEND_PORT:-3001}:${BACKEND_PORT:-3001}'
+    networks:
+      - staging
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:${BACKEND_PORT:-3001}/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      - backend
+    env_file:
+      - ./frontend/.env.staging
+    environment:
+      - NODE_ENV=staging
+    ports:
+      - '${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}'
+    networks:
+      - staging
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:${FRONTEND_PORT:-3000}']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_staging_data:
+    driver: local
+  indexer_staging_data:
+    driver: local
+
+networks:
+  staging:
+    driver: bridge

@@ -14,17 +14,18 @@ interface MarketDetailPageProps {
 export async function generateMetadata({ params }: MarketDetailPageProps): Promise<Metadata> {
   try {
     const market = await fetchMarketById(params.market_id);
-    const title = `${market.fighter_a} vs ${market.fighter_b}`;
+    const base = process.env.NEXT_PUBLIC_BASE_URL || 'https://bankerchanger.com';
+    const url = `${base}/markets/${params.market_id}`;
+    const title = `${market.fighter_a} vs ${market.fighter_b} — Bet on BANKERCHANGER`;
     const description = `Bet on ${market.fighter_a} vs ${market.fighter_b} — ${market.weight_class}${market.title_fight ? ' Title Fight' : ''} on BANKERCHANGER.`;
-    const url = `${process.env.NEXT_PUBLIC_BASE_URL || 'https://bankerchanger.com'}/markets/${params.market_id}`;
-    const imageUrl = `${process.env.NEXT_PUBLIC_BASE_URL || 'https://bankerchanger.com'}/og-image.png`;
+    const imageUrl = `${base}/api/og?market=${params.market_id}`;
 
     return {
-      title: `${title} — BANKERCHANGER`,
+      title,
       description,
       canonical: url,
       openGraph: {
-        title: `${title} — BANKERCHANGER`,
+        title,
         description,
         type: 'website',
         url,
@@ -34,13 +35,13 @@ export async function generateMetadata({ params }: MarketDetailPageProps): Promi
             url: imageUrl,
             width: 1200,
             height: 630,
-            alt: title,
+            alt: `${market.fighter_a} vs ${market.fighter_b}`,
           },
         ],
       },
       twitter: {
         card: 'summary_large_image',
-        title: `${title} — BANKERCHANGER`,
+        title,
         description,
         images: [imageUrl],
       },

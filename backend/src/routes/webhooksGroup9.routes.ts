@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router, Request, Response, NextFunction } from 'express';
 import { validateBody, validateQuery, validateParams } from '../api/middleware/validate';
 import { requireAuth } from '../middleware/auth.middleware';
@@ -17,6 +18,67 @@ import {
 
 const router = Router();
 
+// --- HMAC Signature Verification & Per-Subscription Secrets (Issue #681) ---
+
+export interface WebhookSubscription {
+  id: string;
+  user_id?: string;
+  url: string;
+  secret: string;
+  topics: string[];
+  description?: string | null;
+  status: string;
+  created_at: string;
+}
+
+export const webhookSubscriptionsStore: Map<string, WebhookSubscription> = new Map();
+
+export function computeWebhookSignature(payload: string | Buffer | object, secret: string): string {
+  const data = typeof payload === 'string' || Buffer.isBuffer(payload)
+    ? payload
+    : JSON.stringify(payload);
+  return crypto.createHmac('sha256', secret).update(data).digest('hex');
+}
+
+export function verifyWebhookSignature(
+  payload: string | Buffer | object,
+  signature: string | undefined | null,
+  secret: string
+): boolean {
+  if (!signature || !secret) {
+    return false;
+  }
+  try {
+    const data = typeof payload === 'string' || Buffer.isBuffer(payload)
+      ? payload
+      : JSON.stringify(payload);
+    const expectedSig = crypto.createHmac('sha256', secret).update(data).digest('hex');
+    const expectedBuf = Buffer.from(expectedSig, 'utf8');
+
+    const cleanSig = signature.startsWith('sha256=') ? signature.slice(7) : signature;
+    const providedBuf = Buffer.from(cleanSig, 'utf8');
+
+    if (expectedBuf.length !== providedBuf.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(expectedBuf, providedBuf);
+  } catch {
+    return false;
+  }
+}
+
+export function registerWebhookSubscription(sub: WebhookSubscription): void {
+  webhookSubscriptionsStore.set(sub.id, sub);
+}
+
+export function getWebhookSubscription(id: string): WebhookSubscription | undefined {
+  return webhookSubscriptionsStore.get(id);
+}
+
+export function clearWebhookSubscriptions(): void {
+  webhookSubscriptionsStore.clear();
+}
+
 /**
  * @swagger
  * /api/v2/webhooks/subscriptions:
@@ -34,15 +96,21 @@ router.post(
       const body = req.body as CreateWebhookGroup9Body;
       const userId = (req as unknown as { userId?: string }).userId;
 
-      const newWebhook = {
-        id: `whk-${Date.now()}`,
+      const id = `whk-${Date.now()}`;
+      const secret = body.secret || crypto.randomBytes(32).toString('hex');
+
+      const newWebhook: WebhookSubscription = {
+        id,
         user_id: userId,
         url: body.url,
+        secret,
         topics: body.topics,
         description: body.description || null,
         status: 'active',
         created_at: new Date().toISOString(),
       };
+
+      webhookSubscriptionsStore.set(id, newWebhook);
 
       res.status(201).json({
         success: true,
@@ -109,6 +177,8 @@ router.delete(
     try {
       const { id } = req.params as unknown as WebhookIdParamGroup9;
 
+      webhookSubscriptionsStore.delete(id);
+
       res.status(200).json({
         success: true,
         message: `Webhook subscription ${id} deactivated successfully`,
@@ -144,6 +214,113 @@ router.post(
           http_status_code: 200,
           latency_ms: 142,
           dispatched_at: new Date().toISOString(),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/v2/webhooks/delivery-callback:
+ *   post:
+ *     summary: Inbound webhook delivery callback verification with HMAC signature
+ *     tags: [Webhooks Group 9]
+ */
+router.post(
+  '/delivery-callback',
+  rateLimit({ windowMs: 60_000, max: 60, keyBy: 'ip' }),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const signature = (req.headers['x-signature'] || req.headers['x-hub-signature-256']) as string | undefined;
+      if (!signature) {
+        res.status(401).json({
+          success: false,
+          error: 'Missing X-Signature header',
+        });
+        return;
+      }
+
+      const webhookId = (req.headers['x-webhook-id'] as string) || (req.query.webhook_id as string) || req.body?.webhook_id;
+      let secret = process.env.WEBHOOK_SIGNING_SECRET || 'default-webhook-secret-key-32-chars';
+      if (webhookId && webhookSubscriptionsStore.has(webhookId)) {
+        secret = webhookSubscriptionsStore.get(webhookId)!.secret;
+      }
+
+      const isValid = verifyWebhookSignature(req.body, signature, secret);
+      if (!isValid) {
+        res.status(401).json({
+          success: false,
+          error: 'Invalid webhook HMAC signature',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        message: 'Webhook delivery callback signature verified successfully',
+        data: {
+          received_at: new Date().toISOString(),
+          webhook_id: webhookId || null,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/v2/webhooks/inbound/{id}:
+ *   post:
+ *     summary: Inbound webhook verification for a specific subscription
+ *     tags: [Webhooks Group 9]
+ */
+router.post(
+  '/inbound/:id',
+  rateLimit({ windowMs: 60_000, max: 60, keyBy: 'ip' }),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const signature = (req.headers['x-signature'] || req.headers['x-hub-signature-256']) as string | undefined;
+
+      if (!signature) {
+        res.status(401).json({
+          success: false,
+          error: 'Missing X-Signature header',
+        });
+        return;
+      }
+
+      const subscription = webhookSubscriptionsStore.get(id);
+      const secret = subscription?.secret || process.env.WEBHOOK_SIGNING_SECRET;
+
+      if (!secret) {
+        res.status(401).json({
+          success: false,
+          error: 'Unknown webhook subscription or missing secret',
+        });
+        return;
+      }
+
+      const isValid = verifyWebhookSignature(req.body, signature, secret);
+      if (!isValid) {
+        res.status(401).json({
+          success: false,
+          error: 'Invalid webhook HMAC signature',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Inbound webhook for ${id} verified successfully`,
+        data: {
+          webhook_id: id,
+          received_at: new Date().toISOString(),
         },
       });
     } catch (err) {

@@ -1,0 +1,11 @@
+security: add npm audit CI checks and Dependabot auto-merge
+
+- Add npm audit --audit-level=high to backend, frontend, and indexer CI pipelines
+- Create indexer CI workflow (indexer-ci.yml)
+- Create .npmrc files in backend, frontend, and indexer to enforce audit-level=high
+- Resolve duplicate dependencies in backend/package.json
+- Configure Dependabot auto-merge for security patches (5 for npm, 3 for cargo, 2 for actions)
+- Add security label to all Dependabot updates
+- Create SECURITY_AUDIT.md documentation
+
+Fixes #1: Dependency Audit Reveals High-Severity npm Vulnerabilities

@@ -1,10 +1,13 @@
-import { test, expect, Page } from '@playwright/test';
+import { afterAll, test, expect, Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { cleanupE2eData } from './cleanup';
+
+afterAll(cleanupE2eData);
 
 async function mockMarketsApi(page: Page, markets = [
   {
-    market_id: 'mkt-filter-1',
-    match_id: 'match-filter-1',
+    market_id: 'e2e_test_mkt-filter-1',
+    match_id: 'e2e_test_match-filter-1',
     fighter_a: 'Fighter A',
     fighter_b: 'Fighter B',
     weight_class: 'Heavyweight',
