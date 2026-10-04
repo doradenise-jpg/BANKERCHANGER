@@ -44,6 +44,7 @@ pub enum MarketStatus {
     Resolved,          // Winner declared; claims are open (cooldown elapsed)
     Cancelled,         // Fight cancelled; full refunds available
     Disputed,          // Outcome under admin review; claims frozen
+    Paused,            // Market paused by admin
 }
 
 /// Market tier classification for the AMM & Odds Calculation Pipeline.
@@ -363,6 +364,22 @@ pub struct FeeTier {
     pub volume_threshold: u64,
     /// Platform fee in basis points (e.g. 200 = 2.00%, 150 = 1.50%, 100 = 1.00%).
     pub fee_bps: u32,
+}
+
+/// LP position held by a liquidity provider in a market pool.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidityPosition {
+    /// Provider's Stellar address
+    pub provider: Address,
+    /// Market ID this position is for
+    pub market_id: u64,
+    /// Number of LP shares held
+    pub lp_shares: i128,
+    /// Fee-per-share accumulator snapshot at entry (for fee calculation)
+    pub fee_debt: i128,
+    /// Timestamp when the position was opened
+    pub entered_at: u64,
 }
 
 

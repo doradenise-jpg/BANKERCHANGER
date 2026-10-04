@@ -42,7 +42,7 @@ pub fn emit_market_resolved(env: &Env, market_id: u64, outcome: Outcome, oracle_
 pub fn emit_market_resolution_pending(
     env: &Env,
     market_id: u64,
-    outcome_byte: u8,
+    outcome_byte: u32,
     cooldown_end_ledger: u32,
 ) {
     let topics = (Symbol::new(env, "market_resolution_pending"), market_id);
@@ -53,8 +53,8 @@ pub fn emit_market_resolution_pending(
 /// `finalize_resolution` after the cooldown window has elapsed.
 ///
 /// Topics: `(Symbol("resolution_finalized"), market_id)`
-/// Data:   `(outcome_byte: u8)`
-pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u8) {
+/// Data:   `(outcome_byte: u32)`
+pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u32) {
     let topics = (Symbol::new(env, "resolution_finalized"), market_id);
     env.events().publish(topics, outcome_byte);
 }
@@ -110,6 +110,33 @@ pub fn emit_refund_claimed(env: &Env, market_id: u64, bettor: Address, amount: i
 pub fn emit_market_cancelled(env: &Env, market_id: u64, reason: String) {
     let topics = (Symbol::new(env, "market_cancelled"), market_id);
     env.events().publish(topics, reason);
+}
+
+/// Emits a `market_paused` event when a specific market is paused.
+///
+/// Topics: `(Symbol("market_paused"), market_id)`
+/// Data:   `admin: Address`
+pub fn emit_market_paused(env: &Env, market_id: u64, admin: Address) {
+    let topics = (Symbol::new(env, "market_paused"), market_id);
+    env.events().publish(topics, admin);
+}
+
+/// Emits a `market_unpaused` event when a specific market is unpaused.
+///
+/// Topics: `(Symbol("market_unpaused"), market_id)`
+/// Data:   `admin: Address`
+pub fn emit_market_unpaused(env: &Env, market_id: u64, admin: Address) {
+    let topics = (Symbol::new(env, "market_unpaused"), market_id);
+    env.events().publish(topics, admin);
+}
+
+/// Emits a `market_expired_refund` event when an expired market's bets are refunded.
+///
+/// Topics: `(Symbol("market_expired_refund"), market_id)`
+/// Data:   `(bettor, amount)`
+pub fn emit_market_expired_refund(env: &Env, market_id: u64, bettor: Address, amount: i128) {
+    let topics = (Symbol::new(env, "market_expired_refund"), market_id);
+    env.events().publish(topics, (bettor, amount));
 }
 
 /// Emits a `market_disputed` event when a resolved market is placed under review.
@@ -261,9 +288,10 @@ pub fn emit_stale_reports_cleared(env: &Env, market_id: u64, cleared_count: u32)
 /// Topics: `(Symbol("audit_log_entry"), seq)`
 /// Data:   `AuditEntry`
 pub fn emit_audit_log_entry(env: &Env, entry: AuditEntry) {
-    let seq = entry.seq;
-    let topics = (Symbol::new(env, "audit_log_entry"), seq);
+    let id = entry.id;
+    let topics = (Symbol::new(env, "audit_log_entry"), id);
     env.events().publish(topics, entry);
+}
 
 // ─── AMM & Odds Calculation Pipeline — Tier Events ───────────────────────────
 // The following events support issues #473 (tier 8), #474 (tier 10),
@@ -372,6 +400,7 @@ pub fn emit_pool_initialized(
 ) {
     let topics = (Symbol::new(env, "pool_initialized"), market_id);
     env.events().publish(topics, (tier, pool_a, pool_b, pool_draw));
+}
 
 /// Emits a `withdrawal_limit_updated` event when the admin updates the daily withdrawal limit.
 ///
@@ -462,14 +491,6 @@ pub fn emit_odds_computed(
     env.events().publish(topics, (pool_a, pool_b, pool_draw, shares_out, price_impact_bps));
 }
 
-/// Emits a `withdrawals_paused` event when the treasury pause flag changes.
-///
-/// Topics: `(Symbol("withdrawals_paused"),)`
-/// Data:   `paused: bool`
-pub fn emit_withdrawals_paused(env: &Env, paused: bool) {
-    let topics = (Symbol::new(env, "withdrawals_paused"),);
-    env.events().publish(topics, paused);
-
 /// Emits an `audit_log` event for every treasury action that alters balances.
 ///
 /// Topics: `(Symbol("audit_log"), day_bucket)`
@@ -503,6 +524,7 @@ pub fn emit_daily_cap_reached(
 ) {
     let topics = (Symbol::new(env, "daily_cap_reached"), day_bucket);
     env.events().publish(topics, (token, total_withdrawn_today, cap));
+}
 
 /// Emits a `fee_tiers_updated` event when the admin updates treasury fee tiers.
 ///
