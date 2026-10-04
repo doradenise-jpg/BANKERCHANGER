@@ -11,6 +11,7 @@ import {
 import { sendExportReadyEmail } from '../services/email.service';
 import { flushOracleWhitelistCache } from '../oracle/OracleService';
 import { requireAdmin } from '../middleware/requireAdminJwt.middleware';
+import { auditLog } from '../services/auditLog.service';
 
 const router = Router();
 
@@ -439,9 +440,18 @@ router.post('/export/request', requireAdmin, async (req: Request, res: Response,
  *       500:
  *         description: Redis error
  */
-router.post('/oracle/refresh-whitelist', requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+router.post('/oracle/refresh-whitelist', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const whitelist = (process.env.ORACLE_WHITELIST ?? '').split(',').map((value) => value.trim()).filter(Boolean);
     await flushOracleWhitelistCache();
+    const adminId = ((req as unknown as Record<string, unknown>).userId as string | undefined) ?? null;
+    await auditLog.write({
+      adminId,
+      action: 'oracle_whitelist_refresh',
+      targetId: 'oracle_whitelist',
+      beforeState: { addresses: whitelist },
+      afterState: { addresses: whitelist },
+    });
     res.json({ message: 'Oracle whitelist cache flushed. New whitelist will be loaded on next verification.' });
   } catch (err) {
     next(err);
