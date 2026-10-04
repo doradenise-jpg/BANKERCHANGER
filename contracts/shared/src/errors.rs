@@ -112,6 +112,9 @@ pub enum ContractError {
     OracleNotWhitelisted = 54,
     /// Fighter names cannot be identical
     DuplicateFighterName = 55,
+    /// fight_date does not satisfy the minimum market duration requirement
+    /// (fight_date must be > ledger_timestamp + MIN_MARKET_DURATION)
+    InvalidFightDate = 56,
 
     // ── Reentrancy ─────────────────────────────────────────
     /// A claim or refund transfer is already in progress
