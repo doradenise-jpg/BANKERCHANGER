@@ -223,7 +223,8 @@ export const updateProfileBody = z
       )
       .optional(),
     avatarUrl: z.string().url('avatarUrl must be a valid URL').optional(),
+    walletAddress: z.string().refine((val) => StrKey.isValidEd25519PublicKey(val), { message: 'Invalid Stellar address format' }).optional(),
   })
-  .refine((data) => data.username !== undefined || data.avatarUrl !== undefined, {
-    message: 'At least one field (username or avatarUrl) must be provided',
+  .refine((data) => data.username !== undefined || data.avatarUrl !== undefined || data.walletAddress !== undefined, {
+    message: 'At least one field (username, avatarUrl, or walletAddress) must be provided',
   });

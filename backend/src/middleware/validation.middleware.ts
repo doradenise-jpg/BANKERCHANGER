@@ -75,9 +75,8 @@ export function validateBody(schema: ZodSchema) {
           message: err.message,
           code: err.code,
         }));
-        return next(
-          new AppError(400, `Validation failed: ${formattedErrors.map((e) => e.message).join("; ")}`),
-        );
+        const msg = error.issues.length === 1 ? error.issues[0].message : `Validation failed: ${formattedErrors.map((e) => e.message).join("; ")}`;
+        return next(new AppError(400, msg));
       }
       next(error);
     }

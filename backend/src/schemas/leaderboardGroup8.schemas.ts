@@ -11,7 +11,7 @@ export const listLeaderboardGroup8QuerySchema = z.object({
   metric: leaderboardMetricEnum.default('pnl'),
   category: sportCategoryEnum.default('all'),
   page: z.coerce.number().int().min(1, 'Page must be >= 1').default(1),
-  limit: z.coerce.number().int().min(1, 'Limit must be >= 1').max(100, 'Limit cannot exceed 100').default(25),
+  limit: z.coerce.number().int().min(1, 'Limit must be >= 1').max(100, 'limit cannot exceed 100').default(25),
 });
 
 export const getUserRankGroup8ParamsSchema = z.object({

@@ -35,7 +35,7 @@ export class UserService {
     return toDTO(userId);
   }
 
-  updateProfile(userId: string, body: { username?: string; avatarUrl?: string }): UserDTO {
+  updateProfile(userId: string, body: { username?: string; avatarUrl?: string; walletAddress?: string }): UserDTO {
     if (!users.has(userId)) throw new AppError(404, 'User not found');
 
     if (body.username) {
@@ -48,6 +48,12 @@ export class UserService {
 
     if (body.avatarUrl !== undefined) {
       getMeta(userId).avatarUrl = body.avatarUrl;
+    }
+
+    if (body.walletAddress !== undefined) {
+      // In a real app we'd update the db here, for in-memory we update meta
+      const meta = getMeta(userId);
+      (meta as any).walletAddress = body.walletAddress;
     }
 
     return toDTO(userId);
