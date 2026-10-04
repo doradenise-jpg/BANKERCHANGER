@@ -42,7 +42,39 @@ const WINDOW_MS = 1_000;
 export type ActivityEvent =
   | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
-  | { type: 'market:resolved'; marketId: string; outcome: string; winner_odds: number; timestamp: string };
+  | { type: 'market:resolved'; marketId: string; outcome: string; winner_odds: number; timestamp: string }
+  | { type: 'resolved'; marketId: string; winningOutcomeId: string }
+  | { type: 'cancelled'; marketId: string }
+  | { type: 'market_update'; marketId: string; eventType: string; data: Record<string, unknown> }
+  | { type: 'leaderboard_rank_update'; userId: string; rank: number; currentStreak?: number; timestamp: string }
+  | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string }
+  | { type: 'bet_count_update'; marketId: string; betCount: number; timestamp: string }
+  | { type: 'indexer_status'; status: 'running' | 'idle' | 'error' | 'syncing'; currentLedger: number; targetLedger: number; timestamp: string };
+
+export type MarketCreatedEvent = {
+  type: 'market:created';
+  marketId: string;
+  fighterA: string;
+  fighterB: string;
+};
+
+/** Pushed to leaderboard subscribers whenever one or more ranks change. */
+export interface LeaderboardRankEvent {
+  type: 'leaderboard_rank_update';
+  updates: RankUpdate[];
+  timestamp: string;
+}
+
+export type LeaderboardRankUpdateEvent = {
+  type: 'leaderboard_rank_update';
+  leaderboardId?: string;
+  userId: string;
+  rank: number;
+  score?: number;
+  currentStreak?: number;
+  displayName?: string;
+  timestamp: string;
+};
 
 type AuthMsg = { type: 'auth'; token: string };
 type SubscribeMsg =
@@ -181,7 +213,6 @@ export class ActivityFeed {
     logger.info('ActivityFeed WebSocket server attached');
   }
 
-<<<<<<< HEAD
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   private _resolveIp(req: IncomingMessage): string {
@@ -429,6 +460,17 @@ export class ActivityFeed {
     for (const ws of this.globalMarketCreatedSubs) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
     }
+  }
+
+  /** Publish a bet count update to market subscribers. */
+  publishBetCountUpdate(marketId: string, betCount: number): void {
+    const event = {
+      type: 'bet_count_update' as const,
+      marketId,
+      betCount,
+      timestamp: new Date().toISOString(),
+    };
+    this.publish(event);
   }
 
   publishLeaderboardUpdate(event: LeaderboardRankUpdateEvent | { userId: string; rank: number; currentStreak: number }): void {

@@ -84,33 +84,49 @@ export const defaultDbAdapter: DbAdapter = {
       'ORDER BY scheduled_at DESC';
 
     const { rows } = await pool.query(
-      `SELECT * FROM markets ${whereSql} ${orderBySql}`,
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       ${whereSql} ${orderBySql}`,
       values,
     );
 
     return rows.map((row) => ({
       ...row,
+      bet_count: Number(row.bet_count ?? 0),
       scheduled_at: new Date(row.scheduled_at),
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
       resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-    } as Market));
+    } as Market & { bet_count: number }));
   },
 
   async findMarketById(market_id: string): Promise<Market | null> {
     const { rows } = await pool.query(
-      'SELECT * FROM markets WHERE market_id = $1',
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       WHERE m.market_id = $1`,
       [market_id],
     );
     if (rows.length === 0) return null;
     const row = rows[0];
     return {
       ...row,
+      bet_count: Number(row.bet_count ?? 0),
       scheduled_at: new Date(row.scheduled_at),
       created_at: new Date(row.created_at),
       updated_at: new Date(row.updated_at),
       resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-    } as Market;
+    } as Market & { bet_count: number };
   },
 
   async findBetsByAddress(bettor_address: string): Promise<Bet[]> {
@@ -336,7 +352,14 @@ export async function getMarkets(
 
     try {
       const rows = await pool.query(
-        `SELECT * FROM markets ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+         FROM markets m
+         LEFT JOIN (
+           SELECT market_id, COUNT(*) AS bet_count
+           FROM bets
+           GROUP BY market_id
+         ) b ON m.market_id = b.market_id
+         ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, limit, offset],
       );
 
