@@ -351,3 +351,69 @@ export async function initDbPool(config?: DbPoolConfig): Promise<any> {
 export const redis = {
   publish: async (_channel: string, _message: string): Promise<number> => 1,
 };
+
+// ─── Bet Placed Event Persistence (issue #25) ────────────────────────────────
+
+export interface BetPlacedRecord {
+  contractId: string;
+  ledgerSequence: number;
+  marketId: string;
+  bettorAddress: string;
+  side: string;
+  amount: string;
+  txHash: string;
+  oddsABps: number;
+  oddsBBps: number;
+  oddsDrawBps: number;
+  totalPool: string;
+  oddsTimestamp: number;
+}
+
+/**
+ * Persists a bet_placed event including the full odds snapshot (issue #25).
+ * Creates the table on first call if it does not exist.
+ * Uses ON CONFLICT DO NOTHING for idempotency — safe to call multiple times
+ * with the same contractId + txHash without creating duplicate rows.
+ */
+export function upsertBetPlaced(bet: BetPlacedRecord): void {
+  const database = getDb();
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS bet_placed_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contract_id TEXT NOT NULL,
+      ledger_sequence INTEGER NOT NULL,
+      market_id TEXT NOT NULL,
+      bettor_address TEXT NOT NULL,
+      side TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      odds_a_bps INTEGER NOT NULL DEFAULT 0,
+      odds_b_bps INTEGER NOT NULL DEFAULT 0,
+      odds_draw_bps INTEGER NOT NULL DEFAULT 0,
+      total_pool TEXT NOT NULL DEFAULT '0',
+      odds_timestamp INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(contract_id, tx_hash)
+    )
+  `);
+  database.prepare(`
+    INSERT INTO bet_placed_events
+      (contract_id, ledger_sequence, market_id, bettor_address, side, amount, tx_hash,
+       odds_a_bps, odds_b_bps, odds_draw_bps, total_pool, odds_timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(contract_id, tx_hash) DO NOTHING
+  `).run(
+    bet.contractId,
+    bet.ledgerSequence,
+    bet.marketId,
+    bet.bettorAddress,
+    bet.side,
+    bet.amount,
+    bet.txHash,
+    bet.oddsABps,
+    bet.oddsBBps,
+    bet.oddsDrawBps,
+    bet.totalPool,
+    bet.oddsTimestamp,
+  );
+}

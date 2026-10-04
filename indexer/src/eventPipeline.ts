@@ -1,5 +1,5 @@
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
-import { getCursor, saveCursor, upsertInvoice } from "./db";
+import { getCursor, saveCursor, upsertInvoice, upsertBetPlaced } from "./db";
 import { updateLastLedger } from "./health";
 import { logger } from "./logger";
 import dotenv from "dotenv";
@@ -279,7 +279,31 @@ async function handleEvent(event: ProcessedEvent): Promise<void> {
       break;
 
     case "market_created":
-    case "bet_placed":
+    case "bet_placed": {
+      // Persist bet record and odds snapshot so the indexer records historical odds (issue #25).
+      // event.value is the scValToNative result of the (BetRecord, OddsSnapshot) tuple.
+      const v = event.value;
+      const betData = Array.isArray(v) ? v[0] : (v?.bet ?? v);
+      const oddsData = Array.isArray(v) ? v[1] : (v?.odds_snapshot ?? {});
+      await writeWithTransientRetry(() => {
+        upsertBetPlaced({
+          contractId: event.contractId,
+          ledgerSequence: event.ledgerSequence,
+          marketId: String(betData?.market_id ?? ""),
+          bettorAddress: String(betData?.bettor ?? ""),
+          side: String(betData?.side ?? ""),
+          amount: String(betData?.amount ?? "0"),
+          txHash: `${event.contractId}:${event.ledgerSequence}`,
+          oddsABps: Number(oddsData?.odds_a_bps ?? 0),
+          oddsBBps: Number(oddsData?.odds_b_bps ?? 0),
+          oddsDrawBps: Number(oddsData?.odds_draw_bps ?? 0),
+          totalPool: String(oddsData?.total_pool ?? "0"),
+          oddsTimestamp: Number(oddsData?.timestamp ?? 0),
+        });
+        return Promise.resolve();
+      });
+      break;
+    }
     case "market_resolved":
     case "liquidity_added":
     case "liquidity_removed":
