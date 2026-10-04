@@ -60,13 +60,16 @@ export default function PortfolioPage(): JSX.Element {
   );
 
   const allBets: Bet[] = useMemo(() => {
+    if (paginatedBets && paginatedBets.length > 0) {
+      return paginatedBets;
+    }
     if (!portfolio) return [];
     return [
       ...portfolio.pending_claims,
       ...portfolio.active_bets,
       ...portfolio.past_bets,
     ];
-  }, [portfolio]);
+  }, [paginatedBets, portfolio]);
 
   const handleClaimAll = useCallback(async () => {
     if (!portfolio || claimingAll) return;
@@ -167,6 +170,17 @@ export default function PortfolioPage(): JSX.Element {
           onClaim={claimWinnings}
           onRefund={claimRefund}
         />
+        {hasNextPage && (
+          <div className="mt-6 flex justify-center">
+            <button
+              onClick={loadNextPage}
+              disabled={isFetchingNextPage}
+              className="px-6 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-sm font-semibold text-white transition-colors border border-gray-700 hover:border-gray-600"
+            >
+              {isFetchingNextPage ? 'Loading more bets…' : 'Load more'}
+            </button>
+          </div>
+        )}
       </section>
     </main>
   );

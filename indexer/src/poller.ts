@@ -4,6 +4,7 @@ import { updateLastLedger } from './health';
 import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuity';
 import { calculateBackoff, loadBackoffConfigFromEnv } from './backoff';
 import { broadcast } from './ws';
+import { acquireDistributedLock } from './distributedLock';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -139,6 +140,19 @@ export async function pollEvents() {
 
   // Recursive async loop with exponential backoff
   async function pollLoop(): Promise<void> {
+    const lock = await acquireDistributedLock({
+      key: 'indexer:poll:lock',
+      ttl: LOCK_TTL_SECONDS,
+    });
+
+    if (!lock) {
+      log('warn', 'Indexer poller lock contention: skipping cycle', {
+        metric: 'indexer_lock_contention_total',
+      });
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      return pollLoop();
+    }
+
     try {
       // A pending resync (set after a re-org) always takes priority over the
       // persisted cursor, since the cursor may point past ledgers that no
@@ -313,10 +327,6 @@ export async function pollEvents() {
       pollerHealth.lastErrorAt = null;
       pollerHealth.lastSuccessfulPollAt = new Date().toISOString();
 
-      // Schedule next poll immediately (no fixed interval, just loop)
-      await new Promise(resolve => setImmediate(resolve));
-      await pollLoop();
-
     } catch (err) {
       pollerHealth.consecutiveFailures++;
       pollerHealth.lastError = err instanceof Error ? err.message : String(err);
@@ -338,9 +348,16 @@ export async function pollEvents() {
       });
 
       // Wait with exponential backoff before retrying
+      await lock.release();
       await new Promise(resolve => setTimeout(resolve, backoffMs));
-      await pollLoop();
+      return pollLoop();
+    } finally {
+      await lock.release();
     }
+
+    // Schedule next poll immediately after releasing lock
+    await new Promise(resolve => setImmediate(resolve));
+    return pollLoop();
   }
 
   // Start the polling loop
