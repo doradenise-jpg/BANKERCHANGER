@@ -60,3 +60,34 @@ jobs:
         run: |
           cargo install cargo-audit --locked
           cargo audit --deny warnings --deny unsound --deny yanked
+
+  fuzz:
+    name: Fuzz AMM + Payout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('contracts/Cargo.lock') }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz AMM price functions (60 s)
+        working-directory: contracts/shared
+        run: cargo fuzz run amm_fuzz -- -max_total_time=60
+
+      - name: Fuzz payout calculations (60 s)
+        working-directory: contracts/shared
+        run: cargo fuzz run payout_fuzz -- -max_total_time=60
