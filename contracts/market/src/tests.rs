@@ -43,6 +43,7 @@ mod security_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -431,6 +432,7 @@ mod place_bet_edge_cases {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -805,6 +807,7 @@ mod full_market_lifecycle {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -988,6 +991,7 @@ mod resolve_dispute_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1176,6 +1180,7 @@ mod get_current_odds_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1321,6 +1326,7 @@ mod estimate_payout_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1506,6 +1512,7 @@ mod oracle_sig_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -1813,6 +1820,7 @@ mod claim_routing_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3600,
             resolution_window: 86400,
@@ -2182,6 +2190,7 @@ mod bet_timing_lock_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: LOCK_BEFORE_SECS,
             resolution_window: 86_400,
@@ -2234,6 +2243,86 @@ mod bet_timing_lock_tests {
             &0i128,
         );
         assert!(result.is_ok(), "Bet before lock threshold must succeed");
+    }
+
+    /// A bettor may split their stake across bets, up to the cumulative market cap.
+    #[test]
+    fn test_bettor_cannot_exceed_configured_pool_share_cap() {
+        use boxmeout_shared::errors::ContractError;
+
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, contract_id, _factory, token_id) = setup(&env, lock_threshold - 1);
+        let mut state = client.get_state();
+        state.config.max_bet_share_bps = 2_000;
+        state.pool_a = 1_000_000_000;
+        state.total_pool = 1_000_000_000;
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let bettor = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token_id)
+            .mint(&bettor, &251_000_000i128);
+
+        client.place_bet(
+            &bettor,
+            &BetSide::FighterA,
+            &200_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        let result = client.try_place_bet(
+            &bettor,
+            &BetSide::FighterB,
+            &51_000_000i128,
+            &token_id,
+            &0i128,
+        );
+
+        assert_eq!(result.unwrap_err(), Ok(ContractError::BetLimitExceeded));
+        assert_eq!(client.get_bets_by_address(&bettor).len(), 1);
+        assert_eq!(client.get_state().total_pool, 1_200_000_000i128);
+    }
+
+    /// Distinct bettors can both place bets while remaining below the pool-share cap.
+    #[test]
+    fn test_two_bettors_below_pool_share_cap_succeed() {
+        let lock_threshold = SCHEDULED_AT - LOCK_BEFORE_SECS;
+        let env = Env::default();
+        let (client, contract_id, _factory, token_id) = setup(&env, lock_threshold - 1);
+        let mut state = client.get_state();
+        state.config.max_bet_share_bps = 2_000;
+        state.pool_a = 1_000_000_000;
+        state.total_pool = 1_000_000_000;
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&"STATE", &state);
+        });
+
+        let bettor_a = Address::generate(&env);
+        let bettor_b = Address::generate(&env);
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
+        token_client.mint(&bettor_a, &100_000_000i128);
+        token_client.mint(&bettor_b, &100_000_000i128);
+
+        let result_a = client.try_place_bet(
+            &bettor_a,
+            &BetSide::FighterA,
+            &100_000_000i128,
+            &token_id,
+            &0i128,
+        );
+        let result_b = client.try_place_bet(
+            &bettor_b,
+            &BetSide::FighterB,
+            &100_000_000i128,
+            &token_id,
+            &0i128,
+        );
+
+        assert!(result_a.is_ok());
+        assert!(result_b.is_ok());
+        assert_eq!(client.get_state().total_pool, 1_200_000_000i128);
     }
 
     /// Bets placed exactly at the lock threshold must return BettingClosed.
@@ -2314,6 +2403,7 @@ mod min_bet_enforcement_tests {
         MarketConfig {
             min_bet_amount,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2460,6 +2550,7 @@ mod place_bet_boundary_fuzz_tests {
         MarketConfig {
             min_bet_amount: 1,
             max_bet: i128::MAX,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2595,6 +2686,7 @@ mod get_all_bets_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2795,6 +2887,7 @@ mod market_lifecycle_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: LOCK_BEFORE,
             resolution_window: 86_400,
@@ -3204,6 +3297,7 @@ mod stale_oracle_reports_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -3480,6 +3574,7 @@ mod reentrancy_regression_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -3782,6 +3877,7 @@ mod event_emission_consistency_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -4349,6 +4445,7 @@ mod slippage_bounds_tests {
         MarketConfig {
             min_bet_amount: 1,
             max_bet: i128::MAX,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -4577,6 +4674,7 @@ mod upgrade_safety_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -4958,6 +5056,7 @@ mod claim_refund_integrity_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: LOCK_BEFORE_SECS,
             resolution_window: 86_400,
@@ -5196,6 +5295,7 @@ mod amm_slippage_tier8_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -6025,6 +6125,7 @@ mod oracle_two_of_three_tier8_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -6985,6 +7086,7 @@ mod amm_slippage_tier10_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -7464,6 +7566,7 @@ mod oracle_two_of_three_tier10_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -7744,6 +7847,7 @@ mod amm_slippage_tier12_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -7944,6 +8048,7 @@ mod oracle_two_of_three_tier12_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -8202,6 +8307,7 @@ mod amm_slippage_tier14_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -8410,6 +8516,7 @@ mod oracle_two_of_three_tier14_tests {
         MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 10_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
