@@ -9,6 +9,7 @@ import { cacheDelete, cacheDeletePattern } from './cache.service';
 import { AppError } from '../utils/AppError';
 import { Address, xdr } from '@stellar/stellar-sdk';
 import { invokeContract } from './StellarService';
+import { acquireLock } from '../utils/distributedLock';
 
 export interface BetWithMarket extends Bet {
   market_id: string;
@@ -29,12 +30,21 @@ export interface ProjectedPayout {
 
 /**
  * Records a bet triggered by a BetPlaced blockchain event.
- * 
+ *
+ * Concurrency safety — two-layer guard (issue #26):
+ *   1. Redis distributed lock  (`bet:lock:<market_id>`, TTL 10 s) — prevents
+ *      concurrent bet processing at the application/service level.
+ *   2. SELECT … FOR UPDATE inside the DB transaction — serialises access to
+ *      the market row at the database level, ensuring each bet reads a
+ *      consistent, up-to-date market state before writing.
+ *
  * Steps:
  *   1. Validate inputs
- *   2. Insert Bet record with tx_hash as unique key (idempotent)
- *   3. Update User.total_wagered and User.total_bets
- *   4. Invalidate Redis cache for the market
+ *   2. Acquire Redis distributed lock (retry ×3, 100 ms apart)
+ *   3. Begin DB transaction; SELECT market row FOR UPDATE
+ *   4. Insert Bet record with tx_hash as unique key (idempotent)
+ *   5. Invalidate Redis cache for the market
+ *   6. Commit; release lock
  */
 export async function recordBet(
   market_id: string,
@@ -55,40 +65,79 @@ export async function recordBet(
 
   const amount_xlm = Number(amount) / 10_000_000;
 
-  const client = await pool.connect();
+  // ── Layer 1: Redis distributed lock ───────────────────────────────────────
+  // Prevents two concurrent requests from processing bets for the same market
+  // simultaneously at the application layer.
+  const LOCK_KEY = `bet:lock:${market_id}`;
+  const LOCK_TTL_SECS = 10;
+  const MAX_LOCK_RETRIES = 3;
+  const LOCK_RETRY_DELAY_MS = 100;
+
+  let lock = null;
+  for (let attempt = 0; attempt < MAX_LOCK_RETRIES; attempt++) {
+    lock = await acquireLock({ key: LOCK_KEY, ttl: LOCK_TTL_SECS });
+    if (lock) break;
+    if (attempt < MAX_LOCK_RETRIES - 1) {
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAY_MS));
+    }
+  }
+
+  if (!lock) {
+    throw AppError.badRequest('Service temporarily busy, please retry');
+  }
+
   let bet: any;
 
   try {
-    await client.query('BEGIN');
+    // ── Layer 2: PostgreSQL row-level lock ─────────────────────────────────
+    // SELECT … FOR UPDATE ensures that within the DB transaction each bet
+    // reads and writes the market row atomically, preventing two concurrent
+    // DB transactions from both reading the same stale pool totals.
+    const client = await pool.connect();
 
-    const result = await client.query(
-      `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (tx_hash) DO NOTHING
-       RETURNING *`,
-      [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
-    );
+    try {
+      await client.query('BEGIN');
 
-    if (result.rows.length > 0) {
-      bet = result.rows[0];
-      // Invalidate cache only on new insert
-      await cacheDeletePattern(`market:${market_id}*`);
-      await cacheDeletePattern('platform:stats');
-    } else {
-      // Conflict occurred - fetch existing row
-      const existing = await client.query(
-        'SELECT * FROM bets WHERE tx_hash = $1',
-        [tx_hash],
+      // Lock the market row for the duration of this transaction so no other
+      // concurrent transaction can read or write stale pool state.
+      await client.query(
+        'SELECT market_id FROM markets WHERE market_id = $1 FOR UPDATE',
+        [market_id],
       );
-      bet = existing.rows[0];
-    }
 
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
+      const result = await client.query(
+        `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (tx_hash) DO NOTHING
+         RETURNING *`,
+        [market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence],
+      );
+
+      if (result.rows.length > 0) {
+        bet = result.rows[0];
+        // Invalidate cache only on new insert
+        await cacheDeletePattern(`market:${market_id}*`);
+        await cacheDeletePattern('platform:stats');
+      } else {
+        // Conflict occurred - fetch existing row
+        const existing = await client.query(
+          'SELECT * FROM bets WHERE tx_hash = $1',
+          [tx_hash],
+        );
+        bet = existing.rows[0];
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } finally {
-    client.release();
+    // Always release the Redis lock — even on error — so the next request
+    // can acquire it immediately rather than waiting for TTL expiry.
+    await lock.release();
   }
 
   return {
@@ -100,7 +149,7 @@ export async function recordBet(
 
 /**
  * Fetches paginated bets for a Stellar address.
- * 
+ *
  * Steps:
  *   1. Validate Stellar address format
  *   2. JOIN with markets table to include market info
@@ -159,7 +208,7 @@ export async function fetchBetsByAddress(
 
 /**
  * Calculates the projected payout for a specific bettor on a specific market.
- * 
+ *
  * Steps:
  *   1. Fetch bettor's BetPosition and market's pool sizes from DB
  *   2. Formula: (amount / winning_pool) * (total_pool - fee)
