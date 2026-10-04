@@ -211,6 +211,43 @@ function buildSignedMessage(match_id: string, outcomeIndex: number, reportedAtMs
   ]);
 }
 
+export function verifyOracleSignature(
+  report: Pick<OracleReport, 'match_id' | 'outcome' | 'reported_at' | 'oracle_address'>,
+  signature: string | undefined,
+  publicKey: string,
+): boolean {
+  try {
+    if (!signature || !/^[0-9a-fA-F]{128}$/.test(signature) || !/^[0-9a-fA-F]{64}$/.test(publicKey)) {
+      return false;
+    }
+
+    const outcomeIndex = OUTCOME_INDEX[report.outcome as FightOutcome];
+    const reportedAtMs = new Date(report.reported_at).getTime();
+    if (outcomeIndex === undefined || !Number.isFinite(reportedAtMs)) return false;
+
+    const publicKeyBytes = Buffer.from(publicKey, 'hex');
+    if (!Keypair.fromPublicKey(report.oracle_address).rawPublicKey().equals(publicKeyBytes)) return false;
+
+    const pubKeyObj = createPublicKey({
+      key: Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        publicKeyBytes,
+      ]),
+      format: 'der',
+      type: 'spki',
+    });
+
+    return cryptoVerify(
+      null,
+      buildSignedMessage(report.match_id, outcomeIndex, BigInt(reportedAtMs)),
+      pubKeyObj,
+      Buffer.from(signature, 'hex'),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Builds an xdr.ScVal representation of an OracleReport struct.
  *
@@ -720,30 +757,9 @@ export async function submitFightResult(
  */
 export async function verifyOracleReport(report: OracleReport): Promise<boolean> {
   try {
-    // 1. Reconstruct signed message using XDR encoding
-    const outcomeIndex = OUTCOME_INDEX[report.outcome as FightOutcome];
-    if (outcomeIndex === undefined) return false;
-
-    const reportedAtMs = BigInt(new Date(report.reported_at).getTime());
-    const message = buildSignedMessage(report.match_id, outcomeIndex, reportedAtMs);
-
-    // 2. Verify Ed25519 signature
     const rawPubKey = Keypair.fromPublicKey(report.oracle_address).rawPublicKey();
-    const pubKeyObj = createPublicKey({
-      key: Buffer.concat([
-        // Ed25519 SubjectPublicKeyInfo DER prefix (12 bytes)
-        Buffer.from('302a300506032b6570032100', 'hex'),
-        rawPubKey,
-      ]),
-      format: 'der',
-      type: 'spki',
-    });
+    if (!verifyOracleSignature(report, report.signature, rawPubKey.toString('hex'))) return false;
 
-    const sigBuf = Buffer.from(report.signature, 'hex');
-    const sigValid = cryptoVerify(null, message, pubKeyObj, sigBuf);
-    if (!sigValid) return false;
-
-    // 3. Check whitelist
     const whitelist = await getOracleWhitelist();
     return whitelist.has(report.oracle_address);
   } catch {
