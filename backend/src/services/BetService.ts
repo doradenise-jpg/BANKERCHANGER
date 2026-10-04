@@ -83,7 +83,7 @@ export async function recordBet(
   }
 
   if (!lock) {
-    throw AppError.badRequest('Service temporarily busy, please retry');
+    throw AppError.conflict('Service temporarily busy, please retry');
   }
 
   let bet: any;
@@ -100,10 +100,14 @@ export async function recordBet(
 
       // Lock the market row for the duration of this transaction so no other
       // concurrent transaction can read or write stale pool state.
-      await client.query(
+      const marketLockResult = await client.query(
         'SELECT market_id FROM markets WHERE market_id = $1 FOR UPDATE',
         [market_id],
       );
+      if (marketLockResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        throw AppError.notFound(`Market not found: ${market_id}`);
+      }
 
       const result = await client.query(
         `INSERT INTO bets (market_id, bettor_address, side, amount, amount_xlm, tx_hash, ledger_sequence)

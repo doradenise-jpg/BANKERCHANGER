@@ -15,6 +15,7 @@ import { validateBody, validateParams, validateQuery } from '../api/middleware/v
 import { rateLimit } from '../middleware/rate-limit.middleware';
 import { AppError } from '../utils/AppError';
 import { pool } from '../config/db';
+import { acquireLock } from '../utils/distributedLock';
 
 const router = Router();
 
@@ -57,8 +58,13 @@ router.post(
   validateBody(placeBetGroup4BodySchema),
   async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
+    let marketLock: Awaited<ReturnType<typeof acquireLock>> = null;
     try {
       const { market_id, bettor_address, side, amount, max_slippage_bps, idempotency_key } = req.body;
+
+      // PostgreSQL's row lock below remains authoritative; Redis adds a
+      // cross-instance guard when available without rejecting contending bets.
+      marketLock = await acquireLock({ key: `bet:market:${market_id}`, ttl: 60 });
 
       await client.query('BEGIN');
 
@@ -138,6 +144,7 @@ router.post(
       next(err);
     } finally {
       client.release();
+      await marketLock?.release();
     }
   }
 );
