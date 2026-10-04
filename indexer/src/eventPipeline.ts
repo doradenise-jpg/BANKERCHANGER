@@ -201,66 +201,62 @@ export function parseEvent(event: any, ledgerSequence: number, batchId: number):
   }
 }
 
-import { validateEventSchema } from "./eventSchemas";
+import { indexerQueueDepth, indexerQueueOverflowTotal } from "./metrics";
+
+// ─── Bounded In-Memory Broadcast Queue ──────────────────────────────────────
+
+export const DEFAULT_MAX_QUEUE_DEPTH = 10000;
+
+export function getMaxQueueDepth(): number {
+  const parsed = Number(process.env.MAX_QUEUE_DEPTH);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_QUEUE_DEPTH;
+}
+
+const eventBroadcastQueue: ProcessedEvent[] = [];
+
+/** Current queued events awaiting broadcast */
+export function getEventQueue(): ProcessedEvent[] {
+  return eventBroadcastQueue;
+}
+
+/** Number of events currently in the broadcast queue */
+export function getEventQueueDepth(): number {
+  return eventBroadcastQueue.length;
+}
+
+/** Clear the queue (useful in tests and during maintenance) */
+export function clearEventQueue(): void {
+  eventBroadcastQueue.length = 0;
+  indexerQueueDepth.set(0);
+}
+
+/**
+ * Enqueues a processed event for WebSocket broadcasting.
+ * If the queue exceeds MAX_QUEUE_DEPTH, drops the oldest event
+ * and emits the indexer_queue_overflow_total metric.
+ */
+export function enqueueBroadcastEvent(event: ProcessedEvent): boolean {
+  const maxDepth = getMaxQueueDepth();
+  let dropped = false;
+
+  if (eventBroadcastQueue.length >= maxDepth) {
+    eventBroadcastQueue.shift();
+    indexerQueueOverflowTotal.inc();
+    dropped = true;
+    logger.warn(
+      { queueDepth: eventBroadcastQueue.length, maxDepth },
+      "WebSocket event broadcast queue cap reached, dropping oldest event"
+    );
+  }
+
+  eventBroadcastQueue.push(event);
+  indexerQueueDepth.set(eventBroadcastQueue.length);
+  return !dropped;
+}
 
 // ─── Event Handlers ──────────────────────────────────────────────────────────
 
-export async function handleEvent(event: ProcessedEvent): Promise<void> {
-  // Check for unknown event types (#694)
-  if (!KNOWN_EVENT_TYPES.has(event.eventType)) {
-    indexer_unknown_event_types_total[event.eventType] =
-      (indexer_unknown_event_types_total[event.eventType] || 0) + 1;
-    logger.warn(
-      {
-        eventType: event.eventType,
-        batchId: event.batchId,
-        metric: `indexer_unknown_event_types_total{type="${event.eventType}"}`,
-        count: indexer_unknown_event_types_total[event.eventType],
-      },
-      `Unknown event type "${event.eventType}" encountered; logging warning and skipping without throwing`,
-    );
-    return;
-  }
-
-  // Helper for DB write with transient retry (#699)
-  async function writeWithTransientRetry(action: () => Promise<void>) {
-    const maxRetries = 3;
-    let lastError: any = null;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        await action();
-        return;
-      } catch (err: any) {
-        lastError = err;
-        if (!isTransientDbError(err)) {
-          logger.error({ err, eventType: event.eventType }, "Non-transient DB error; failing immediately without retry");
-          throw err;
-        }
-
-        logger.warn(
-          { attempt, maxRetries, err: err.message, eventType: event.eventType },
-          "Transient DB error during event write; retrying",
-        );
-        if (attempt < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)));
-        }
-      }
-    }
-
-    // Exhausted retries: write to dead-letter log table
-    deadLetterLog.push({
-      event,
-      error: lastError?.message || String(lastError),
-      failedAt: new Date().toISOString(),
-      attempts: maxRetries,
-    });
-    logger.error({ event, err: lastError }, "Batch write exhausted transient retries; written to dead-letter log");
-    throw lastError;
-  }
-
-  const { redis } = await import("./db");
-
+async function handleEvent(event: ProcessedEvent): Promise<void> {
   switch (event.eventType) {
     case "invoice_created":
       await writeWithTransientRetry(() =>
@@ -290,17 +286,28 @@ export async function handleEvent(event: ProcessedEvent): Promise<void> {
       break;
   }
 
-  await redis.publish(
-    "indexer_events",
-    JSON.stringify({
-      type: event.eventType,
-      contractId: event.contractId,
-      ledgerSequence: event.ledgerSequence,
-      value: event.value,
-      batchId: event.batchId,
-      timestamp: event.processedAt,
-    }),
-  );
+  // Push to bounded broadcast queue
+  enqueueBroadcastEvent(event);
+
+  // Publish to WebSocket channel for real-time updates if redis is configured
+  try {
+    const { redis } = await import("./db");
+    if (redis && typeof (redis as any).publish === "function") {
+      await (redis as any).publish(
+        "indexer_events",
+        JSON.stringify({
+          type: event.eventType,
+          contractId: event.contractId,
+          ledgerSequence: event.ledgerSequence,
+          value: event.value,
+          batchId: event.batchId,
+          timestamp: event.processedAt,
+        }),
+      );
+    }
+  } catch (err) {
+    logger.debug({ err }, "Redis publish unavailable");
+  }
 }
 
 // ─── Fault-Tolerant Batch Runner ─────────────────────────────────────────────
