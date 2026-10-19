@@ -58,4 +58,18 @@ describe('BetConfirmModal', () => {
     const { container } = render(<BetConfirmModal {...makeProps({ isOpen: false })} />);
     expect(container).toBeEmptyDOMElement();
   });
+
+  it('prevents double-submission and calls onConfirm only once on multiple rapid clicks', () => {
+    const onConfirmMock = jest.fn().mockImplementation(() => new Promise(() => {}));
+    render(<BetConfirmModal {...makeProps({ onConfirm: onConfirmMock })} />);
+
+    const confirmBtn = screen.getByTestId('confirm-bet-button');
+    confirmBtn.click();
+    confirmBtn.click();
+    confirmBtn.click();
+
+    expect(onConfirmMock).toHaveBeenCalledTimes(1);
+    expect(confirmBtn).toBeDisabled();
+    expect(screen.getByText(/Awaiting wallet signature/i)).toBeInTheDocument();
+  });
 });

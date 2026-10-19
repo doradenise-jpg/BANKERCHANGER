@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { WalletConnectButton } from './WalletConnectButton';
+import { WalletButton } from './WalletButton';
 import { ThemeToggle } from './ThemeToggle';
 
 const NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
@@ -84,7 +84,7 @@ export function Header(): JSX.Element {
             </span>
 
             <ThemeToggle />
-            <WalletConnectButton />
+            <WalletButton />
 
             {/* Mobile hamburger */}
             <button

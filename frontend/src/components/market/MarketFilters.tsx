@@ -25,16 +25,24 @@ const WEIGHT_CLASSES = [
   'Minimumweight',
 ] as const;
 
+const CATEGORIES = [
+  '',
+  'Championship',
+  'Undercard',
+  'Exhibition',
+  'Main Event',
+] as const;
+
 const STATUS_TABS = [
-  { label: 'All',      value: '' },
-  { label: 'Open',     value: 'open' },
-  { label: 'Locked',   value: 'locked' },
+  { label: 'All', value: '' },
+  { label: 'Open', value: 'open' },
+  { label: 'Locked', value: 'locked' },
   { label: 'Resolved', value: 'resolved' },
 ] as const;
 
 const SORT_OPTIONS: { label: string; value: SortOption }[] = [
-  { label: 'Newest',       value: 'date_desc' },
-  { label: 'Ending Soon',  value: 'date_asc' },
+  { label: 'Newest', value: 'date_desc' },
+  { label: 'Ending Soon', value: 'date_asc' },
   { label: 'Biggest Pool', value: 'pool_desc' },
 ];
 
@@ -43,6 +51,7 @@ export interface MarketFilterValues {
   search: string;
   sort: SortOption;
   weightClass: string;
+  category?: string;
 }
 
 interface MarketFiltersProps {
@@ -53,19 +62,39 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const status      = searchParams.get('status')       ?? '';
-  const sort        = (searchParams.get('sort')        ?? 'date_desc') as SortOption;
-  const searchParam = searchParams.get('search')       ?? '';
-  // MUST match the param name read by app/page.tsx
-  const weightClass = searchParams.get('weight_class') ?? '';
+  // Initialize state directly from URL search parameters (#926)
+  const [activeStatus, setActiveStatus] = useState<string>(
+    () => searchParams?.get('status') ?? ''
+  );
+  const [activeWeightClass, setActiveWeightClass] = useState<string>(
+    () => searchParams?.get('weight_class') ?? searchParams?.get('weightClass') ?? ''
+  );
+  const [activeCategory, setActiveCategory] = useState<string>(
+    () => searchParams?.get('category') ?? ''
+  );
+  const [activeSort, setActiveSort] = useState<SortOption>(
+    () => (searchParams?.get('sort') as SortOption) || 'date_desc'
+  );
+  const [searchInput, setSearchInput] = useState<string>(
+    () => searchParams?.get('search') ?? ''
+  );
 
-  const [searchInput, setSearchInput] = useState(searchParam);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statusTabsRef = useRef<HTMLDivElement>(null);
 
+  // Sync state reactively when searchParams change (browser back/forward navigation)
+  useEffect(() => {
+    if (!searchParams) return;
+    setActiveStatus(searchParams.get('status') ?? '');
+    setActiveWeightClass(searchParams.get('weight_class') ?? searchParams.get('weightClass') ?? '');
+    setActiveCategory(searchParams.get('category') ?? '');
+    setActiveSort((searchParams.get('sort') as SortOption) || 'date_desc');
+    setSearchInput(searchParams.get('search') ?? '');
+  }, [searchParams]);
+
   const setParam = useCallback(
     (updates: Record<string, string | null>) => {
-      const params = new URLSearchParams(searchParams.toString());
+      const params = new URLSearchParams(searchParams?.toString() ?? '');
       for (const [key, value] of Object.entries(updates)) {
         if (value === null || value === '') {
           params.delete(key);
@@ -76,12 +105,8 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
       params.delete('page');
       router.replace(`?${params.toString()}`);
     },
-    [router, searchParams],
+    [router, searchParams]
   );
-
-  useEffect(() => {
-    setSearchInput(searchParam);
-  }, [searchParam]);
 
   const handleSearchChange = (value: string) => {
     setSearchInput(value);
@@ -92,11 +117,19 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
   };
 
   useEffect(() => {
-    onChange?.({ status, search: searchParam, sort, weightClass });
-  }, [status, searchParam, sort, weightClass, onChange]);
+    onChange?.({
+      status: activeStatus,
+      search: searchInput,
+      sort: activeSort,
+      weightClass: activeWeightClass,
+      category: activeCategory,
+    });
+  }, [activeStatus, searchInput, activeSort, activeWeightClass, activeCategory, onChange]);
 
   const handleStatusKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const tabs = Array.from(statusTabsRef.current?.querySelectorAll('[role="tab"]') ?? []) as HTMLElement[];
+    const tabs = Array.from(
+      statusTabsRef.current?.querySelectorAll('[role="tab"]') ?? []
+    ) as HTMLElement[];
     const currentIndex = tabs.findIndex((tab) => tab === document.activeElement);
 
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
@@ -117,14 +150,37 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
     <div className="flex flex-wrap gap-3 items-center">
       {/* Weight class dropdown */}
       <select
-        value={weightClass}
-        onChange={(e) => setParam({ weight_class: e.target.value || null })}
+        value={activeWeightClass}
+        onChange={(e) => {
+          setActiveWeightClass(e.target.value);
+          setParam({ weight_class: e.target.value || null });
+        }}
         aria-label="Filter by weight class"
         className="min-h-[44px] bg-gray-800 text-white text-sm rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-amber-500"
       >
         <option value="">All Weight Classes</option>
         {WEIGHT_CLASSES.filter(Boolean).map((w) => (
-          <option key={w} value={w}>{w}</option>
+          <option key={w} value={w}>
+            {w}
+          </option>
+        ))}
+      </select>
+
+      {/* Category dropdown */}
+      <select
+        value={activeCategory}
+        onChange={(e) => {
+          setActiveCategory(e.target.value);
+          setParam({ category: e.target.value || null });
+        }}
+        aria-label="Filter by category"
+        className="min-h-[44px] bg-gray-800 text-white text-sm rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-amber-500"
+      >
+        <option value="">All Categories</option>
+        {CATEGORIES.filter(Boolean).map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
         ))}
       </select>
 
@@ -140,13 +196,16 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
           <button
             key={tab.value}
             role="tab"
-            aria-selected={status === tab.value}
+            aria-selected={activeStatus === tab.value}
             aria-label={`Filter by ${tab.label} status`}
-            tabIndex={status === tab.value ? 0 : -1}
-            onClick={() => setParam({ status: tab.value || null })}
+            tabIndex={activeStatus === tab.value ? 0 : -1}
+            onClick={() => {
+              setActiveStatus(tab.value);
+              setParam({ status: tab.value || null });
+            }}
             className={`px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-inset ${
-              status === tab.value
-                ? 'bg-amber-500 text-black'
+              activeStatus === tab.value
+                ? 'bg-amber-500 text-black font-semibold'
                 : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
             }`}
           >
@@ -167,13 +226,18 @@ export function MarketFilters({ onChange }: Readonly<MarketFiltersProps>): JSX.E
 
       {/* Sort dropdown */}
       <select
-        value={sort}
-        onChange={(e) => setParam({ sort: e.target.value })}
+        value={activeSort}
+        onChange={(e) => {
+          setActiveSort(e.target.value as SortOption);
+          setParam({ sort: e.target.value });
+        }}
         aria-label="Sort markets"
         className="min-h-[44px] bg-gray-800 text-white text-sm rounded-lg px-3 focus:outline-none focus:ring-2 focus:ring-amber-500 ml-auto"
       >
         {SORT_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
         ))}
       </select>
     </div>
