@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================
-// BANKERCHANGER — CountdownTimer Component
+// BANKERCHANGER — CountdownTimer Component (Issue #931)
 // ============================================================
 
 import { useState, useEffect } from 'react';
@@ -26,16 +26,37 @@ function formatDDHHMMSS(ms: number): string {
 
 export function CountdownTimer({ targetDate, label }: CountdownTimerProps): JSX.Element {
   const targetMs = new Date(targetDate).getTime();
-  const [remaining, setRemaining] = useState(() => targetMs - getSynchronizedNow());
+  const [mounted, setMounted] = useState(false);
+  const [remaining, setRemaining] = useState<number>(0);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      const r = targetMs - getSynchronizedNow();
+    setMounted(true);
+    const update = () => {
+      const now = typeof getSynchronizedNow === 'function' ? getSynchronizedNow() : Date.now();
+      const r = targetMs - now;
       setRemaining(r);
+      return r;
+    };
+    const initial = update();
+    if (initial <= 0) return;
+
+    const id = setInterval(() => {
+      const r = update();
       if (r <= 0) clearInterval(id);
     }, 1000);
+
     return () => clearInterval(id);
   }, [targetMs]);
+
+  // Static placeholder during SSR and before client hydration to prevent mismatch
+  if (!mounted) {
+    return (
+      <span className="text-sm text-gray-200" aria-hidden="true">
+        {label && <span className="text-gray-400 mr-1">{label}</span>}
+        <span className="font-mono text-amber-400">--:--:--:--</span>
+      </span>
+    );
+  }
 
   if (remaining <= 0) {
     return <span className="text-sm text-gray-400">Betting Closed</span>;

@@ -6,6 +6,7 @@
 
 import { useMemo, useCallback, useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useWallet } from '../../hooks/useWallet';
 import { usePortfolio } from '../../hooks/usePortfolio';
 import { useMarkets } from '../../hooks/useMarkets';
@@ -47,10 +48,25 @@ function BettorStats({ totalStaked, totalWon, totalLost, pendingClaimsCount }: B
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+const PAGE_SIZE = 10;
+
 export default function PortfolioPage(): JSX.Element {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { isConnected } = useWallet();
   const { markets } = useMarkets();
-  const { portfolio, performance, isLoading, claimTxStatus, claimWinnings, claimRefund } = usePortfolio(markets);
+  const {
+    portfolio,
+    bets: paginatedBets,
+    performance,
+    isLoading,
+    claimTxStatus,
+    claimWinnings,
+    claimRefund,
+    hasNextPage,
+    isFetchingNextPage,
+    loadNextPage,
+  } = usePortfolio(markets);
   const [claimingAll, setClaimingAll] = useState(false);
   const toast = useToast();
 
@@ -70,6 +86,24 @@ export default function PortfolioPage(): JSX.Element {
       ...portfolio.past_bets,
     ];
   }, [paginatedBets, portfolio]);
+
+  const rawPage = searchParams.get('page');
+  const parsedPage = rawPage ? parseInt(rawPage, 10) : 1;
+  const currentPage = Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+
+  const totalBets = allBets.length;
+  const totalPages = Math.max(1, Math.ceil(totalBets / PAGE_SIZE));
+  const isOutOfRange = totalBets > 0 && currentPage > totalPages;
+
+  useEffect(() => {
+    if (isOutOfRange) {
+      router.replace('/portfolio?page=1');
+    }
+  }, [isOutOfRange, router]);
+
+  const displayedBets = useMemo(() => {
+    return allBets.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  }, [allBets, currentPage]);
 
   const handleClaimAll = useCallback(async () => {
     if (!portfolio || claimingAll) return;
@@ -113,6 +147,26 @@ export default function PortfolioPage(): JSX.Element {
         <Link href="/" className="inline-block text-amber-400 hover:text-amber-300 text-sm">
           Browse markets →
         </Link>
+      </main>
+    );
+  }
+
+  if (isOutOfRange) {
+    return (
+      <main className="max-w-4xl mx-auto px-4 py-8 space-y-8">
+        <div className="text-center py-16 space-y-4 bg-gray-900 rounded-xl border border-gray-800 p-8" data-testid="out-of-range-empty-state">
+          <p className="text-4xl">📄</p>
+          <h2 className="text-lg font-bold text-white">No bets found on page {currentPage}</h2>
+          <p className="text-gray-400 text-sm">
+            Requested page exceeds available pages ({totalPages}).
+          </p>
+          <button
+            onClick={() => router.push('/portfolio?page=1')}
+            className="min-h-[44px] px-5 rounded-xl bg-amber-500 hover:bg-amber-400 font-semibold text-black text-sm"
+          >
+            Back to first page
+          </button>
+        </div>
       </main>
     );
   }
@@ -163,13 +217,45 @@ export default function PortfolioPage(): JSX.Element {
 
       {/* Bet history */}
       <section>
-        <h2 className="text-white font-semibold mb-3">Bet History</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-white font-semibold">Bet History</h2>
+          {totalPages > 1 && (
+            <span className="text-xs text-gray-400">
+              Page {currentPage} of {totalPages}
+            </span>
+          )}
+        </div>
         <BetHistoryTable
-          bets={allBets}
+          bets={displayedBets}
           markets={marketsMap}
           onClaim={claimWinnings}
           onRefund={claimRefund}
         />
+        {totalPages > 1 && (
+          <div className="mt-4 flex items-center justify-between text-xs text-gray-400" data-testid="pagination-controls">
+            <span>
+              {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, totalBets)} of {totalBets} bets
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => router.push(`/portfolio?page=${currentPage - 1}`)}
+                disabled={currentPage <= 1}
+                aria-label="Previous page"
+                className="min-h-[32px] px-3 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed font-medium text-white transition-colors"
+              >
+                Previous
+              </button>
+              <button
+                onClick={() => router.push(`/portfolio?page=${currentPage + 1}`)}
+                disabled={currentPage >= totalPages}
+                aria-label="Next page"
+                className="min-h-[32px] px-3 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed font-medium text-white transition-colors"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
         {hasNextPage && (
           <div className="mt-6 flex justify-center">
             <button

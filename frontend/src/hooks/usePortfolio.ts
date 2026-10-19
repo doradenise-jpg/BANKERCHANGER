@@ -4,11 +4,13 @@
 // ============================================================
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query';
 import type { Market, Portfolio, TxStatus } from '../types';
 import { useWallet } from './useWallet';
 import { fetchPortfolio } from '../services/api';
 import { submitClaim, submitRefund } from '../services/wallet';
+
+const PAGE_SIZE = 25;
 
 export interface UsePortfolioResult {
   portfolio: Portfolio | null;

@@ -76,13 +76,14 @@ export function ClockWarningBanner(): JSX.Element | null {
   const { isClockInaccurate } = useServerClockSkew();
   if (!isClockInaccurate) return null;
 
-  return (
-    <div
-      role="alert"
-      className="bg-amber-900/40 border border-amber-500/50 text-amber-200 text-xs px-4 py-2 text-center"
-    >
-      ⚠️ Your system clock differs from the server by more than 60 seconds. Market countdowns and betting windows may be inaccurate.
-    </div>
+  return React.createElement(
+    'div',
+    {
+      role: 'alert',
+      className:
+        'bg-amber-900/40 border border-amber-500/50 text-amber-200 text-xs px-4 py-2 text-center',
+    },
+    '⚠️ Your system clock differs from the server by more than 60 seconds. Market countdowns and betting windows may be inaccurate.',
   );
 }
 

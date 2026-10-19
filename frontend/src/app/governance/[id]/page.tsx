@@ -3,7 +3,8 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { getConnectedAddress, voteProposal, executeProposal } from '@/services/wallet';
+import { useQueryClient } from '@tanstack/react-query';
+import { getConnectedAddress, voteProposal, executeProposal, stellarExplorerUrl } from '@/services/wallet';
 import { TxStatusToast } from '@/components/ui/TxStatusToast';
 import { useProposalVoteUpdates } from '@/hooks/useProposalVoteUpdates';
 import type { Proposal, TxStatus, VoteType } from '@/types';
@@ -23,6 +24,7 @@ const MOCK_PROPOSALS: Record<string, Proposal> = {
 
 export default function ProposalDetail({ params }: { params: { id: string } }) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const connectedAddress = getConnectedAddress();
 
   const [proposal, setProposal] = useState<Proposal | null>(null);
@@ -84,6 +86,9 @@ export default function ProposalDetail({ params }: { params: { id: string } }) {
           votesAbstain: vote === 'abstain' ? prev.votesAbstain + votingPower : prev.votesAbstain,
         };
       });
+
+      // Invalidate governance query cache
+      queryClient.invalidateQueries({ queryKey: ['proposal', proposal.id] });
     } catch (err: any) {
       setTxStatus({ hash: null, status: 'error', error: err.message });
     }
@@ -235,9 +240,25 @@ export default function ProposalDetail({ params }: { params: { id: string } }) {
                   </div>
 
                   {hasVoted && (
-                    <p className="text-center text-sm text-green-400 mt-4">
-                      Your vote has been recorded!
-                    </p>
+                    <div
+                      role="status"
+                      data-testid="vote-recorded-banner"
+                      className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-center mt-4 space-y-2"
+                    >
+                      <p className="text-sm font-semibold text-green-400">
+                        Vote recorded
+                      </p>
+                      {txStatus.hash && (
+                        <a
+                          href={stellarExplorerUrl('tx', txStatus.hash)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-blue-400 hover:text-blue-300 underline inline-flex items-center gap-1"
+                        >
+                          View on Stellar Expert ↗
+                        </a>
+                      )}
+                    </div>
                   )}
                   {proposal.status !== 'Active' && !hasVoted && (
                     <p className="text-center text-sm text-gray-500 mt-4">

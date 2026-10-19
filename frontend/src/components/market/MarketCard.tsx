@@ -44,6 +44,11 @@ export function MarketCard({ market, isNew = false }: MarketCardProps): JSX.Elem
         {market.title_fight && (
           <span className="text-xs text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-full">🏆 Title Fight</span>
         )}
+        {(BigInt(market.total_pool || '0') === 0n || parseInt(market.total_pool, 10) === 0) && (
+          <span className="text-xs text-amber-300 bg-amber-400/10 px-2 py-0.5 rounded-full" data-testid="no-bets-badge">
+            No bets yet
+          </span>
+        )}
       </div>
 
       {/* Odds bar */}

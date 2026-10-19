@@ -114,7 +114,7 @@ describe('useLeaderboard', () => {
     });
   });
 
-  it('exposes the authenticated caller''s own rank', async () => {
+  it("exposes the authenticated caller's own rank", async () => {
     render(<HookProbe />);
 
     await waitFor(() => {

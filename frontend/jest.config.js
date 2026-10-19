@@ -23,7 +23,7 @@ module.exports = {
     {
       displayName: 'components',
       testEnvironment: 'jsdom',
-      roots: ['<rootDir>/src/components'],
+      roots: ['<rootDir>/src/components', '<rootDir>/src/app'],
       testMatch: ['**/__tests__/**/*.test.[jt]s?(x)'],
       moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
       transform: sharedTransform,

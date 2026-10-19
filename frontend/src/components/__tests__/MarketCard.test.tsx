@@ -41,8 +41,13 @@ jest.mock('../market/MarketOddsBar', () => ({
 
 // Mock CountdownTimer — control output per test
 const mockCountdownState = jest.fn<string, []>();
-jest.mock('../../hooks/useMarketCountdown', () => ({
-  useMarketCountdown: () => mockCountdownState(),
+jest.mock('../ui/CountdownTimer', () => ({
+  CountdownTimer: ({ label }: { label?: string }) => (
+    <div data-testid="countdown-timer">
+      {label && <span>{label}</span>}
+      <span>{mockCountdownState()}</span>
+    </div>
+  ),
 }));
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
