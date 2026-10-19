@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { Pool } from 'pg';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -7,6 +8,47 @@ const cursorFilePath = path.join(dbPath, 'cursor.json');
 
 // Lazy database instance - only created when first accessed
 let dbInstance: Database.Database | null = null;
+let pgPool: Pool | null = null;
+
+export function getPgPool(): Pool | null {
+  if (pgPool) return pgPool;
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) return null;
+
+  pgPool = new Pool({
+    connectionString,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+  });
+
+  pgPool.on('error', (err) => {
+    console.error('[Indexer Postgres Pool Error]', err);
+  });
+
+  return pgPool;
+}
+
+export async function saveCursorPg(cursor: string, ledger?: number): Promise<void> {
+  const pool = getPgPool();
+  if (!pool) return;
+  await pool.query(
+    `INSERT INTO indexer_checkpoints (id, cursor, last_ledger, updated_at)
+     VALUES ('default', $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       cursor = EXCLUDED.cursor,
+       last_ledger = EXCLUDED.last_ledger,
+       updated_at = EXCLUDED.updated_at`,
+    [cursor, ledger ?? null],
+  );
+}
+
+export async function getCursorPg(): Promise<string | null> {
+  const pool = getPgPool();
+  if (!pool) return null;
+  const res = await pool.query(`SELECT cursor FROM indexer_checkpoints WHERE id = 'default' LIMIT 1`);
+  return res.rows[0]?.cursor ?? null;
+}
 
 /** Initialize database directory asynchronously */
 async function initializeDataDir() {

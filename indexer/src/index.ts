@@ -2,7 +2,7 @@ import app from './server';
 import { pollEvents } from './poller';
 import { initWebSocketServer } from './ws';
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 const httpServer = app.listen(PORT, () => {
   console.log(`Indexer REST API running on port ${PORT}`);

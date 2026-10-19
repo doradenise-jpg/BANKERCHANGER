@@ -337,3 +337,12 @@ sequenceDiagram
     API->>DB: Update bet status = claimed
     API-->>U: Confirmation via WebSocket
 ```
+
+## Indexer Microservice Architecture & Boundaries
+
+The standalone `indexer/` microservice is the single authoritative service responsible for polling Stellar blockchain events.
+
+- **Service Boundary**: The standalone `indexer/` service polls Soroban RPC and Horizon, writes canonical events into the shared PostgreSQL `blockchain_events` table, and updates `indexer_checkpoints`.
+- **Backend Role**: The `backend/` service does not run active polling loops; it reads event records from the shared PostgreSQL database and serves queries/WebSockets to clients.
+- **Port Assignment**: Indexer runs on port 3002 (REST & WebSocket streams) while Backend runs on port 3001.
+

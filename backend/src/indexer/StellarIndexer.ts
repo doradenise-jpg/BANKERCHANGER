@@ -1,9 +1,9 @@
 // ============================================================
 // BANKERCHANGER — Stellar Blockchain Indexer
 //
-// Listens to the Stellar network for contract events emitted
-// by MarketFactory, Market, and Treasury contracts.
-// Persists all relevant state changes to the PostgreSQL DB.
+// @deprecated Deprecated in favor of the standalone indexer microservice (/indexer).
+// The standalone microservice in /indexer is now the single authoritative indexer.
+// Backend reads events directly from the shared PostgreSQL DB (blockchain_events).
 // ============================================================
 
 import { pool } from '../config/db';
