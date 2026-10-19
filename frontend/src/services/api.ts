@@ -267,3 +267,39 @@ export async function fetchNotifications(address: string, limit = 50): Promise<U
 export async function fetchMyLeaderboardRank(): Promise<MyLeaderboardRank> {
   return apiFetch<MyLeaderboardRank>('/api/engagement/leaderboard/rank');
 }
+
+export class APIError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'APIError';
+  }
+}
+
+export interface OutcomeOdds {
+  outcome: string;
+  multiplier: number;
+  implied_probability: number;
+  pool: string;
+  total_pool: string;
+}
+
+export interface MarketOdds {
+  market_id: string;
+  fighter_a: OutcomeOdds;
+  fighter_b: OutcomeOdds;
+  draw: OutcomeOdds;
+  total_pool: string;
+}
+
+/** GET /api/markets/:market_id/odds — live parimutuel odds for a market */
+export async function fetchOdds(
+  market_id: string,
+  outcome?: 'fighter_a' | 'fighter_b' | 'draw',
+): Promise<MarketOdds | OutcomeOdds> {
+  const qs = outcome ? `?outcome=${outcome}` : '';
+  return apiFetch<MarketOdds | OutcomeOdds>(`/api/markets/${market_id}/odds${qs}`);
+}
+

@@ -7,13 +7,17 @@ if (!process.env.NEXT_PUBLIC_API_URL) {
 
 const nextConfig = {
   async headers() {
+    const isProd = process.env.NODE_ENV === 'production';
+    const scriptSrc = isProd ? "'self' 'unsafe-inline'" : "'self' 'unsafe-inline' 'unsafe-eval'";
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+
     const cspHeader = `
       default-src 'self';
-      script-src 'self' 'unsafe-inline' 'unsafe-eval';
+      script-src ${scriptSrc};
       style-src 'self' 'unsafe-inline';
       img-src 'self' data: https:;
       font-src 'self' data:;
-      connect-src 'self' https://horizon-testnet.stellar.org https://horizon.stellar.org https://soroban-testnet.stellar.org https://soroban-rpc.stellar.org;
+      connect-src 'self' ${apiUrl} https://horizon-testnet.stellar.org https://horizon.stellar.org https://soroban-testnet.stellar.org https://soroban-rpc.stellar.org wss: ws:;
       frame-ancestors 'none';
       object-src 'none';
     `.replace(/\n/g, '').replace(/\s+/g, ' ').trim();

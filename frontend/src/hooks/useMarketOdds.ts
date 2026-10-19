@@ -5,7 +5,7 @@
 // ============================================================
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { fetchOdds, type MarketOdds, type OutcomeOdds } from '../../lib/api';
+import { fetchOdds, type MarketOdds, type OutcomeOdds } from '../services/api';
 import type { MarketStatus } from '../types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';

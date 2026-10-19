@@ -7,7 +7,7 @@ import { MarketStatusBadge } from '../../../components/market/MarketStatusBadge'
 import { CountdownTimer } from '../../../components/ui/CountdownTimer';
 import { FighterCard } from '../../../components/market/FighterCard';
 import { OddsDisplay } from '../../../components/market/OddsDisplay';
-import { PoolBar } from '../../../components/market/PoolBar';
+import { MarketOddsBar } from '../../../components/market/MarketOddsBar';
 import { BetForm } from '../../../components/bet/BetForm';
 import { BetList } from '../../../components/bet/BetList';
 import { stellarExplorerUrl } from '../../../services/wallet';
@@ -105,12 +105,13 @@ export default function MarketDetailContent({ market_id }: { market_id: string }
       />
 
       {/* Pool proportion bar */}
-      <PoolBar
+      <MarketOddsBar
         pool_a={market.pool_a}
         pool_b={market.pool_b}
         pool_draw={market.pool_draw}
         fighter_a={market.fighter_a}
         fighter_b={market.fighter_b}
+        size="lg"
       />
 
       {/* Main content grid */}
