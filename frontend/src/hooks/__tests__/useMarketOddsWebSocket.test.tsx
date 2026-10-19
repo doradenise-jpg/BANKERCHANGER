@@ -66,5 +66,8 @@ describe('useMarketOdds with WebSocket', () => {
 
     expect(result.current.odds).toEqual(updatedOdds);
     expect(result.current.isStale).toBe(false);
+    expect(result.current.isConnected).toBe(true);
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'subscribe_market', marketId: 'market-123' }));
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'join_market', marketId: 'market-123' }));
   });
 });

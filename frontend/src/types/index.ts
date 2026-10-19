@@ -150,4 +150,7 @@ export interface UserNotification {
 }
 export interface MyLeaderboardRank {
   rank: number;
+  score?: number;
+  xp?: number;
+  winRate?: number;
 }

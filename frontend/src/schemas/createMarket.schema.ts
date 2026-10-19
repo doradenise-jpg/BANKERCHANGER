@@ -17,10 +17,10 @@ export const createMarketSchema = z
   .refine(
     (data) => {
       const startMs = new Date(data.startTime).getTime();
-      return !isNaN(startMs) && startMs > Date.now();
+      return !isNaN(startMs) && startMs >= Date.now() + 3600 * 1000;
     },
     {
-      message: 'Start Time must be in the future',
+      message: 'Start time must be at least 1 hour in the future',
       path: ['startTime'],
     },
   )

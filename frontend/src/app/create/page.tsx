@@ -166,6 +166,7 @@ export default function CreateMarketPage() {
           <input
             {...register('startTime')}
             type="datetime-local"
+            min={new Date(Date.now() + 3600 * 1000).toISOString().slice(0, 16)}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
           />
           {errors.startTime && (

@@ -21,6 +21,7 @@ export interface UseMarketOddsResult {
   isLoading: boolean;
   error: Error | null;
   isStale: boolean;
+  isConnected: boolean;
   lastUpdatedAt: number | null;
 }
 
@@ -38,15 +39,33 @@ export function useMarketOdds(
   const [error, setError] = useState<Error | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [isStale, setIsStale] = useState<boolean>(false);
+  const [isConnected, setIsConnected] = useState<boolean>(false);
 
   const socketRef = useRef<WebSocket | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const updateOdds = useCallback((newOdds: MarketOdds) => {
     setOdds(newOdds);
     setLastUpdatedAt(Date.now());
     setIsStale(false);
     setIsLoading(false);
+  }, []);
+
+  const startFallbackPolling = useCallback(() => {
+    if (pollIntervalRef.current) return;
+    pollIntervalRef.current = setInterval(() => {
+      fetchOdds(marketId)
+        .then((data) => updateOdds(data as MarketOdds))
+        .catch(() => {});
+    }, 10_000);
+  }, [marketId, updateOdds]);
+
+  const stopFallbackPolling = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
   }, []);
 
   // Periodic staleness check
@@ -100,7 +119,11 @@ export function useMarketOdds(
         socketRef.current = ws;
 
         ws.onopen = () => {
+          setIsConnected(true);
+          stopFallbackPolling();
+          // Re-emit subscription messages for active room upon socket open
           ws?.send(JSON.stringify({ type: 'subscribe_market', marketId }));
+          ws?.send(JSON.stringify({ type: 'join_market', marketId }));
         };
 
         ws.onmessage = (event: MessageEvent) => {
@@ -120,14 +143,25 @@ export function useMarketOdds(
           }
         };
 
+        ws.onclose = () => {
+          setIsConnected(false);
+          startFallbackPolling();
+        };
+
         ws.onerror = () => {
+          setIsConnected(false);
+          startFallbackPolling();
           // Fall back gracefully to SSE if WebSocket errors
           connectSSE();
         };
       } catch {
+        setIsConnected(false);
+        startFallbackPolling();
         connectSSE();
       }
     } else {
+      setIsConnected(false);
+      startFallbackPolling();
       connectSSE();
     }
 
@@ -149,13 +183,15 @@ export function useMarketOdds(
         es.onerror = () => {
           es.close();
           esRef.current = null;
+          startFallbackPolling();
         };
       } catch {
-        // SSE unsupported or network error
+        startFallbackPolling();
       }
     }
 
     return () => {
+      stopFallbackPolling();
       if (ws) {
         ws.close();
         socketRef.current = null;
@@ -165,7 +201,7 @@ export function useMarketOdds(
         esRef.current = null;
       }
     };
-  }, [marketId, status, updateOdds]);
+  }, [marketId, status, updateOdds, startFallbackPolling, stopFallbackPolling]);
 
   return {
     odds,
@@ -173,6 +209,7 @@ export function useMarketOdds(
     isLoading,
     error,
     isStale,
+    isConnected,
     lastUpdatedAt,
   };
 }
