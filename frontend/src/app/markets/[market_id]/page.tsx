@@ -16,7 +16,7 @@ export async function generateMetadata({ params }: MarketDetailPageProps): Promi
     const market = await fetchMarketById(params.market_id);
     const base = process.env.NEXT_PUBLIC_BASE_URL || 'https://bankerchanger.com';
     const url = `${base}/markets/${params.market_id}`;
-    const title = `${market.fighter_a} vs ${market.fighter_b} — Bet on BANKERCHANGER`;
+    const title = `${market.fighter_a} vs ${market.fighter_b} — Boxing Prediction Market`;
     const description = `Bet on ${market.fighter_a} vs ${market.fighter_b} — ${market.weight_class}${market.title_fight ? ' Title Fight' : ''} on BANKERCHANGER.`;
     const imageUrl = `${base}/api/og?market=${params.market_id}`;
 

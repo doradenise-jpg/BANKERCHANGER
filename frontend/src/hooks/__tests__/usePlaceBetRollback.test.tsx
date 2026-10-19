@@ -67,6 +67,25 @@ describe('usePlaceBet Optimistic Rollback', () => {
     expect(restoredPortfolio).toEqual(initialPortfolio);
 
     // Check toast notification
-    expect(mockToast.error).toHaveBeenCalledWith('Bet failed — your balance has been restored');
+    expect(mockToast.error).toHaveBeenCalledWith('Bet failed: On-chain tx failed. Your balance has been restored.');
+  });
+
+  it('invalidates market and portfolio queries on error rollback', async () => {
+    const invalidateSpy = jest.spyOn(queryClient, 'invalidateQueries');
+    jest.spyOn(walletService, 'submitBetWithStages').mockRejectedValueOnce(new Error('User rejected'));
+
+    const { result } = renderHook(() => usePlaceBet(), { wrapper });
+
+    await act(async () => {
+      try {
+        await result.current.placeBet('market-2', 'fighter_b', 25);
+      } catch {
+        // Expected
+      }
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['market', 'market-2'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['portfolio', 'GTEST1234567890'] });
   });
 });
+

@@ -98,7 +98,7 @@ export function usePlaceBet(): UsePlaceBetResult {
 
       return { previousPortfolio, previousBets, timeoutId };
     },
-    onError: (err, _variables, context) => {
+    onError: (err, variables, context) => {
       const msg = err?.message ?? 'Transaction failed';
       setError(msg);
       setTxStatus({ hash: null, status: 'error', error: msg });
@@ -112,8 +112,16 @@ export function usePlaceBet(): UsePlaceBetResult {
         queryClient.setQueryData(['bets', address], context.previousBets);
       }
 
-      // Notify user of rollback
-      toast.error('Bet failed — your balance has been restored');
+      // Invalidate queries to prevent stale odds and portfolio state
+      if (variables?.market_id) {
+        queryClient.invalidateQueries({ queryKey: ['market', variables.market_id] });
+      }
+      if (address) {
+        queryClient.invalidateQueries({ queryKey: ['portfolio', address] });
+      }
+
+      // Notify user of rollback with informative message
+      toast.error(`Bet failed: ${msg}. Your balance has been restored.`);
     },
     onSuccess: (hash, { market_id }) => {
       setTxStatus({ hash, status: 'success', error: null });

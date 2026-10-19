@@ -69,3 +69,22 @@ test('submit proceeds for an unclaimed bet', async () => {
   );
   await waitFor(() => expect(result.current.hasClaimed).toBe(true));
 });
+
+test('claim failure reverts state and does not leave button in claimed state', async () => {
+  (api.fetchBetsByMarket as jest.Mock).mockResolvedValue([
+    { market_id: marketId, address, claimed: false },
+  ]);
+  (wallet.submitClaimWithStages as jest.Mock).mockRejectedValueOnce(
+    new Error('Out of gas or contract error'),
+  );
+
+  const { result } = renderHook(() => useClaimWinnings(address));
+
+  await act(async () => {
+    await result.current.claimWinnings(marketId);
+  });
+
+  expect(result.current.hasClaimed).toBe(false);
+  expect(result.current.error).toBe('Out of gas or contract error');
+  expect(result.current.txStatus.status).toBe('error');
+});

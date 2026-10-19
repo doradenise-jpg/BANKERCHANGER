@@ -9,6 +9,7 @@ import {
 } from '../services/wallet';
 import type { WalletType } from '../services/wallet';
 import { useAppStore } from '../store';
+import { queryClient } from '../providers/QueryProvider';
 
 export interface UseWalletResult {
   address: string | null;
@@ -34,13 +35,64 @@ export function useWallet(): UseWalletResult {
     albedo: false,
   });
 
+  const disconnect = useCallback(() => {
+    disconnectWallet();
+    sessionStorage.removeItem(STORAGE_KEY);
+    clearWallet();
+    queryClient.resetQueries();
+  }, [clearWallet]);
+
   useEffect(() => {
     const stored = getConnectedAddress();
     if (stored) {
       getWalletBalance().then((bal) => setWallet(stored, bal)).catch(() => {});
     }
     setAvailableWallets(detectWallets());
-  }, []);
+  }, [setWallet]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+
+    const checkFreighter = async () => {
+      try {
+        const freighter = typeof window !== 'undefined' ? (window as any).freighter : null;
+        if (!freighter) return;
+
+        const isConnected = await freighter.isConnected?.();
+        if (isConnected === false && walletAddress) {
+          disconnect();
+          return;
+        }
+
+        const pkResult = await freighter.getPublicKey?.();
+        const currentKey = typeof pkResult === 'string' ? pkResult : pkResult?.publicKey;
+
+        if (currentKey && currentKey !== walletAddress) {
+          sessionStorage.setItem(STORAGE_KEY, currentKey);
+          const bal = await getWalletBalance().catch(() => null);
+          setWallet(currentKey, bal);
+          queryClient.invalidateQueries({ queryKey: ['portfolio'] });
+          queryClient.invalidateQueries({ queryKey: ['bets'] });
+        } else if (!currentKey && walletAddress) {
+          disconnect();
+        }
+      } catch {
+        // ignore errors during background check
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      interval = setInterval(checkFreighter, 2000);
+      window.addEventListener('focus', checkFreighter);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', checkFreighter);
+      }
+    };
+  }, [walletAddress, disconnect, setWallet]);
 
   const connect = useCallback(async () => {
     setError(null);
@@ -71,12 +123,6 @@ export function useWallet(): UseWalletResult {
       useAppStore.setState({ isConnecting: false });
     }
   }, [setWallet]);
-
-  const disconnect = useCallback(() => {
-    disconnectWallet();
-    sessionStorage.removeItem(STORAGE_KEY);
-    clearWallet();
-  }, [clearWallet]);
 
   return {
     address: walletAddress,

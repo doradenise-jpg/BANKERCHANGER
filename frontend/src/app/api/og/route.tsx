@@ -68,6 +68,18 @@ export async function GET(request: Request) {
           </div>
         </div>
 
+        {/* Odds & Logos / Branding Bar */}
+        {(market.odds_a != null || market.odds_b != null) && (
+          <div style={{ display: 'flex', gap: 32, fontSize: 32, fontWeight: 700 }}>
+            <div style={{ display: 'flex', color: '#10b981' }}>
+              {market.fighter_a}: {market.odds_a ? `${(market.odds_a / 100).toFixed(1)}%` : '—'}
+            </div>
+            <div style={{ display: 'flex', color: '#3b82f6' }}>
+              {market.fighter_b}: {market.odds_b ? `${(market.odds_b / 100).toFixed(1)}%` : '—'}
+            </div>
+          </div>
+        )}
+
         {/* Meta row */}
         <div
           style={{

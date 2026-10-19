@@ -108,6 +108,8 @@ export function useClaimWinnings(
         );
       } catch (e: any) {
         const msg = e?.message ?? 'Claim failed';
+        claimedRef.current = false;
+        setHasClaimed(false);
         setError(msg);
         update({ hash: null, status: 'error', error: msg });
       } finally {

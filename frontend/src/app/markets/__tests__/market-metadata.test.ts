@@ -36,10 +36,10 @@ describe('Market Detail Page Metadata', () => {
 
     const metadata = await generateMetadata({ params: { market_id: 'test-market-123' } });
 
-    expect(metadata.title).toBe('Jon Doe vs Jane Smith — Bet on BANKERCHANGER');
+    expect(metadata.title).toBe('Jon Doe vs Jane Smith — Boxing Prediction Market');
     expect(metadata.description).toContain('Jon Doe vs Jane Smith');
     expect(metadata.canonical).toContain('/markets/test-market-123');
-    expect(metadata.openGraph?.title).toBe('Jon Doe vs Jane Smith — Bet on BANKERCHANGER');
+    expect(metadata.openGraph?.title).toBe('Jon Doe vs Jane Smith — Boxing Prediction Market');
     expect(metadata.openGraph?.description).toContain('Heavyweight');
     expect(metadata.openGraph?.type).toBe('website');
     expect(metadata.openGraph?.url).toContain('/markets/test-market-123');
@@ -77,7 +77,7 @@ describe('Market Detail Page Metadata', () => {
     const metadata = await generateMetadata({ params: { market_id: 'test-market-456' } });
 
     expect(metadata.twitter?.card).toBe('summary_large_image');
-    expect(metadata.twitter?.title).toBe('Fighter A vs Fighter B — Bet on BANKERCHANGER');
+    expect(metadata.twitter?.title).toBe('Fighter A vs Fighter B — Boxing Prediction Market');
     expect(metadata.twitter?.description).toContain('Middleweight');
     expect(metadata.twitter?.images).toHaveLength(1);
   });
