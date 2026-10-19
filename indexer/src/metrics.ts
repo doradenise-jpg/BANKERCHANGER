@@ -173,3 +173,10 @@ export const indexerGapBackfillTotal = new MetricCounter(
   'indexer_gap_backfill_total',
   'Total number of missing ledgers backfilled'
 );
+
+/** Gauge tracking the size of resync gaps when continuity resync is triggered. */
+export const indexerResyncGapSize = new MetricGauge(
+  'indexer_resync_gap_size',
+  'Number of missing ledgers detected during continuity gap resync'
+);
+

@@ -132,10 +132,33 @@ export class ResilientWsClient {
 
 // ── WebSocket Server for Downstream Consumers ────────────────────────────────
 
+const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
+const SLOW_CLIENT_THRESHOLD = 256 * 1024; // 256KB
+let heartbeatInterval: NodeJS.Timeout | null = null;
+
 export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
   wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
+  // 30s ping/pong heartbeat to prune dead connections
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(() => {
+    if (!wss) return;
+    for (const client of wss.clients) {
+      if ((client as any).isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      (client as any).isAlive = false;
+      client.ping();
+    }
+  }, 30000);
+
   wss.on('connection', (socket: WebSocket) => {
+    (socket as any).isAlive = true;
+    socket.on('pong', () => {
+      (socket as any).isAlive = true;
+    });
+
     socket.send(
       JSON.stringify({
         type: 'connected',
@@ -148,15 +171,28 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
   return wss;
 }
 
-/** Send a message to every currently connected WebSocket client. */
+/** Send a message to every currently connected WebSocket client with backpressure handling. */
 export function broadcast(message: StreamMessage): void {
   if (!wss) return;
 
   const payload = JSON.stringify(message);
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
+    if (client.readyState !== WebSocket.OPEN) continue;
+
+    // Terminate unresponsive sockets exceeding MAX_BUFFER_SIZE (1MB)
+    if (client.bufferedAmount > MAX_BUFFER_SIZE) {
+      logger.warn({ bufferedAmount: client.bufferedAmount }, 'Terminating slow client exceeding MAX_BUFFER_SIZE');
+      client.terminate();
+      continue;
     }
+
+    // Drop non-critical updates if client buffer is filling up
+    if (client.bufferedAmount > SLOW_CLIENT_THRESHOLD && message.type === 'market_update') {
+      logger.debug({ bufferedAmount: client.bufferedAmount }, 'Dropping non-critical message for slow client');
+      continue;
+    }
+
+    client.send(payload);
   }
 }
 
@@ -166,6 +202,10 @@ export function getConnectedClientCount(): number {
 
 /** Test/shutdown helper to reset module state between runs. */
 export function closeWebSocketServer(): void {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
   if (wss) {
     for (const client of wss.clients) {
       client.terminate();
@@ -174,3 +214,4 @@ export function closeWebSocketServer(): void {
     wss = null;
   }
 }
+

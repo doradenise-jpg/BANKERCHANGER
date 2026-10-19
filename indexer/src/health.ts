@@ -68,17 +68,26 @@ export function updateLatestNetworkLedger(networkLedger: number): void {
  * { status, ledger_lag, last_processed_ledger, latest_network_ledger }
  */
 export function getHealthResponse(): {
-  status: 'healthy' | 'unhealthy';
+  status: 'healthy' | 'degraded' | 'unhealthy';
   ledger_lag: number;
+  ledger_lag_seconds: number;
   last_processed_ledger: number | null;
   latest_network_ledger: number | null;
 } {
-  const ready = isReady();
   const lag = getLedgerLag();
+  const lagSeconds = state.lastUpdate ? Math.floor((Date.now() - state.lastUpdate.getTime()) / 1000) : 0;
+
+  let status: 'healthy' | 'degraded' | 'unhealthy' = 'healthy';
+  if (state.lastLedger === null || lagSeconds > 600) {
+    status = 'unhealthy';
+  } else if (lagSeconds > 120) {
+    status = 'degraded';
+  }
 
   return {
-    status: ready ? 'healthy' : 'unhealthy',
+    status,
     ledger_lag: lag,
+    ledger_lag_seconds: lagSeconds,
     last_processed_ledger: state.lastLedger,
     latest_network_ledger: state.latestNetworkLedger,
   };

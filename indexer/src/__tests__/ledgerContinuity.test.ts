@@ -42,12 +42,26 @@ describe('detectLedgerAnomaly', () => {
   });
 });
 
-describe('computeResyncStartLedger', () => {
-  it('rewinds by REORG_REWIND_LEDGERS', () => {
-    expect(computeResyncStartLedger(1000)).toBe(1000 - REORG_REWIND_LEDGERS);
-  });
+describe('computeResyncRange', () => {
+  const { computeResyncRange } = require('../ledgerContinuity');
 
-  it('never returns a ledger below 1', () => {
-    expect(computeResyncStartLedger(2)).toBe(1);
+  it('correctly partitions a synthetic 500-ledger gap without omitting any ledgers', () => {
+    const lastProcessed = 1000;
+    const current = 1500; // 500 missing ledgers: 1001 to 1500
+    const res = computeResyncRange(lastProcessed, current, 100);
+
+    expect(res.startLedger).toBe(1001);
+    expect(res.endLedger).toBe(1500);
+    expect(res.totalGaps).toBe(500);
+    expect(res.batches.length).toBe(5);
+
+    // Verify all 500 ledgers are present in sequence
+    let expectedStart = 1001;
+    for (const batch of res.batches) {
+      expect(batch.from).toBe(expectedStart);
+      expectedStart = batch.to + 1;
+    }
+    expect(expectedStart).toBe(1501);
   });
 });
+
