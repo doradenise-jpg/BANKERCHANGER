@@ -9,6 +9,8 @@
  * - Post-maintenance backfill is automatically queued
  */
 
+import { indexerReorgDetectedTotal } from './metrics';
+
 /** How many ledgers to rewind and re-fetch once a re-org is detected. */
 export const REORG_REWIND_LEDGERS = 5;
 
@@ -200,6 +202,7 @@ export function detectLedgerAnomaly(
   }
 
   if (eventLedger < lastProcessedLedger) {
+    indexerReorgDetectedTotal.inc();
     return { type: 'reorg', fromLedger: lastProcessedLedger, toLedger: eventLedger };
   }
 

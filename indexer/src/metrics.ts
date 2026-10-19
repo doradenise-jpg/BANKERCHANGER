@@ -173,3 +173,54 @@ export const indexerGapBackfillTotal = new MetricCounter(
   'indexer_gap_backfill_total',
   'Total number of missing ledgers backfilled'
 );
+
+/** Counter tracking re-org ledgers encountered (Issue #911). */
+export const indexerReorgDetectedTotal = new MetricCounter(
+  'indexer_reorg_detected_total',
+  'Total number of ledger re-orgs detected by the indexer'
+);
+
+/** Counter tracking RPC rate limit (HTTP 429) events (Issue #911, #913). */
+export const indexerRpcRateLimitTotal = new MetricCounter(
+  'indexer_rpc_rate_limit_total',
+  'Total number of RPC HTTP 429 rate limit events encountered'
+);
+
+/** Gauge tracking process resident memory bytes / heap memory (Issue #912). */
+export const indexerProcessHeapBytes = new MetricGauge(
+  'indexer_process_heap_bytes',
+  'Process memory heap used in bytes'
+);
+
+/** Renders all Prometheus metrics in text format for /metrics endpoint. */
+export function getMetricsPrometheusFormat(): string {
+  if (typeof process !== 'undefined' && process.memoryUsage) {
+    indexerProcessHeapBytes.set(process.memoryUsage().heapUsed);
+  }
+  return [
+    `# HELP indexer_queue_overflow_total ${indexerQueueOverflowTotal.help}`,
+    `# TYPE indexer_queue_overflow_total counter`,
+    `indexer_queue_overflow_total ${indexerQueueOverflowTotal.get()}`,
+    `# HELP indexer_queue_depth ${indexerQueueDepth.help}`,
+    `# TYPE indexer_queue_depth gauge`,
+    `indexer_queue_depth ${indexerQueueDepth.get()}`,
+    `# HELP indexer_ledger_lag ${indexerLedgerLag.help}`,
+    `# TYPE indexer_ledger_lag gauge`,
+    `indexer_ledger_lag ${indexerLedgerLag.get()}`,
+    `# HELP indexer_reorg_detected_total ${indexerReorgDetectedTotal.help}`,
+    `# TYPE indexer_reorg_detected_total counter`,
+    `indexer_reorg_detected_total ${indexerReorgDetectedTotal.get()}`,
+    `# HELP indexer_rpc_rate_limit_total ${indexerRpcRateLimitTotal.help}`,
+    `# TYPE indexer_rpc_rate_limit_total counter`,
+    `indexer_rpc_rate_limit_total ${indexerRpcRateLimitTotal.get()}`,
+    `# HELP indexer_process_heap_bytes ${indexerProcessHeapBytes.help}`,
+    `# TYPE indexer_process_heap_bytes gauge`,
+    `indexer_process_heap_bytes ${indexerProcessHeapBytes.get()}`,
+    `# HELP indexer_poll_failures_total ${indexerPollFailuresTotal.help}`,
+    `# TYPE indexer_poll_failures_total counter`,
+    `indexer_poll_failures_total ${indexerPollFailuresTotal.get()}`,
+    `# HELP indexer_gap_backfill_total ${indexerGapBackfillTotal.help}`,
+    `# TYPE indexer_gap_backfill_total counter`,
+    `indexer_gap_backfill_total ${indexerGapBackfillTotal.get()}`,
+  ].join('\n') + '\n';
+}

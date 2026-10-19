@@ -417,3 +417,5 @@ export function upsertBetPlaced(bet: BetPlacedRecord): void {
     bet.oddsTimestamp,
   );
 }
+
+export { recordProcessedEvent, isEventProcessed, eventDedupCache, EventDedupCache } from './poller';

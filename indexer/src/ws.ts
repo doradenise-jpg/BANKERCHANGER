@@ -132,10 +132,111 @@ export class ResilientWsClient {
 
 // ── WebSocket Server for Downstream Consumers ────────────────────────────────
 
+export const MAX_SUBSCRIPTIONS_PER_CLIENT = 50;
+export const MAX_MESSAGES_PER_SECOND_PER_IP = 20;
+export const MARKET_ID_REGEX = /^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+const ipMessageTimestamps = new Map<string, number[]>();
+
+export function checkIpRateLimit(ip: string, now: number = Date.now()): boolean {
+  let timestamps = ipMessageTimestamps.get(ip);
+  if (!timestamps) {
+    timestamps = [];
+    ipMessageTimestamps.set(ip, timestamps);
+  }
+  const cutoff = now - 1000;
+  timestamps = timestamps.filter((t) => t > cutoff);
+  if (timestamps.length >= MAX_MESSAGES_PER_SECOND_PER_IP) {
+    ipMessageTimestamps.set(ip, timestamps);
+    return false;
+  }
+  timestamps.push(now);
+  ipMessageTimestamps.set(ip, timestamps);
+  return true;
+}
+
+export function resetIpRateLimits(): void {
+  ipMessageTimestamps.clear();
+}
+
+export function handleClientMessage(
+  socket: { send: (data: string) => void },
+  raw: string | object,
+  clientSubscriptions: Set<string>,
+  ip: string = '127.0.0.1'
+): boolean {
+  if (!checkIpRateLimit(ip)) {
+    socket.send(
+      JSON.stringify({
+        type: 'error',
+        error: 'Rate limit exceeded: max 20 messages per second',
+      })
+    );
+    return false;
+  }
+
+  const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (msg.type === 'subscribe' || msg.type === 'subscribe_market') {
+    const marketId = msg.market_id || msg.marketId || msg.room;
+    if (marketId) {
+      if (!MARKET_ID_REGEX.test(String(marketId))) {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            error: 'Invalid market_id format: must be numeric or UUID',
+          })
+        );
+        return false;
+      }
+      if (
+        clientSubscriptions.size >= MAX_SUBSCRIPTIONS_PER_CLIENT &&
+        !clientSubscriptions.has(String(marketId))
+      ) {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            error: `Subscription limit reached: maximum ${MAX_SUBSCRIPTIONS_PER_CLIENT} active subscriptions permitted`,
+          })
+        );
+        return false;
+      }
+      clientSubscriptions.add(String(marketId));
+      socket.send(
+        JSON.stringify({
+          type: 'subscribed',
+          market_id: marketId,
+          active_subscriptions: clientSubscriptions.size,
+        })
+      );
+      return true;
+    }
+  } else if (msg.type === 'unsubscribe' || msg.type === 'unsubscribe_market') {
+    const marketId = msg.market_id || msg.marketId || msg.room;
+    if (marketId) {
+      clientSubscriptions.delete(String(marketId));
+      socket.send(
+        JSON.stringify({
+          type: 'unsubscribed',
+          market_id: marketId,
+          active_subscriptions: clientSubscriptions.size,
+        })
+      );
+      return true;
+    }
+  }
+  return true;
+}
+
 export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
   wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
-  wss.on('connection', (socket: WebSocket) => {
+  wss.on('connection', (socket: WebSocket, req: any) => {
+    const ip =
+      (req?.headers?.['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+      req?.socket?.remoteAddress ||
+      '127.0.0.1';
+    const clientSubscriptions = new Set<string>();
+
     socket.send(
       JSON.stringify({
         type: 'connected',
@@ -143,6 +244,14 @@ export function initWebSocketServer(httpServer: HttpServer): WebSocketServer {
         data: { message: 'subscribed to indexer event stream' },
       } satisfies StreamMessage)
     );
+
+    socket.on('message', (raw: any) => {
+      try {
+        handleClientMessage(socket, raw.toString(), clientSubscriptions, ip);
+      } catch {
+        // Ignore unparseable frames
+      }
+    });
   });
 
   return wss;

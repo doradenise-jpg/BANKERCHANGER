@@ -5,6 +5,7 @@ import { detectLedgerAnomaly, computeResyncStartLedger } from './ledgerContinuit
 import { calculateBackoff, loadBackoffConfigFromEnv } from './backoff';
 import { broadcast } from './ws';
 import { acquireDistributedLock } from './distributedLock';
+import { indexerReorgDetectedTotal, indexerRpcRateLimitTotal } from './metrics';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -83,6 +84,61 @@ export function getIndexerDuplicateEventsSkippedTotal(): number {
 
 export function resetIndexerDuplicateEventsSkippedTotal(): void {
   indexer_duplicate_events_skipped_total = 0;
+}
+
+// ── Event Deduplication Cache (LRU capped at 50,000 entries - Issue #912) ────
+export class EventDedupCache {
+  private cache = new Map<string, number>();
+  private readonly maxSize: number;
+
+  constructor(maxSize: number = 50_000) {
+    this.maxSize = maxSize;
+  }
+
+  has(key: string): boolean {
+    return this.cache.has(key);
+  }
+
+  add(key: string): void {
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.cache.delete(oldestKey);
+      }
+    }
+    this.cache.set(key, Date.now());
+  }
+
+  size(): number {
+    return this.cache.size;
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+export const eventDedupCache = new EventDedupCache(50_000);
+
+export function recordProcessedEvent(
+  txHash: string,
+  eventIndex: number,
+  eventType?: string,
+  ledger?: number,
+  value?: string
+): boolean {
+  const key = `${txHash}:${eventIndex}`;
+  if (eventDedupCache.has(key)) {
+    return false;
+  }
+  eventDedupCache.add(key);
+  return true;
+}
+
+export function isEventProcessed(txHash: string, eventIndex: number): boolean {
+  return eventDedupCache.has(`${txHash}:${eventIndex}`);
 }
 
 // ── Exponential backoff strategy (tunable via POLLER_*_BACKOFF_MS env vars) ─
@@ -221,7 +277,37 @@ export async function pollEvents() {
           paginatedRequest.startLedger = request.startLedger;
         }
 
-        const response = await server.getEvents(paginatedRequest);
+        let response: any;
+        try {
+          response = await server.getEvents(paginatedRequest);
+        } catch (err: any) {
+          const isRateLimit =
+            err?.status === 429 ||
+            err?.statusCode === 429 ||
+            err?.response?.status === 429 ||
+            err?.message?.includes('429');
+
+          if (isRateLimit) {
+            indexerRpcRateLimitTotal.inc();
+            const retryHeader =
+              err?.response?.headers?.get?.('retry-after') ||
+              err?.response?.headers?.['retry-after'] ||
+              err?.headers?.['retry-after'];
+            let delaySeconds = 5;
+            if (retryHeader) {
+              const parsed = parseInt(String(retryHeader), 10);
+              if (!isNaN(parsed) && parsed > 0) {
+                delaySeconds = parsed;
+              }
+            }
+            log('warn', `RPC rate limited (HTTP 429); backing off for ${delaySeconds}s`, {
+              retryAfterSeconds: delaySeconds,
+            });
+            await new Promise((r) => setTimeout(r, delaySeconds * 1000));
+            continue;
+          }
+          throw err;
+        }
 
         // Process all events on this page grouped by ledger sequence
         if (response.events && response.events.length > 0) {
@@ -237,6 +323,7 @@ export async function pollEvents() {
               const anomaly = detectLedgerAnomaly(eventLedger, lastProcessedLedger);
 
               if (anomaly.type === 'reorg') {
+                indexerReorgDetectedTotal.inc();
                 pollerHealth.reorgsDetected++;
                 pollerHealth.lastReorgAt = new Date().toISOString();
                 log('warn', 'Ledger re-org detected; discarding cursor and re-syncing from a safe ledger', {

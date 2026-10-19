@@ -4,6 +4,7 @@ import { Server } from 'http';
 import { getInvoices, getInvoiceById } from './db';
 import { getPollerHealth } from './poller';
 import { isLive, isReady, getReadinessDetails, getHealthResponse } from './health';
+import { getMetricsPrometheusFormat } from './metrics';
 
 const app = express();
 
@@ -207,6 +208,11 @@ app.get('/invoice/:id', (req: Request, res: Response): void => {
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+app.get('/metrics', (req: Request, res: Response): void => {
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+  res.send(getMetricsPrometheusFormat());
 });
 
 export default app;
