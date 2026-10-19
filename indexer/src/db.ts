@@ -55,9 +55,57 @@ function getDb(): Database.Database {
       last_ledger INTEGER,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS blockchain_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contract_address TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload TEXT,
+      ledger_sequence INTEGER NOT NULL,
+      ledger_close_time TEXT NOT NULL,
+      transaction_hash TEXT NOT NULL,
+      event_index INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_blockchain_events_tx_idx ON blockchain_events (transaction_hash, event_index);
   `);
 
   return dbInstance;
+}
+
+export function closeDb(): void {
+  if (dbInstance) {
+    try {
+      dbInstance.close();
+    } finally {
+      dbInstance = null;
+    }
+  }
+}
+
+export function insertBlockchainEvent(event: {
+  contract_address: string;
+  event_type: string;
+  payload?: string;
+  ledger_sequence: number;
+  ledger_close_time: string;
+  transaction_hash: string;
+  event_index?: number;
+}): void {
+  const database = getDb();
+  database.prepare(`
+    INSERT INTO blockchain_events (contract_address, event_type, payload, ledger_sequence, ledger_close_time, transaction_hash, event_index)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (transaction_hash, event_index) DO NOTHING
+  `).run(
+    event.contract_address,
+    event.event_type,
+    event.payload ?? null,
+    event.ledger_sequence,
+    event.ledger_close_time,
+    event.transaction_hash,
+    event.event_index ?? 0,
+  );
 }
 
 /**

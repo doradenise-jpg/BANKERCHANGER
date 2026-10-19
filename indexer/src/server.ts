@@ -43,45 +43,57 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 /**
- * Gracefully shuts down the HTTP server by waiting for in-flight requests to complete.
- * Waits up to timeoutMs (default 30s).
+ * Gracefully shuts down the HTTP server by waiting for in-flight requests and event batches to complete.
+ * Waits up to timeoutMs (default 10s).
  */
 export async function gracefulShutdown(
   httpServer?: Server,
-  timeoutMs = 30000,
+  timeoutMs = 10000,
 ): Promise<{ abortedRequests: number; durationSeconds: number }> {
   isShuttingDown = true;
   const startTime = Date.now();
   let abortedRequests = 0;
 
-  logger.info({ activeRequests: activeRequestsCount, timeoutMs }, 'SIGTERM received: beginning graceful shutdown, stopping new connections');
+  console.log(`[GracefulShutdown] Beginning graceful shutdown with ${timeoutMs}ms timeout. Stopping new tasks.`);
+
+  // Stop accepting new poll tasks on SIGTERM
+  try {
+    const { pollerHealth } = await import('./poller');
+    pollerHealth.isRunning = false;
+  } catch {}
 
   if (httpServer) {
     httpServer.close();
   }
+
+  // Close WebSocket server
+  try {
+    const { getWebSocketServer } = await import('./ws');
+    const wss = getWebSocketServer?.();
+    wss?.close();
+  } catch {}
 
   const deadline = Date.now() + timeoutMs;
   while (activeRequestsCount > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
+  // Close DB pool
+  try {
+    const { closeDb } = await import('./db');
+    closeDb?.();
+  } catch {}
+
   if (activeRequestsCount > 0) {
     abortedRequests = activeRequestsCount;
-    logger.warn({ abortedRequests, timeoutMs }, `Shutdown deadline reached: forced shutdown with ${abortedRequests} aborted requests`);
+    console.warn(`[GracefulShutdown] Forced shutdown after timeout with ${abortedRequests} aborted requests.`);
   } else {
-    logger.info('All in-flight requests drained cleanly');
+    console.log('[GracefulShutdown] All in-flight requests and batches drained cleanly.');
   }
 
   const durationSeconds = (Date.now() - startTime) / 1000;
   serverMetrics.indexer_graceful_shutdown_duration_seconds = durationSeconds;
-  logger.info(
-    {
-      durationSeconds,
-      metric: 'indexer_graceful_shutdown_duration_seconds',
-      value: durationSeconds,
-    },
-    `Graceful shutdown completed in ${durationSeconds.toFixed(2)}s`,
-  );
+  console.log(`[GracefulShutdown] Clean shutdown completed in ${durationSeconds.toFixed(2)}s.`);
 
   return { abortedRequests, durationSeconds };
 }

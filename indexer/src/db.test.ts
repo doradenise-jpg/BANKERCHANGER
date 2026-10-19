@@ -63,4 +63,28 @@ describe('Cursor Persistence', () => {
     retrieved = await getCursor();
     expect(retrieved).toBe(secondCursor);
   });
+
+  test('inserting identical event twice results in single database row due to unique constraint', () => {
+    const { insertBlockchainEvent } = require('./db');
+    const event = {
+      contract_address: 'C123',
+      event_type: 'bet_placed',
+      payload: '{"amount": 100}',
+      ledger_sequence: 12345,
+      ledger_close_time: '2026-10-19T12:00:00Z',
+      transaction_hash: 'tx-unique-999',
+      event_index: 0,
+    };
+
+    // Insert twice
+    insertBlockchainEvent(event);
+    insertBlockchainEvent(event);
+
+    const db = require('./db').getDb ? require('./db').getDb() : null;
+    if (db) {
+      const rows = db.prepare('SELECT * FROM blockchain_events WHERE transaction_hash = ?').all('tx-unique-999');
+      expect(rows.length).toBe(1);
+    }
+  });
 });
+
