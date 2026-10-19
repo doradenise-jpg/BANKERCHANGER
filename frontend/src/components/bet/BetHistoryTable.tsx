@@ -6,6 +6,7 @@
 
 import { useState, useMemo } from 'react';
 import type { Bet, Market } from '../../types';
+import { formatXlmAmount } from '../../utils/xlmToStroops';
 
 type FilterTab = 'All' | 'Active' | 'Won' | 'Lost' | 'Pending Claim';
 type SortKey = 'placed_at' | 'amount_xlm';
@@ -187,7 +188,7 @@ export function BetHistoryTable({ bets, markets, onClaim, onRefund }: BetHistory
                   <tr key={bet.tx_hash} className="border-b border-gray-800/50">
                     <td className="py-3 pr-4 text-xs whitespace-nowrap text-gray-300">{marketLabel}</td>
                     <td className="py-3 pr-4 whitespace-nowrap">{sideLabel}</td>
-                    <td className="py-3 pr-4 whitespace-nowrap">{bet.amount_xlm} XLM</td>
+                    <td className="py-3 pr-4 whitespace-nowrap">{formatXlmAmount(bet.amount_xlm)} XLM</td>
                     <td className="py-3 pr-4 whitespace-nowrap text-gray-400">{oddsVal}</td>
                     <td className={`py-3 pr-4 whitespace-nowrap text-xs font-medium ${statusColor}`}>
                       {status}

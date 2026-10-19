@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import type { Bet, BetSide } from '../../types';
 import { stellarExplorerUrl } from '../../services/wallet';
+import { formatXlmAmount } from '../../utils/xlmToStroops';
 
 const PAGE_SIZE = 10;
 
@@ -113,7 +114,7 @@ export function BetList({ bets, fighterA, fighterB, walletAddress, isLoading }: 
                       {sideLabel(bet.side)}
                     </span>
                   </td>
-                  <td className="py-2 pr-4 whitespace-nowrap">{bet.amount_xlm} XLM</td>
+                  <td className="py-2 pr-4 whitespace-nowrap">{formatXlmAmount(bet.amount_xlm)} XLM</td>
                   <td className="py-2 text-gray-500 whitespace-nowrap text-xs">
                     {timeAgo(bet.placed_at)}
                   </td>

@@ -140,3 +140,25 @@ describe('stroopsToXlm', () => {
     expect(stroopsToXlm('10000000')).toBe(1);
   });
 });
+
+describe('formatXlmAmount', () => {
+  const { formatXlmAmount } = require('../../utils/xlmToStroops');
+
+  it('formats 1 stroop correctly', () => {
+    expect(formatXlmAmount(1n)).toBe('0');
+  });
+
+  it('formats 10 XLM correctly', () => {
+    expect(formatXlmAmount(10)).toBe('10');
+  });
+
+  it('formats 1,000,000 XLM with thousand separators', () => {
+    expect(formatXlmAmount(1_000_000)).toBe('1,000,000');
+  });
+
+  it('formats max stroop values without floating point errors', () => {
+    const maxStroops = 9223372036854775807n; // INT64_MAX
+    expect(formatXlmAmount(maxStroops)).toBeDefined();
+  });
+});
+

@@ -39,3 +39,15 @@ export function xlmToStroops(xlm: number): bigint {
 export function stroopsToXlm(stroops: bigint | string): number {
   return Number(BigInt(stroops)) / 10_000_000;
 }
+
+/**
+ * Formats an XLM number or stroop amount with thousand separators and maximum 2 decimal places.
+ */
+export function formatXlmAmount(amount: number | bigint | string): string {
+  const num = typeof amount === 'bigint' ? Number(amount) / 10_000_000 : Number(amount);
+  return num.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  });
+}
+

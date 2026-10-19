@@ -69,6 +69,7 @@ export function BetConfirmModal({
       aria-modal="true"
       role="dialog"
       aria-labelledby="bet-confirm-title"
+      aria-describedby={feeHintId}
     >
       <div
         ref={dialogRef}
