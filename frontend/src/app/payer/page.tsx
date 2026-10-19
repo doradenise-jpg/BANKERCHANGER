@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { StrKey } from '@stellar/stellar-sdk';
 import { getConnectedAddress, markPaid } from '@/services/wallet';
 import { TxStatusToast } from '@/components/ui/TxStatusToast';
 import type { Invoice, TxStatus } from '@/types';
@@ -46,6 +47,9 @@ export default function PayerDashboard() {
 
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [recipientAddress, setRecipientAddress] = useState('');
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [addressError, setAddressError] = useState<string | null>(null);
   
   const [txStatus, setTxStatus] = useState<TxStatus>({
     hash: null,
@@ -240,6 +244,72 @@ export default function PayerDashboard() {
           </div>
         </div>
       )}
+
+      {/* Direct Payment Form */}
+      <div className="mt-8 bg-gray-900 border border-gray-800 rounded-xl p-6 shadow-xl">
+        <h2 className="text-xl font-bold mb-4">Direct Transfer</h2>
+        <div className="space-y-4 max-w-lg">
+          <div>
+            <label htmlFor="recipient-address" className="block text-sm font-medium text-gray-300 mb-1">
+              Recipient Stellar Address
+            </label>
+            <input
+              id="recipient-address"
+              type="text"
+              value={recipientAddress}
+              onChange={(e) => {
+                setRecipientAddress(e.target.value);
+                if (addressError) setAddressError(null);
+              }}
+              onBlur={() => {
+                if (!recipientAddress) {
+                  setAddressError('Please enter a valid Stellar address starting with G');
+                } else if (!StrKey.isValidEd25519PublicKey(recipientAddress)) {
+                  setAddressError('Please enter a valid Stellar address starting with G');
+                } else {
+                  setAddressError(null);
+                }
+              }}
+              placeholder="G..."
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white text-sm font-mono focus:outline-none focus:border-blue-500"
+            />
+            {addressError && (
+              <p className="text-red-400 text-xs mt-1" role="alert">
+                {addressError}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label htmlFor="payment-amount" className="block text-sm font-medium text-gray-300 mb-1">
+              Amount (USDC)
+            </label>
+            <input
+              id="payment-amount"
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={paymentAmount}
+              onChange={(e) => setPaymentAmount(e.target.value)}
+              placeholder="0.00"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+            />
+          </div>
+
+          <button
+            type="button"
+            disabled={
+              !recipientAddress ||
+              !StrKey.isValidEd25519PublicKey(recipientAddress) ||
+              !paymentAmount ||
+              parseFloat(paymentAmount) <= 0
+            }
+            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
+          >
+            Send Payment
+          </button>
+        </div>
+      </div>
 
       <TxStatusToast txStatus={txStatus} onDismiss={() => setTxStatus({ hash: null, status: 'idle', error: null })} />
     </div>

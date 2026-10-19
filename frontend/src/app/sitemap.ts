@@ -26,6 +26,12 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       priority: 0.7,
     },
     {
+      url: `${SITE_URL}/leaderboard`,
+      lastModified: new Date(),
+      changeFrequency: 'hourly',
+      priority: 0.7,
+    },
+    {
       url: `${SITE_URL}/governance`,
       lastModified: new Date(),
       changeFrequency: 'weekly',
@@ -39,16 +45,17 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     
     markets.forEach((market) => {
       const updatedAt = market.updated_at ? new Date(market.updated_at) : undefined;
+      const marketId = (market as any).id ?? market.market_id;
       entries.push({
-        url: `${SITE_URL}/markets/${market.id}`,
+        url: `${SITE_URL}/markets/${marketId}`,
         ...(updatedAt && !Number.isNaN(updatedAt.getTime()) ? { lastModified: updatedAt } : {}),
         changeFrequency: 'hourly',
         priority: 0.8,
       });
     });
   } catch (error) {
-    console.error('Failed to fetch markets for sitemap:', error);
-    // Continue with base URLs if fetch fails
+    console.warn('[sitemap] Warning: could not generate dynamic market routes due to API error:', error);
+    // Continue with core static URLs if fetch fails
   }
 
   return entries;

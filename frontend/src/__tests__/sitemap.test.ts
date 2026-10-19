@@ -38,4 +38,17 @@ describe('sitemap', () => {
   it('caches the server-generated sitemap for one hour', () => {
     expect(revalidate).toBe(3600);
   });
+
+  it('falls back to returning core static routes when backend API throws 500 error', async () => {
+    mockedFetchMarkets.mockRejectedValue(new Error('500 Internal Server Error'));
+
+    const entries = await sitemap();
+    expect(entries.length).toBe(5); // /, /markets, /portfolio, /leaderboard, /governance
+    const urls = entries.map((e) => e.url);
+    expect(urls).toContain('https://bankerchanger.io');
+    expect(urls).toContain('https://bankerchanger.io/markets');
+    expect(urls).toContain('https://bankerchanger.io/portfolio');
+    expect(urls).toContain('https://bankerchanger.io/leaderboard');
+    expect(urls).toContain('https://bankerchanger.io/governance');
+  });
 });

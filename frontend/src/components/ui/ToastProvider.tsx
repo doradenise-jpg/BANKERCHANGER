@@ -1,6 +1,7 @@
 'use client';
 
-import { createContext, useCallback, useContext, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useRef, useState, useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 
 export type ToastType = 'success' | 'error' | 'info';
 
@@ -39,6 +40,16 @@ const ICON_STYLES: Record<ToastType, string> = {
 export function ToastProvider({ children }: { children: React.ReactNode }): JSX.Element {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const counter = useRef(0);
+  const pathname = usePathname();
+  const prevPathname = useRef(pathname);
+
+  useEffect(() => {
+    if (prevPathname.current !== pathname) {
+      prevPathname.current = pathname;
+      // Dismiss transient error toasts on route change
+      setToasts((prev) => prev.filter((t) => t.type !== 'error'));
+    }
+  }, [pathname]);
 
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
