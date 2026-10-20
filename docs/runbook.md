@@ -27,6 +27,7 @@ BANKERCHANGER maintains automated daily backups of the PostgreSQL database with 
 - **Frequency:** Daily automated backups at 2:00 AM UTC
 - **Retention:** 30-day rolling window (configurable)
 - **Encryption:** AES-256 at rest using OpenSSL
+- **Integrity:** SHA-256 checksum sidecar generated with every backup and verified before every restore
 - **Storage:** AWS S3 with versioning and lifecycle policies
 - **Verification:** Weekly integrity checks (Sundays 3:00 AM UTC)
 - **Cleanup:** Monthly retention enforcement (1st of month 4:00 AM UTC)
@@ -344,8 +345,13 @@ ls -la $BACKUP_ENCRYPTION_KEY_FILE
 # Check restore log
 tail -100 /var/log/backups/restore-*.log
 
-# Verify S3 backup exists
+# Verify S3 backup and checksum sidecar exist
 aws s3 ls "s3://$AWS_S3_BACKUP_BUCKET/db-backups/" --region $AWS_REGION --recursive
+
+# Verify the backup checksum manually (exit code 7 means integrity failure)
+aws s3 cp "s3://$AWS_S3_BACKUP_BUCKET/db-backups/<backup>.sql.gz.enc.sha256" /tmp/
+aws s3 cp "s3://$AWS_S3_BACKUP_BUCKET/db-backups/<backup>.sql.gz.enc" /tmp/
+(cd /tmp && sha256sum -c --strict "<backup>.sql.gz.enc.sha256")
 
 # Verify encryption key
 cat $BACKUP_ENCRYPTION_KEY_FILE

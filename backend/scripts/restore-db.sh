@@ -6,7 +6,8 @@
 #
 # Description:
 #   Restores PostgreSQL database from encrypted S3 backups.
-#   Downloads encrypted backup from S3.
+#   Downloads encrypted backup and its SHA-256 checksum from S3.
+#   Verifies the checksum before doing anything else.
 #   Decrypts and decompresses backup.
 #   Restores data into specified database.
 #   Validates schema after restore.
@@ -29,6 +30,7 @@
 #   4 - Decompression failed
 #   5 - Restore failed
 #   6 - Validation failed
+#   7 - Checksum verification failed (missing, malformed, or mismatched)
 #
 # ============================================================================
 
@@ -127,7 +129,7 @@ validate_config() {
   fi
 
   # Validate required tools
-  local required_tools=("psql" "openssl" "aws" "gunzip")
+  local required_tools=("psql" "openssl" "aws" "gunzip" "sha256sum")
   for tool in "${required_tools[@]}"; do
     if ! command -v "$tool" &> /dev/null; then
       log_error "Required tool not found: $tool"
@@ -151,7 +153,7 @@ list_backups() {
     --region "$AWS_REGION" \
     --human-readable \
     --recursive | \
-    awk '{print $1 " " $2 " " $3 " " $4}' | \
+    awk '$4 !~ /\.sha256$/ {print $1 " " $2 " " $3 " " $4}' | \
     tee -a "$LOG_FILE"
 }
 
@@ -162,9 +164,9 @@ get_latest_backup() {
   latest_backup=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
     --region "$AWS_REGION" \
     --recursive | \
+    awk '$4 !~ /\.sha256$/ {print $4}' | \
     sort | \
-    tail -1 | \
-    awk '{print $4}')
+    tail -1)
 
   if [[ -z "$latest_backup" ]]; then
     log_error "No backups found in S3"
@@ -188,6 +190,66 @@ download_backup() {
   else
     log_error "S3 download failed"
     return 2
+  fi
+}
+
+download_checksum() {
+  local s3_path="$1"
+  local local_file="$2"
+
+  log_info "Downloading checksum from S3: s3://${S3_BUCKET}/${s3_path}"
+
+  if aws s3 cp "s3://${S3_BUCKET}/${s3_path}" "$local_file" \
+    --region "$AWS_REGION" 2>> "$LOG_FILE"; then
+    log_info "Checksum download completed"
+    return 0
+  else
+    log_error "Checksum download failed; refusing to restore an unverified backup"
+    return 7
+  fi
+}
+
+verify_checksum() {
+  local encrypted_file="$1"
+  local checksum_file="$2"
+
+  log_info "Verifying SHA-256 checksum of downloaded backup..."
+
+  if [[ ! -s "$checksum_file" ]]; then
+    log_error "Checksum file is missing or empty; refusing to restore an unverified backup"
+    return 7
+  fi
+
+  local expected_name
+  expected_name=$(basename "$encrypted_file")
+
+  local entry_count digest recorded_name
+  entry_count=$(awk 'NF' "$checksum_file" | wc -l)
+
+  if [[ "$entry_count" -ne 1 ]]; then
+    log_error "Malformed checksum file: expected exactly one entry, found $entry_count"
+    return 7
+  fi
+
+  read -r digest recorded_name _ < "$checksum_file"
+
+  # Reject malformed digests and path traversal / mismatched file references
+  if [[ ! "$digest" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    log_error "Malformed checksum file: invalid SHA-256 digest"
+    return 7
+  fi
+
+  if [[ "$recorded_name" != "$expected_name" ]]; then
+    log_error "Checksum file references unexpected file: ${recorded_name:-<empty>} (expected $expected_name)"
+    return 7
+  fi
+
+  if ( cd "$TEMP_DIR" && sha256sum -c --strict "$(basename "$checksum_file")" ) >> "$LOG_FILE" 2>&1; then
+    log_info "Checksum verification passed"
+    return 0
+  else
+    log_error "Checksum verification FAILED: backup is corrupted or has been tampered with"
+    return 7
   fi
 }
 
@@ -362,12 +424,24 @@ main() {
 
   # Prepare file paths
   local backup_path="${S3_PREFIX}/${DB_NAME}_${backup_timestamp}.sql.gz.enc"
+  local checksum_path="${backup_path}.sha256"
   local encrypted_file="$TEMP_DIR/${DB_NAME}_${backup_timestamp}.sql.gz.enc"
+  local checksum_file="$TEMP_DIR/${DB_NAME}_${backup_timestamp}.sql.gz.enc.sha256"
   local sql_file="$TEMP_DIR/${DB_NAME}_${backup_timestamp}.sql"
 
   # Download backup
   if ! download_backup "$backup_path" "$encrypted_file"; then
     exit 2
+  fi
+
+  # Download and verify checksum before any decryption or restore operation
+  if ! download_checksum "$checksum_path" "$checksum_file"; then
+    exit 7
+  fi
+
+  if ! verify_checksum "$encrypted_file" "$checksum_file"; then
+    log_error "Aborting restore: backup integrity could not be verified"
+    exit 7
   fi
 
   # Decrypt backup

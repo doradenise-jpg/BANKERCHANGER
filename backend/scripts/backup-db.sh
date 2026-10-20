@@ -7,7 +7,8 @@
 # Description:
 #   Performs daily PostgreSQL backup using pg_dump with compression.
 #   Encrypts backup with AES-256 using OpenSSL.
-#   Uploads encrypted backup to AWS S3 with timestamp.
+#   Generates a SHA-256 checksum of the encrypted backup.
+#   Uploads encrypted backup and checksum to AWS S3 with timestamp.
 #   Manages backup retention (default: 30 days).
 #
 # Requirements:
@@ -27,6 +28,7 @@
 #   3 - Encryption failed
 #   4 - S3 upload failed
 #   5 - Cleanup failed
+#   6 - Checksum generation failed
 #
 # ============================================================================
 
@@ -68,6 +70,11 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BACKUP_FILE="$TEMP_DIR/${DB_NAME}_backup_${TIMESTAMP}.sql"
 COMPRESSED_FILE="${BACKUP_FILE}.gz"
 ENCRYPTED_FILE="${COMPRESSED_FILE}.enc"
+CHECKSUM_FILE="${ENCRYPTED_FILE}.sha256"
+
+# Name of the encrypted object as stored in S3. Checksums reference this
+# name (not the local temp path) so they remain valid after download.
+S3_OBJECT_NAME="${DB_NAME}_${TIMESTAMP}.sql.gz.enc"
 
 # ── Functions ─────────────────────────────────────────────────────────────
 
@@ -102,7 +109,7 @@ validate_config() {
   fi
 
   # Validate required tools
-  local required_tools=("pg_dump" "gzip" "openssl" "aws")
+  local required_tools=("pg_dump" "gzip" "openssl" "aws" "sha256sum")
   for tool in "${required_tools[@]}"; do
     if ! command -v "$tool" &> /dev/null; then
       log_error "Required tool not found: $tool"
@@ -170,7 +177,7 @@ compress_backup() {
 encrypt_backup() {
   log_info "Encrypting backup with AES-256..."
 
-  if [[ ! -f "$COMPRESSION_KEY_FILE" ]]; then
+  if [[ ! -f "$ENCRYPTION_KEY_FILE" ]]; then
     log_error "Encryption key file not found: $ENCRYPTION_KEY_FILE"
     return 3
   fi
@@ -184,8 +191,7 @@ encrypt_backup() {
     -"$ENCRYPTION_CIPHER" \
     -in "$COMPRESSED_FILE" \
     -out "$ENCRYPTED_FILE" \
-    -pass stdin \
-    -P 2>> "$LOG_FILE"; then
+    -pass stdin 2>> "$LOG_FILE"; then
     
     log_info "Encryption completed successfully"
     log_info "Encrypted file size: $(du -h "$ENCRYPTED_FILE" | cut -f1)"
@@ -200,8 +206,27 @@ encrypt_backup() {
   fi
 }
 
+generate_checksum() {
+  log_info "Generating SHA-256 checksum for encrypted backup..."
+
+  local checksum
+  if ! checksum=$(sha256sum "$ENCRYPTED_FILE" | awk '{print $1}'); then
+    log_error "Failed to compute SHA-256 checksum"
+    return 6
+  fi
+
+  # Reference the S3 object name so the checksum remains valid after download.
+  if ! printf '%s  %s\n' "$checksum" "$S3_OBJECT_NAME" > "$CHECKSUM_FILE"; then
+    log_error "Failed to write checksum file: $CHECKSUM_FILE"
+    return 6
+  fi
+
+  log_info "Checksum generated: $checksum"
+  return 0
+}
+
 upload_to_s3() {
-  local s3_path="s3://${S3_BUCKET}/${S3_PREFIX}/${DB_NAME}_${TIMESTAMP}.sql.gz.enc"
+  local s3_path="s3://${S3_BUCKET}/${S3_PREFIX}/${S3_OBJECT_NAME}"
 
   log_info "Uploading encrypted backup to S3: $s3_path"
 
@@ -216,6 +241,26 @@ upload_to_s3() {
     return 0
   else
     log_error "S3 upload failed"
+    return 4
+  fi
+}
+
+upload_checksum_to_s3() {
+  local s3_path="s3://${S3_BUCKET}/${S3_PREFIX}/${S3_OBJECT_NAME}.sha256"
+
+  log_info "Uploading checksum to S3: $s3_path"
+
+  if aws s3 cp "$CHECKSUM_FILE" "$s3_path" \
+    --region "$AWS_REGION" \
+    --sse AES256 \
+    --metadata "backup-date=$TIMESTAMP,database=$DB_NAME" \
+    2>> "$LOG_FILE"; then
+
+    log_info "Checksum upload completed successfully"
+    log_info "Checksum Location: $s3_path"
+    return 0
+  else
+    log_error "Checksum upload failed"
     return 4
   fi
 }
@@ -295,9 +340,21 @@ main() {
     exit 3
   fi
 
-  # Upload to S3
+  # Generate checksum of the encrypted backup
+  if ! generate_checksum; then
+    send_status "FAILED" "Checksum generation failed"
+    exit 6
+  fi
+
+  # Upload backup to S3
   if ! upload_to_s3; then
     send_status "FAILED" "S3 upload failed"
+    exit 4
+  fi
+
+  # Upload checksum to S3
+  if ! upload_checksum_to_s3; then
+    send_status "FAILED" "Checksum upload failed"
     exit 4
   fi
 

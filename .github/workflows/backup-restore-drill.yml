@@ -80,10 +80,10 @@ jobs:
           echo "Available backups:"
           echo "$BACKUPS"
           
-          # Get the latest backup file
+          # Get the latest backup file (ignore checksum sidecar files)
           LATEST_BACKUP=$(aws s3 ls s3://${{ secrets.AWS_S3_BACKUP_BUCKET }}/db-backups/ \
             --region ${{ env.AWS_REGION }} \
-            --recursive | sort | tail -1 | awk '{print $4}')
+            --recursive | awk '$4 !~ /\.sha256$/ {print $4}' | sort | tail -1)
           
           if [[ -z "$LATEST_BACKUP" ]]; then
             echo "ERROR: No backups found in S3"
@@ -105,6 +105,40 @@ jobs:
           fi
           
           echo "✓ Backup downloaded (size: $(du -h /tmp/backup.sql.gz.enc | cut -f1))"
+
+      - name: Verify backup checksum
+        run: |
+          echo "Downloading checksum..."
+          aws s3 cp "s3://${{ secrets.AWS_S3_BACKUP_BUCKET }}/${{ steps.download-backup.outputs.backup_file }}.sha256" \
+            /tmp/backup.sql.gz.enc.sha256 \
+            --region ${{ env.AWS_REGION }}
+
+          if [[ ! -s /tmp/backup.sql.gz.enc.sha256 ]]; then
+            echo "ERROR: Checksum file is missing or empty; refusing to restore unverified backup"
+            exit 1
+          fi
+
+          echo "Verifying SHA-256 checksum..."
+          read -r EXPECTED_DIGEST RECORDED_NAME _ < /tmp/backup.sql.gz.enc.sha256
+          EXPECTED_NAME=$(basename "${{ steps.download-backup.outputs.backup_file }}")
+
+          if [[ ! "$EXPECTED_DIGEST" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "ERROR: Malformed checksum file (invalid SHA-256 digest)"
+            exit 1
+          fi
+
+          if [[ "$RECORDED_NAME" != "$EXPECTED_NAME" ]]; then
+            echo "ERROR: Checksum references unexpected file: $RECORDED_NAME (expected $EXPECTED_NAME)"
+            exit 1
+          fi
+
+          ACTUAL_DIGEST=$(sha256sum /tmp/backup.sql.gz.enc | awk '{print $1}')
+          if [[ "$ACTUAL_DIGEST" != "$EXPECTED_DIGEST" ]]; then
+            echo "ERROR: Checksum verification failed; backup is corrupted or tampered with"
+            exit 1
+          fi
+
+          echo "✓ Checksum verification passed"
 
       - name: Decrypt and decompress backup
         run: |
@@ -257,6 +291,7 @@ jobs:
           # Secure delete backup files
           shred -vfz /tmp/backup.sql 2>/dev/null || rm -f /tmp/backup.sql
           shred -vfz /tmp/backup.sql.gz.enc 2>/dev/null || rm -f /tmp/backup.sql.gz.enc
+          shred -vfz /tmp/backup.sql.gz.enc.sha256 2>/dev/null || rm -f /tmp/backup.sql.gz.enc.sha256
           shred -vfz /tmp/backup.key 2>/dev/null || rm -f /tmp/backup.key
           
           echo "✓ Temporary files securely deleted"

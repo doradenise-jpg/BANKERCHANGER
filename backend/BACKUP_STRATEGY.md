@@ -7,6 +7,7 @@ This document describes the automated PostgreSQL backup infrastructure for BANKE
 **Key Features:**
 - ✅ Daily automated backups (2:00 AM UTC)
 - ✅ AES-256 encryption at rest
+- ✅ SHA-256 checksum generated with every backup and verified before every restore
 - ✅ AWS S3 storage with versioning
 - ✅ 30-day retention policy
 - ✅ Weekly integrity verification
@@ -45,6 +46,14 @@ This document describes the automated PostgreSQL backup infrastructure for BANKE
 │         (backup.sql.gz.enc - secure storage)                │
 └────────────────────────┬────────────────────────────────────┘
                          │
+                  sha256sum -c
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 SHA-256 Checksum Sidecar                    │
+│        (backup.sql.gz.enc.sha256 - integrity proof)         │
+└────────────────────────┬────────────────────────────────────┘
+                         │
                    aws s3 cp
                          │
                          ▼
@@ -54,6 +63,11 @@ This document describes the automated PostgreSQL backup infrastructure for BANKE
 │     (Versioning enabled, Lifecycle policies)                │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+Every backup is uploaded together with a `.sha256` sidecar. `restore-db.sh`
+downloads the sidecar and runs `sha256sum -c` against the encrypted file
+**before** decrypting or touching the database. A missing, malformed, or
+mismatched checksum aborts the restore with exit code `7`.
 
 ## Files & Scripts
 
@@ -131,9 +145,11 @@ crontab -u backup -l | grep BANKERCHANGER_DB_BACKUP
    - Run `pg_dump` with verbose output
    - Compress with gzip (typically 80% reduction)
    - Encrypt with AES-256 using OpenSSL
-   - Upload to S3 with metadata
+   - Generate SHA-256 checksum sidecar
+   - Upload encrypted backup and checksum to S3 with metadata
    - Log completion status
 3. **Output:** `s3://bucket/db-backups/{db}_{timestamp}.sql.gz.enc`
+   and `s3://bucket/db-backups/{db}_{timestamp}.sql.gz.enc.sha256`
 4. **Size:** Typically 50-200 MB (encrypted)
 5. **Duration:** 5-15 minutes (depending on database size)
 
@@ -161,7 +177,8 @@ crontab -u backup -l | grep BANKERCHANGER_DB_BACKUP
 
 1. **Trigger:** GitHub Actions workflow
 2. **Process:**
-   - Download latest backup from S3
+   - Download latest backup and its `.sha256` sidecar from S3
+   - Verify the checksum before decrypting
    - Decrypt using GitHub Secrets
    - Restore to temporary test database
    - Validate schema (check table count)
@@ -310,6 +327,11 @@ tail -100 /var/log/backups/restore-*.log
 
 # Verify backup exists in S3
 aws s3 ls "s3://$AWS_S3_BACKUP_BUCKET/db-backups/" --recursive
+
+# Verify the backup checksum first
+aws s3 cp "s3://$AWS_S3_BACKUP_BUCKET/db-backups/<backup>.sql.gz.enc.sha256" /tmp/
+aws s3 cp "s3://$AWS_S3_BACKUP_BUCKET/db-backups/<backup>.sql.gz.enc" /tmp/
+(cd /tmp && sha256sum -c --strict "<backup>.sql.gz.enc.sha256")
 
 # Test decryption manually
 openssl enc -aes-256-cbc -d \
