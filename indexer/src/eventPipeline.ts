@@ -2,6 +2,7 @@ import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { getCursor, saveCursor, upsertInvoice, upsertBetPlaced } from "./db";
 import { updateLastLedger } from "./health";
 import { logger } from "./logger";
+import { validateEventSchema } from "./eventSchemas";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -125,6 +126,7 @@ export async function processEventBatch(
       startLedger,
       endLedger,
       limit: 1000,
+      filters: [],
     });
 
     for (const event of response.events) {
@@ -142,7 +144,7 @@ export async function processEventBatch(
       currentLedger++;
     }
 
-    await saveCursor(endLedger);
+    await saveCursor(String(endLedger), endLedger);
     await updateLastLedger(endLedger);
 
     return {
@@ -256,27 +258,125 @@ export function enqueueBroadcastEvent(event: ProcessedEvent): boolean {
 
 // ─── Event Handlers ──────────────────────────────────────────────────────────
 
-async function handleEvent(event: ProcessedEvent): Promise<void> {
-  switch (event.eventType) {
-    case "invoice_created":
-      await writeWithTransientRetry(() =>
-        upsertInvoice({
-          contractId: event.contractId,
-          ledgerSequence: event.ledgerSequence,
-          data: event.value,
-        }),
-      );
-      break;
+export async function handleEvent(event: ProcessedEvent): Promise<void> {
+  // Skip unknown event types without throwing (#694)
+  if (!KNOWN_EVENT_TYPES.has(event.eventType)) {
+    indexer_unknown_event_types_total[event.eventType] =
+      (indexer_unknown_event_types_total[event.eventType] || 0) + 1;
+    logger.warn(
+      {
+        eventType: event.eventType,
+        contractId: event.contractId,
+        ledgerSequence: event.ledgerSequence,
+        batchId: event.batchId,
+        metric: `indexer_unknown_event_types_total{type="${event.eventType}"}`,
+        count: indexer_unknown_event_types_total[event.eventType],
+      },
+      `Unknown event type "${event.eventType}" from contract ${event.contractId}; skipping`,
+    );
+    return;
+  }
 
-    case "invoice_paid":
-      await writeWithTransientRetry(() =>
-        upsertInvoice({
-          contractId: event.contractId,
-          ledgerSequence: event.ledgerSequence,
-          data: { ...event.value, status: "paid" },
-        }),
-      );
+  // Validate the event payload before any DB write or broadcast (#64, #905).
+  // bet_placed payloads may be a (BetRecord, OddsSnapshot) tuple, so unwrap the
+  // bet record before validating its amount/shares.
+  let validationPayload = event.value;
+  if (event.eventType === "bet_placed") {
+    const v = event.value;
+    validationPayload = Array.isArray(v) ? v[0] : (v?.bet ?? v);
+  }
+  const isValid = validateEventSchema(event.eventType, validationPayload, {
+    contractId: event.contractId,
+    ledgerSequence: event.ledgerSequence,
+    batchId: event.batchId,
+  });
+  if (!isValid) {
+    logger.warn(
+      {
+        eventType: event.eventType,
+        contractId: event.contractId,
+        ledgerSequence: event.ledgerSequence,
+        batchId: event.batchId,
+      },
+      "Skipping event due to schema validation failure",
+    );
+    return;
+  }
+
+  // Retries transient DB failures with exponential backoff; non-transient
+  // errors (constraint violations, schema mismatches) fail immediately and
+  // exhausted retries are recorded in the dead-letter log (#699).
+  async function writeWithTransientRetry(action: () => Promise<void>): Promise<void> {
+    const maxRetries = 3;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await action();
+        return;
+      } catch (err: any) {
+        lastError = err;
+        if (!isTransientDbError(err)) {
+          logger.error(
+            { err, eventType: event.eventType, contractId: event.contractId },
+            "Non-transient DB error; failing immediately without retry",
+          );
+          throw err;
+        }
+
+        logger.warn(
+          { attempt, maxRetries, err: err.message, eventType: event.eventType },
+          "Transient DB error during event write; retrying",
+        );
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)));
+        }
+      }
+    }
+
+    deadLetterLog.push({
+      event,
+      error: lastError?.message || String(lastError),
+      failedAt: new Date().toISOString(),
+      attempts: maxRetries,
+    });
+    logger.error(
+      { event, err: lastError },
+      "Batch write exhausted transient retries; written to dead-letter log",
+    );
+    throw lastError;
+  }
+
+  switch (event.eventType) {
+    case "invoice_created": {
+      const v = event.value ?? {};
+      await writeWithTransientRetry(async () => {
+        await upsertInvoice({
+          id: String(v.id ?? v.invoice_id ?? event.contractId),
+          freelancer: String(v.freelancer ?? ""),
+          payer: String(v.payer ?? ""),
+          amount: Number(v.amount ?? 0),
+          due_date: String(v.due_date ?? ""),
+          status: String(v.status ?? "pending"),
+        });
+      });
       break;
+    }
+
+    case "invoice_paid": {
+      const v = event.value ?? {};
+      await writeWithTransientRetry(async () => {
+        await upsertInvoice({
+          id: String(v.id ?? v.invoice_id ?? event.contractId),
+          freelancer: String(v.freelancer ?? ""),
+          payer: String(v.payer ?? ""),
+          amount: Number(v.amount ?? 0),
+          due_date: String(v.due_date ?? ""),
+          status: "paid",
+        });
+      });
+      break;
+    }
 
     case "market_created":
     case "bet_placed": {
