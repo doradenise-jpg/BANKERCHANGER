@@ -123,3 +123,9 @@ Desktop.ini
 .cache/
 tmp/
 .tmp/
+
+# ─── Temporary commit notes and scratch files ─────────────────
+commit_msg*.txt
+task*.md
+*scratch*
+

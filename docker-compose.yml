@@ -29,17 +29,6 @@ services:
       timeout: 5s
       retries: 5
 
-  indexer:
-    build: ./indexer
-    restart: unless-stopped
-    depends_on:
-      - postgres
-    env_file: ./indexer/.env
-    ports:
-      - '3002:3002'
-    volumes:
-      - indexer_data:/app/data
-
   backend:
     build: ./backend
     restart: unless-stopped
@@ -48,8 +37,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      indexer:
-        condition: service_started
     env_file: ./backend/.env
     ports:
       - '3001:3001'
@@ -58,11 +45,16 @@ services:
     build: ./indexer
     restart: unless-stopped
     depends_on:
-      - backend
-    env_file: ./backend/.env
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    env_file: ./indexer/.env
     environment:
       - FACTORY_CONTRACT_ADDRESS=${FACTORY_CONTRACT_ADDRESS}
       - SOROBAN_RPC_URL=${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+    ports:
+      - '3002:3002'
     volumes:
       - indexer_data:/app/data
 
