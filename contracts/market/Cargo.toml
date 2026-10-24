@@ -17,4 +17,4 @@ boxmeout-shared = { path = "../shared" }
 soroban-sdk = { version = "26.1.0", features = ["testutils"] }
 boxmeout-treasury = { path = "../treasury", features = ["testutils"] }
 proptest = "1.0"
-ed25519-dalek = "2"
+ed25519-dalek = "3"
