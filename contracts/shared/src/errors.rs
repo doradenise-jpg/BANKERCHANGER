@@ -128,6 +128,20 @@ pub enum ContractError {
     // ── Arithmetic ─────────────────────────────────────────
     /// Multiply-divide result cannot be represented as i128
     MathOverflow = 70,
+
+    // ── Fighter / Fight Validation ──────────────────────────
+    /// Both fighter names resolve to the same identity after normalisation
+    DuplicateFighterName = 71,
+    /// Fight date is in the past or does not meet the minimum market duration
+    InvalidFightDate = 72,
+
+    // ── Market Lifecycle ───────────────────────────────────
+    /// ALLOW_DRAW cannot be toggled after bets have been placed
+    BetsAlreadyPlaced = 73,
+
+    // ── Treasury ───────────────────────────────────────────
+    /// Fee-split basis points do not sum to exactly 10 000 or contain duplicate recipients
+    InvalidFeeSplit = 74,
 }
 
 // Preserve the legacy source-level names without growing Soroban's exported

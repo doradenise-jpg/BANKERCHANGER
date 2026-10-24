@@ -61,6 +61,14 @@ pub trait MarketInterface {
 #[contract]
 pub struct MarketFactory;
 
+/// Strips leading and trailing ASCII whitespace (spaces and control characters ≤ 0x20)
+/// from a byte slice without allocating.  Returns a sub-slice of the input.
+fn trim_ascii(s: &[u8]) -> &[u8] {
+    let start = s.iter().position(|&b| b > b' ').unwrap_or(s.len());
+    let end = s.iter().rposition(|&b| b > b' ').map(|i| i + 1).unwrap_or(0);
+    if start >= end { &[] } else { &s[start..end] }
+}
+
 impl MarketFactory {
     fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
         let admin: Address = env
@@ -218,22 +226,30 @@ impl MarketFactory {
             return Err(ContractError::InvalidMarketParameters);
         }
 
-        // Validate fighter_a != fighter_b (case-insensitive)
-        if fight.fighter_a.len() == fight.fighter_b.len() {
-            let len = fight.fighter_a.len() as usize;
-            let mut bytes_a = alloc::vec![0u8; len];
-            let mut bytes_b = alloc::vec![0u8; len];
+        // Validate fighter_a != fighter_b (case-insensitive, whitespace-trimmed).
+        // Leading/trailing ASCII spaces (0x20) are stripped before comparison so
+        // that e.g. " Fury " and "fury" are correctly detected as duplicates.
+        {
+            let len_a = fight.fighter_a.len() as usize;
+            let len_b = fight.fighter_b.len() as usize;
+            let mut bytes_a = alloc::vec![0u8; len_a];
+            let mut bytes_b = alloc::vec![0u8; len_b];
             fight.fighter_a.copy_into_slice(&mut bytes_a);
             fight.fighter_b.copy_into_slice(&mut bytes_b);
-            let mut is_dup = true;
-            for i in 0..len {
-                if bytes_a[i].to_ascii_lowercase() != bytes_b[i].to_ascii_lowercase() {
-                    is_dup = false;
-                    break;
+            // Trim ASCII leading/trailing whitespace before comparison.
+            let trimmed_a = trim_ascii(&bytes_a);
+            let trimmed_b = trim_ascii(&bytes_b);
+            if trimmed_a.len() == trimmed_b.len() && !trimmed_a.is_empty() {
+                let mut is_dup = true;
+                for i in 0..trimmed_a.len() {
+                    if trimmed_a[i].to_ascii_lowercase() != trimmed_b[i].to_ascii_lowercase() {
+                        is_dup = false;
+                        break;
+                    }
                 }
-            }
-            if is_dup {
-                return Err(ContractError::DuplicateFighterName);
+                if is_dup {
+                    return Err(ContractError::DuplicateFighterName);
+                }
             }
         }
 
@@ -2049,5 +2065,155 @@ mod task12_factory_market_integrity_tests {
         assert_eq!(topic, Symbol::new(&env, "admin_transfer_accepted"));
         let payload: (Address, Address) = TryFromVal::try_from_val(&env, &event.2).unwrap();
         assert_eq!(payload, (admin, nominee));
+    }
+}
+
+// ============================================================
+// ISSUE #855: Whitespace-trimmed fighter-name duplicate detection
+// ============================================================
+#[cfg(test)]
+mod fighter_name_whitespace_tests {
+    use crate::{MarketFactory, MarketFactoryClient};
+    use boxmeout_shared::errors::ContractError;
+    use boxmeout_shared::types::{FactoryConfig, FightDetails, MarketConfig};
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String};
+
+    fn setup() -> (Env, MarketFactoryClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, MarketFactory);
+        let client = MarketFactoryClient::new(&env, &id);
+        (env, client)
+    }
+
+    fn init_factory(env: &Env, client: &MarketFactoryClient) {
+        let admin = Address::generate(env);
+        let treasury = Address::generate(env);
+        let oracle = Address::generate(env);
+        let key: BytesN<32> = BytesN::from_array(env, &[1u8; 32]);
+        client.initialize(
+            &admin,
+            &treasury,
+            &oracle,
+            &key,
+            &FactoryConfig {
+                default_min_bet: 1_000_000,
+                default_max_bet: 100_000_000_000,
+                default_fee_bps: 200,
+                default_lock_before_secs: 3_600,
+                default_resolution_window: 86_400,
+            },
+        );
+    }
+
+    fn base_fight(env: &Env, a: &str, b: &str) -> FightDetails {
+        FightDetails {
+            match_id: String::from_str(env, "MATCH-WSP"),
+            fighter_a: String::from_str(env, a),
+            fighter_b: String::from_str(env, b),
+            weight_class: String::from_str(env, "Heavyweight"),
+            scheduled_at: env.ledger().timestamp() + 86_400 + 7_200,
+            venue: String::from_str(env, "Arena"),
+            title_fight: false,
+        }
+    }
+
+    fn sample_config() -> MarketConfig {
+        MarketConfig {
+            min_bet_amount: 1_000_000,
+            max_bet: 100_000_000_000,
+            max_bet_share_bps: 2_000,
+            fee_bps: 200,
+            lock_before_secs: 3_600,
+            resolution_window: 86_400,
+            tier: 0,
+            dispute_cooldown_ledgers: 0,
+        }
+    }
+
+    /// " Fury" vs "Fury" — leading space bypass → must be caught as duplicate.
+    #[test]
+    fn test_leading_whitespace_duplicate_rejected() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let fight = base_fight(&env, " Fury", "Fury");
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
+        assert!(result.is_err(), "' Fury' vs 'Fury' must be caught as a duplicate");
+        assert_eq!(
+            result.unwrap_err(),
+            Ok(ContractError::DuplicateFighterName)
+        );
+    }
+
+    /// "Fury " vs "Fury" — trailing space bypass → must be caught as duplicate.
+    #[test]
+    fn test_trailing_whitespace_duplicate_rejected() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let fight = base_fight(&env, "Fury ", "Fury");
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
+        assert!(result.is_err(), "'Fury ' vs 'Fury' must be caught as a duplicate");
+        assert_eq!(
+            result.unwrap_err(),
+            Ok(ContractError::DuplicateFighterName)
+        );
+    }
+
+    /// " Fury " vs " fury " — both padded, case-insensitive duplicate.
+    #[test]
+    fn test_both_padded_case_insensitive_duplicate_rejected() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let fight = base_fight(&env, " Fury ", " fury ");
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
+        assert!(result.is_err(), "padded case-insensitive names must be caught as duplicates");
+        assert_eq!(
+            result.unwrap_err(),
+            Ok(ContractError::DuplicateFighterName)
+        );
+    }
+
+    /// "Ali" vs "Frazier" — distinct names (no whitespace issue) must pass.
+    #[test]
+    fn test_distinct_fighter_names_accepted() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let fight = base_fight(&env, "Ali", "Frazier");
+        let caller = Address::generate(&env);
+        // Will fail at WasmHashNotSet, not at name validation — that's fine.
+        let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
+        // Must NOT fail with DuplicateFighterName.
+        if let Err(ref e) = result {
+            assert_ne!(
+                *e,
+                Ok(ContractError::DuplicateFighterName),
+                "Distinct names must not be flagged as duplicates"
+            );
+        }
+    }
+
+    /// " Ali " vs " Frazier " — distinct names with padding must pass name check.
+    #[test]
+    fn test_distinct_padded_names_not_flagged_as_duplicate() {
+        let (env, client) = setup();
+        init_factory(&env, &client);
+
+        let fight = base_fight(&env, " Ali ", " Frazier ");
+        let caller = Address::generate(&env);
+        let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
+        if let Err(ref e) = result {
+            assert_ne!(
+                *e,
+                Ok(ContractError::DuplicateFighterName),
+                "Distinct padded names must not be flagged as duplicates"
+            );
+        }
     }
 }

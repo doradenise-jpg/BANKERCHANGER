@@ -936,6 +936,21 @@ impl Market {
         }
 
         if report.outcome == Outcome::Draw && !Self::get_allow_draw(&env) {
+            // Draw was disabled, but the oracle reports a draw outcome.
+            // If any draw-pool bets exist those funds must not be locked forever,
+            // so we cancel the market immediately so all bettors can claim refunds.
+            if state.pool_draw > 0 {
+                state.status = MarketStatus::Cancelled;
+                Self::save_state(&env, &state);
+                Self::extend_market_ttl(&env);
+                boxmeout_shared::emit_market_cancelled(
+                    &env,
+                    state.market_id,
+                    oracle,
+                    soroban_sdk::String::from_str(&env, "draw_disabled_outcome_refund"),
+                );
+                return Ok(());
+            }
             return Err(ContractError::DrawNotAllowed);
         }
 
@@ -1611,6 +1626,20 @@ impl Market {
         }
 
         if final_outcome == Outcome::Draw && !Self::get_allow_draw(&env) {
+            // Admin is forcing a Draw outcome but draw is disabled.
+            // If draw-pool bets exist we must cancel so funds aren't frozen.
+            if state.pool_draw > 0 {
+                state.status = MarketStatus::Cancelled;
+                Self::save_state(&env, &state);
+                Self::extend_market_ttl(&env);
+                boxmeout_shared::emit_market_cancelled(
+                    &env,
+                    state.market_id,
+                    admin,
+                    soroban_sdk::String::from_str(&env, "draw_disabled_outcome_refund"),
+                );
+                return Ok(());
+            }
             return Err(ContractError::DrawNotAllowed);
         }
 
@@ -1639,12 +1668,27 @@ impl Market {
     }
 
     /// Configures whether Draw outcome is permitted for this market.
+    ///
+    /// # Errors
+    /// - `Unauthorized`: Caller is not the factory admin.
+    /// - `BetsAlreadyPlaced`: `allow_draw` is being set to `false` but bets on
+    ///   Draw have already been placed (`pool_draw > 0`).  Allowing the toggle
+    ///   would silently lock those funds, so it is rejected.
     pub fn set_allow_draw(env: Env, admin: Address, allow_draw: bool) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env.storage().persistent().get(&FACTORY).unwrap();
         if admin != factory {
             return Err(ContractError::Unauthorized);
         }
+
+        // Guard: disallow disabling draw once bets on Draw have been placed.
+        if !allow_draw {
+            let state = Self::load_state(&env)?;
+            if state.pool_draw > 0 {
+                return Err(ContractError::BetsAlreadyPlaced);
+            }
+        }
+
         env.storage().persistent().set(&ALLOW_DRAW, &allow_draw);
         Ok(())
     }

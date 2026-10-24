@@ -27,7 +27,7 @@ use soroban_sdk::{
 
 use boxmeout_shared::{
     errors::ContractError,
-    types::{AuditAction, AuditEntry, FeeTier},
+    types::{AuditAction, AuditEntry, FeeTier, FeeDistributionSplit},
 };
 
 // ── Persistent Storage Keys ──────────────────────────────────────────────────
@@ -52,6 +52,7 @@ const FEE_LOCK: &str                     = "FEE_LOCK";                     // bo
 const AUDIT_LOG: &str                    = "AUDIT_LOG";                    // Vec<AuditEntry>
 const AUDIT_NEXT_ID: &str                = "AUDIT_NEXT_ID";                // u64 monotonically increasing
 const FEE_TIERS: &str                    = "FEE_TIERS";                    // Vec<FeeTier>
+const FEE_DISTRIBUTION: &str             = "FEE_DISTRIBUTION";              // Vec<FeeDistributionSplit>
 const MIN_WITHDRAWAL: i128               = 10_000_000;                     // 1 XLM in stroops
 const MINIMUM_RESERVE: &str              = "MINIMUM_RESERVE";               // i128 minimum balance to retain
 /// Default minimum reserve: 100 XLM in stroops.
@@ -828,6 +829,57 @@ mod tests {
         env.storage().persistent().extend_ttl(&AUDIT_LOG, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&AUDIT_NEXT_ID, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&MINIMUM_RESERVE, 518_400, 518_400);
+    }
+
+    /// Sets the fee-distribution splits for this treasury.
+    ///
+    /// Each entry describes a recipient address and its share in basis points.
+    /// The shares must sum to exactly **10 000 BPS** (100 %) and must not be
+    /// empty, otherwise the call returns `ContractError::InvalidFeeSplit`.
+    ///
+    /// Only the admin may call this function.
+    pub fn set_fee_distribution(
+        env: Env,
+        admin: Address,
+        splits: Vec<FeeDistributionSplit>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if splits.is_empty() {
+            return Err(ContractError::InvalidFeeSplit);
+        }
+
+        // Validate that all individual shares are > 0 and sum to exactly 10 000.
+        let mut total_bps: u32 = 0;
+        for split in splits.iter() {
+            if split.share_bps == 0 {
+                return Err(ContractError::InvalidFeeSplit);
+            }
+            total_bps = total_bps
+                .checked_add(split.share_bps)
+                .ok_or(ContractError::InvalidFeeSplit)?;
+        }
+        if total_bps != 10_000 {
+            return Err(ContractError::InvalidFeeSplit);
+        }
+
+        env.storage().persistent().set(&FEE_DISTRIBUTION, &splits);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_distrib_set"),),
+            (admin, splits.len()),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the current fee-distribution splits, or an empty Vec if none have been set.
+    pub fn get_fee_distribution(env: Env) -> Vec<FeeDistributionSplit> {
+        env.storage()
+            .persistent()
+            .get(&FEE_DISTRIBUTION)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn upgrade(

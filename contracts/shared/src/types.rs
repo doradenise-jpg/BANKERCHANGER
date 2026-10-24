@@ -36,7 +36,7 @@ pub const CATEGORY_MINIMUMWEIGHT: &str      = "Minimumweight";
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MarketStatus {
     Open,              // Bets are being accepted
     Locked,            // Fight has started; bets are closed
@@ -59,7 +59,7 @@ pub enum MarketStatus {
 /// | 12   | 120 XLM             | 2 000 bps (20 %)   | Established market    |
 /// | 14   | 140 XLM             | 1 500 bps (15 %)   | High-volume market    |
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MarketTier {
     /// Tier 8 — entry-level markets with 80 XLM minimum liquidity.
     /// Max slippage: 3 000 bps (30 %). Suitable for debut fighters.
@@ -76,7 +76,7 @@ pub enum MarketTier {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
     FighterA,  // First boxer wins
     FighterB,  // Second boxer wins
@@ -85,7 +85,7 @@ pub enum Outcome {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BetSide {
     FighterA,
     FighterB,
@@ -93,7 +93,7 @@ pub enum BetSide {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OracleRole {
     Primary,  // Primary trusted oracle (e.g. BoxRec / ESPN feed)
     Fallback, // Used if primary oracle fails or disagrees
@@ -104,7 +104,7 @@ pub enum OracleRole {
 
 /// All identifying details about a scheduled boxing match.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FightDetails {
     /// Unique fight identifier — e.g. "FURY-USYK-2025-MAY"
     pub match_id: String,
@@ -124,7 +124,7 @@ pub struct FightDetails {
 
 /// Configuration parameters for a single market.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketConfig {
     /// Minimum bet in stroops (1 XLM = 10_000_000 stroops)
     pub min_bet_amount: i128,
@@ -154,7 +154,7 @@ pub struct MarketConfig {
 
 /// Configuration passed to MarketFactory on initialization.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FactoryConfig {
     /// Minimum bet in stroops for newly created markets (1 XLM = 10_000_000 stroops)
     pub default_min_bet: i128,
@@ -170,7 +170,7 @@ pub struct FactoryConfig {
 
 /// Global configuration for the prediction market system.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     /// Dispute window duration in seconds (minimum 3600 = 1 hour)
     pub dispute_window_secs: u64,
@@ -180,7 +180,7 @@ pub struct Config {
 
 /// A single bet placed by a user.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BetRecord {
     /// Stellar address of the bettor
     pub bettor: Address,
@@ -198,7 +198,7 @@ pub struct BetRecord {
 
 /// Outcome probabilities captured in basis points when a bet is placed.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OddsSnapshot {
     pub odds_a: u32,
     pub odds_b: u32,
@@ -207,7 +207,7 @@ pub struct OddsSnapshot {
 
 /// BetPlaced event payload including the odds offered before the stake is added.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BetPlacedPayload {
     pub bet: BetRecord,
     pub odds_at_bet_time: OddsSnapshot,
@@ -216,7 +216,7 @@ pub struct BetPlacedPayload {
 /// Optional outcome — used in MarketState to avoid Option<EnumType> which
 /// is not supported by #[contracttype] in soroban-sdk 20.x.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OptionalOutcome {
     None,
     Some(Outcome),
@@ -224,7 +224,7 @@ pub enum OptionalOutcome {
 
 /// Optional oracle role — same workaround as OptionalOutcome.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OptionalOracleRole {
     None,
     Some(OracleRole),
@@ -233,7 +233,7 @@ pub enum OptionalOracleRole {
 /// Optional market tier — same workaround as OptionalOutcome.
 /// Present on markets that have been assigned a tier classification.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OptionalMarketTier {
     None,
     Some(MarketTier),
@@ -241,7 +241,7 @@ pub enum OptionalMarketTier {
 
 /// Full runtime state of a market — stored inside the Market contract.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketState {
     pub market_id: u64,
     pub fight: FightDetails,
@@ -268,7 +268,7 @@ pub struct MarketState {
 
 /// Signed result report submitted by an oracle.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OracleReport {
     pub match_id: String,
     pub outcome: Outcome,
@@ -287,7 +287,7 @@ pub struct OracleReport {
 
 /// A non-zero, non-redeemed position held by a user in a specific market.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserPosition {
     pub market_id: u64,
     pub side: BetSide,
@@ -297,7 +297,7 @@ pub struct UserPosition {
 
 /// Receipt returned to the bettor after a successful claim.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimReceipt {
     pub bettor: Address,
     pub market_id: u64,
@@ -312,7 +312,7 @@ pub struct ClaimReceipt {
 
 /// The type of fund-moving operation recorded in the treasury audit ledger.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuditAction {
     /// A market deposited fees into the treasury.
     FeeDeposited,
@@ -337,7 +337,7 @@ pub enum AuditAction {
 /// Entries are keyed by a monotonically increasing `id` and are never mutated
 /// or removed — they form a tamper-evident history of every fund movement.
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditEntry {
     /// Monotonically increasing entry id (1-based) or sequence number.
     pub id: u64,
@@ -355,6 +355,21 @@ pub struct AuditEntry {
     pub day_bucket: u64,
     /// Destination address that received the tokens.
     pub destination: Address,
+}
+
+/// A single fee-distribution recipient and its share in basis points.
+///
+/// When used inside `set_fee_distribution`, all entries in the `Vec<FeeDistributionSplit>`
+/// must sum to exactly **10 000 BPS** (= 100 %).  Any other total causes the
+/// treasury to reject the configuration with `ContractError::InvalidFeeSplit`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeDistributionSplit {
+    /// Stellar address that will receive this slice of accumulated fees.
+    pub recipient: Address,
+    /// Share expressed in basis points (e.g. 5 000 = 50 %).
+    /// Must be > 0.  The sum across all entries must equal 10 000.
+    pub share_bps: u32,
 }
 
 /// A volume tier boundary and basis point rate for dynamic fee calculation.
