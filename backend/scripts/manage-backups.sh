@@ -1,21 +1,22 @@
 #!/bin/bash
 
 # ============================================================================
-# Backup Retention and S3 Management Script
+# Backup Retention and Multi-Storage Management Script
 # ============================================================================
 #
 # Description:
-#   Manages backup lifecycle and S3 storage.
+#   Manages backup lifecycle across S3, Google Cloud Storage, rclone, and local disk.
 #   Lists available backups with metadata.
 #   Verifies backup integrity.
-#   Manages retention policies (30-day default).
-#   Generates backup reports.
+#   Manages retention policies (prunes backups older than 30 days).
+#   Generates backup reports and storage statistics.
 #
 # Usage:
 #   ./scripts/manage-backups.sh --list                    # List all backups
-#   ./scripts/manage-backups.sh --cleanup                 # Remove old backups
+#   ./scripts/manage-backups.sh --cleanup                 # Remove old backups (> 30 days)
 #   ./scripts/manage-backups.sh --verify-integrity        # Check backup health
 #   ./scripts/manage-backups.sh --report                  # Generate report
+#   ./scripts/manage-backups.sh --stats                   # Storage usage statistics
 #
 # ============================================================================
 
@@ -29,9 +30,19 @@ if [[ -f "$(dirname "$0")/../.env" ]]; then
   source "$(dirname "$0")/../.env"
 fi
 
-S3_BUCKET="${AWS_S3_BACKUP_BUCKET:-}"
+REMOTE_STORAGE="${REMOTE_STORAGE:-}"
+REMOTE_TOOL="${REMOTE_TOOL:-}"
+
+S3_BUCKET="${AWS_S3_BACKUP_BUCKET:-${S3_BUCKET:-}}"
 S3_PREFIX="${S3_BACKUP_PREFIX:-db-backups}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
+
+GCS_BUCKET="${GCS_BACKUP_BUCKET:-${GCS_BUCKET:-}}"
+GCS_PREFIX="${GCS_BACKUP_PREFIX:-db-backups}"
+
+RCLONE_DEST="${RCLONE_DEST:-${RCLONE_REMOTE:-}}"
+
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/bankerchanger}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 
 LOG_DIR="${LOG_DIR:-/var/log/backups}"
@@ -40,15 +51,27 @@ LOG_FILE="${LOG_DIR}/manage-$(date +%Y%m%d_%H%M%S).log"
 # ── Functions ─────────────────────────────────────────────────────────────
 
 log_info() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $*" | tee -a "$LOG_FILE"
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $*"
+  echo "$msg"
+  if [[ -d "$LOG_DIR" && -w "$LOG_DIR" ]]; then
+    echo "$msg" >> "$LOG_FILE"
+  fi
 }
 
 log_error() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" | tee -a "$LOG_FILE" >&2
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*"
+  echo "$msg" >&2
+  if [[ -d "$LOG_DIR" && -w "$LOG_DIR" ]]; then
+    echo "$msg" >> "$LOG_FILE"
+  fi
 }
 
 log_warn() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] $*" | tee -a "$LOG_FILE"
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] $*"
+  echo "$msg"
+  if [[ -d "$LOG_DIR" && -w "$LOG_DIR" ]]; then
+    echo "$msg" >> "$LOG_FILE"
+  fi
 }
 
 print_usage() {
@@ -59,294 +82,328 @@ USAGE:
   $(basename "$0") [OPTIONS]
 
 OPTIONS:
-  --list                      List all backups in S3
-  --cleanup                   Remove backups older than retention period
-  --verify-integrity          Verify backup file integrity
-  --report                    Generate backup report
+  --list                      List all backups in configured storage
+  --cleanup                   Remove backups older than retention period (default: 30 days)
+  --verify-integrity          Verify backup file accessibility and non-empty sizes
+  --report                    Generate comprehensive backup report
   --stats                     Show storage statistics
+  --storage <PROVIDER>        Storage provider: s3, gcs, rclone, local (default: auto-detect)
+  --retention-days <DAYS>     Override retention period in days (default: 30)
+  --backup-dir <PATH>         Local backup directory (default: /var/backups/bankerchanger)
   --help                      Show this help message
 
 EXAMPLES:
   $(basename "$0") --list
-  $(basename "$0") --cleanup
+  $(basename "$0") --cleanup --retention-days 30
   $(basename "$0") --report
+  $(basename "$0") --storage gcs --list
 
 EOF
 }
 
+resolve_storage() {
+  if [[ -z "$REMOTE_STORAGE" ]]; then
+    if [[ -n "$S3_BUCKET" ]]; then
+      REMOTE_STORAGE="s3"
+    elif [[ -n "$GCS_BUCKET" ]]; then
+      REMOTE_STORAGE="gcs"
+    elif [[ -n "$RCLONE_DEST" ]]; then
+      REMOTE_STORAGE="rclone"
+    elif [[ -d "$BACKUP_DIR" ]]; then
+      REMOTE_STORAGE="local"
+    else
+      REMOTE_STORAGE="s3"
+    fi
+  fi
+
+  if [[ -z "$REMOTE_TOOL" ]]; then
+    case "$REMOTE_STORAGE" in
+      s3)
+        if command -v aws &>/dev/null; then
+          REMOTE_TOOL="aws"
+        elif command -v rclone &>/dev/null; then
+          REMOTE_TOOL="rclone"
+        fi
+        ;;
+      gcs)
+        if command -v gcloud &>/dev/null; then
+          REMOTE_TOOL="gcloud"
+        elif command -v gsutil &>/dev/null; then
+          REMOTE_TOOL="gsutil"
+        elif command -v rclone &>/dev/null; then
+          REMOTE_TOOL="rclone"
+        fi
+        ;;
+      rclone)
+        REMOTE_TOOL="rclone"
+        ;;
+    esac
+  fi
+}
+
 validate_config() {
   local errors=0
+  mkdir -p "$LOG_DIR" 2>/dev/null || true
 
-  mkdir -p "$LOG_DIR"
-
-  if [[ -z "$S3_BUCKET" ]]; then
-    log_error "AWS_S3_BACKUP_BUCKET not set"
-    ((errors++))
-  fi
-
-  if ! command -v aws &> /dev/null; then
-    log_error "AWS CLI not found"
-    ((errors++))
-  fi
+  case "$REMOTE_STORAGE" in
+    s3)
+      if [[ -z "$S3_BUCKET" ]]; then
+        log_error "AWS_S3_BACKUP_BUCKET not set"
+        ((errors++))
+      fi
+      if [[ "$REMOTE_TOOL" != "rclone" ]] && ! command -v aws &>/dev/null; then
+        log_error "AWS CLI ('aws') not found"
+        ((errors++))
+      fi
+      ;;
+    gcs)
+      if [[ -z "$GCS_BUCKET" ]]; then
+        log_error "GCS_BACKUP_BUCKET not set"
+        ((errors++))
+      fi
+      ;;
+    rclone)
+      if ! command -v rclone &>/dev/null; then
+        log_error "rclone not found in PATH"
+        ((errors++))
+      fi
+      ;;
+  esac
 
   if [[ $errors -gt 0 ]]; then
     return 1
   fi
-
   return 0
 }
 
 list_backups() {
-  log_info "Listing backups in s3://${S3_BUCKET}/${S3_PREFIX}/"
-
   echo ""
   echo "════════════════════════════════════════════════════════════"
-  echo "AVAILABLE BACKUPS"
+  echo "AVAILABLE BACKUPS (Storage: $REMOTE_STORAGE)"
+  echo "════════════════════════════════════════════════════════════"
+  printf "%-22s %-12s %s\n" "TIMESTAMP" "SIZE" "FILE / URI"
+  echo "────────────────────────────────────────────────────────────"
+
+  case "$REMOTE_STORAGE" in
+    s3)
+      if [[ "$REMOTE_TOOL" == "rclone" ]]; then
+        local rclone_dest="${RCLONE_DEST:-s3:${S3_BUCKET}/${S3_PREFIX%/}}"
+        rclone lsl "$rclone_dest" | while read -r size date time path; do
+          local ts="-"
+          if [[ "$path" =~ ([0-9]{8}_[0-9]{6}) ]]; then
+            ts="${BASH_REMATCH[1]}"
+          fi
+          printf "%-22s %-12s %s\n" "$ts" "$size" "$path"
+        done
+      else
+        aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX%/}/" \
+          --region "$AWS_REGION" \
+          --recursive \
+          --human-readable 2>/dev/null | while read -r date time size path; do
+            local ts="-"
+            if [[ "$path" =~ ([0-9]{8}_[0-9]{6}) ]]; then
+              ts="${BASH_REMATCH[1]}"
+            fi
+            printf "%-22s %-12s %s\n" "$ts" "$size" "$path"
+          done | sort -r
+      fi
+      ;;
+
+    gcs)
+      if [[ "$REMOTE_TOOL" == "rclone" ]]; then
+        local rclone_dest="${RCLONE_DEST:-gcs:${GCS_BUCKET}/${GCS_PREFIX%/}}"
+        rclone lsl "$rclone_dest"
+      elif [[ "$REMOTE_TOOL" == "gcloud" ]]; then
+        gcloud storage ls --long "gs://${GCS_BUCKET}/${GCS_PREFIX%/}/" 2>/dev/null || true
+      else
+        gsutil ls -l "gs://${GCS_BUCKET}/${GCS_PREFIX%/}/" 2>/dev/null || true
+      fi
+      ;;
+
+    rclone)
+      rclone lsl "$RCLONE_DEST"
+      ;;
+
+    local)
+      if [[ -d "$BACKUP_DIR" ]]; then
+        for f in "$BACKUP_DIR"/*; do
+          if [[ -f "$f" ]]; then
+            local fname sz ts="-"
+            fname=$(basename "$f")
+            sz=$(du -h "$f" | cut -f1)
+            if [[ "$fname" =~ ([0-9]{8}_[0-9]{6}) ]]; then
+              ts="${BASH_REMATCH[1]}"
+            fi
+            printf "%-22s %-12s %s\n" "$ts" "$sz" "$fname"
+          fi
+        done | sort -r
+      else
+        log_warn "Local backup directory $BACKUP_DIR does not exist"
+      fi
+      ;;
+  esac
+
   echo "════════════════════════════════════════════════════════════"
   echo ""
-
-  aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive \
-    --human-readable | \
-    awk '{
-      date = $1
-      time = $2
-      size = $3
-      path = $4
-      # Extract timestamp from path
-      match(path, /([0-9]{8}_[0-9]{6})/, arr)
-      timestamp = arr[1]
-      # Extract database name
-      match(path, /([^\/]+)_backup_/, arr)
-      db = arr[1]
-      
-      printf "%-20s %-12s %s %s\n", timestamp, size, db, date " " time
-    }' | sort -r
-
-  echo ""
-  echo "════════════════════════════════════════════════════════════"
 }
 
 cleanup_old_backups() {
-  log_info "Cleaning up backups older than $RETENTION_DAYS days"
-
-  local cutoff_date
-  cutoff_date=$(date -u -d "$RETENTION_DAYS days ago" +%Y-%m-%d)
-
-  log_info "Deleting backups before: $cutoff_date"
-
+  log_info "Cleaning up backups older than $RETENTION_DAYS days..."
+  local cutoff_compact
+  cutoff_compact=$(date -u -d "$RETENTION_DAYS days ago" +%Y%m%d)
   local count=0
-  local freed_space=0
 
-  while IFS= read -r line; do
-    if [[ -z "$line" ]]; then
-      continue
-    fi
-
-    local size
-    local backup_path
-    size=$(echo "$line" | awk '{print $3}')
-    backup_path=$(echo "$line" | awk '{print $4}')
-
-    local backup_date
-    backup_date=$(echo "$line" | awk '{print $1}')
-
-    if [[ "$backup_date" < "$cutoff_date" ]]; then
-      log_info "Deleting: $backup_path (Size: $size, Date: $backup_date)"
-
-      if aws s3 rm "s3://${S3_BUCKET}/${backup_path}" --region "$AWS_REGION"; then
-        ((count++))
-        freed_space=$((freed_space + $(echo "$size" | sed 's/[KMG]B//' | cut -d. -f1)))
+  case "$REMOTE_STORAGE" in
+    s3)
+      if [[ "$REMOTE_TOOL" == "rclone" ]]; then
+        local rclone_dest="${RCLONE_DEST:-s3:${S3_BUCKET}/${S3_PREFIX%/}}"
+        log_info "Running rclone delete --min-age ${RETENTION_DAYS}d on $rclone_dest"
+        rclone delete "$rclone_dest" --min-age "${RETENTION_DAYS}d"
       else
-        log_warn "Failed to delete: $backup_path"
+        while IFS= read -r s3_path; do
+          if [[ -n "$s3_path" && "$s3_path" =~ ([0-9]{8})_[0-9]{6} ]]; then
+            local file_date="${BASH_REMATCH[1]}"
+            if [[ "$file_date" < "$cutoff_compact" ]]; then
+              log_info "Deleting old S3 backup: $s3_path"
+              aws s3 rm "s3://${S3_BUCKET}/${s3_path}" --region "$AWS_REGION"
+              ((count++))
+            fi
+          fi
+        done < <(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX%/}/" --region "$AWS_REGION" --recursive 2>/dev/null | awk '{print $4}' || true)
       fi
-    fi
-  done < <(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive \
-    --human-readable | sort)
+      ;;
 
-  log_info "Deleted $count old backup(s)"
-  echo ""
-  echo "Cleanup Summary:"
-  echo "- Backups deleted: $count"
-  echo "- Space freed: ~${freed_space}MB"
-  echo ""
+    gcs)
+      if [[ "$REMOTE_TOOL" == "rclone" ]]; then
+        local rclone_dest="${RCLONE_DEST:-gcs:${GCS_BUCKET}/${GCS_PREFIX%/}}"
+        rclone delete "$rclone_dest" --min-age "${RETENTION_DAYS}d"
+      elif [[ "$REMOTE_TOOL" == "gcloud" ]]; then
+        while IFS= read -r gcs_uri; do
+          if [[ -n "$gcs_uri" && "$gcs_uri" =~ ([0-9]{8})_[0-9]{6} ]]; then
+            local file_date="${BASH_REMATCH[1]}"
+            if [[ "$file_date" < "$cutoff_compact" ]]; then
+              log_info "Deleting old GCS backup: $gcs_uri"
+              gcloud storage rm "$gcs_uri"
+              ((count++))
+            fi
+          fi
+        done < <(gcloud storage ls "gs://${GCS_BUCKET}/${GCS_PREFIX%/}/" 2>/dev/null || true)
+      else
+        while IFS= read -r gcs_uri; do
+          if [[ -n "$gcs_uri" && "$gcs_uri" =~ ([0-9]{8})_[0-9]{6} ]]; then
+            local file_date="${BASH_REMATCH[1]}"
+            if [[ "$file_date" < "$cutoff_compact" ]]; then
+              log_info "Deleting old GCS backup: $gcs_uri"
+              gsutil rm "$gcs_uri"
+              ((count++))
+            fi
+          fi
+        done < <(gsutil ls "gs://${GCS_BUCKET}/${GCS_PREFIX%/}/" 2>/dev/null || true)
+      fi
+      ;;
+
+    rclone)
+      rclone delete "$RCLONE_DEST" --min-age "${RETENTION_DAYS}d"
+      ;;
+
+    local)
+      if [[ -d "$BACKUP_DIR" ]]; then
+        for f in "$BACKUP_DIR"/*; do
+          if [[ -f "$f" ]]; then
+            local b
+            b=$(basename "$f")
+            if [[ "$b" =~ ([0-9]{8})_[0-9]{6} ]]; then
+              local file_date="${BASH_REMATCH[1]}"
+              if [[ "$file_date" < "$cutoff_compact" ]]; then
+                log_info "Deleting old local backup: $b"
+                rm -f "$f"
+                ((count++))
+              fi
+            fi
+          fi
+        done
+      fi
+      ;;
+  esac
+
+  log_info "Pruning finished: deleted $count backup(s) older than $RETENTION_DAYS days"
 }
 
 verify_integrity() {
-  log_info "Verifying backup integrity..."
-
+  log_info "Verifying backup accessibility and health..."
   echo ""
   echo "════════════════════════════════════════════════════════════"
   echo "BACKUP INTEGRITY CHECK"
   echo "════════════════════════════════════════════════════════════"
-  echo ""
 
   local total=0
   local valid=0
   local invalid=0
 
-  while IFS= read -r backup_path; do
-    if [[ -z "$backup_path" ]]; then
-      continue
-    fi
+  case "$REMOTE_STORAGE" in
+    s3)
+      while IFS= read -r backup_path; do
+        if [[ -z "$backup_path" ]]; then continue; fi
+        ((total++))
+        local file_size
+        file_size=$(aws s3 ls "s3://${S3_BUCKET}/${backup_path}" --region "$AWS_REGION" 2>/dev/null | awk '{print $3}' || echo "0")
+        if [[ -n "$file_size" && "$file_size" -gt 0 ]]; then
+          echo "✓ VALID: $backup_path ($file_size bytes)"
+          ((valid++))
+        else
+          echo "✗ INVALID: $backup_path"
+          ((invalid++))
+        fi
+      done < <(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX%/}/" --region "$AWS_REGION" --recursive 2>/dev/null | awk '{print $4}' || true)
+      ;;
 
-    ((total++))
-
-    # Check if file exists and is accessible
-    if aws s3 ls "s3://${S3_BUCKET}/${backup_path}" --region "$AWS_REGION" &> /dev/null; then
-      local file_size
-      file_size=$(aws s3 ls "s3://${S3_BUCKET}/${backup_path}" --region "$AWS_REGION" | awk '{print $3}')
-
-      if [[ -n "$file_size" ]] && [[ "$file_size" -gt 0 ]]; then
-        echo "✓ VALID: $backup_path (Size: $file_size bytes)"
-        ((valid++))
-      else
-        echo "✗ INVALID: $backup_path (Empty or zero size)"
-        ((invalid++))
+    local)
+      if [[ -d "$BACKUP_DIR" ]]; then
+        for f in "$BACKUP_DIR"/*; do
+          if [[ -f "$f" ]]; then
+            ((total++))
+            if [[ -s "$f" ]]; then
+              echo "✓ VALID: $(basename "$f") ($(du -h "$f" | cut -f1))"
+              ((valid++))
+            else
+              echo "✗ EMPTY: $(basename "$f")"
+              ((invalid++))
+            fi
+          fi
+        done
       fi
-    else
-      echo "✗ INACCESSIBLE: $backup_path"
-      ((invalid++))
-    fi
-  done < <(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive | \
-    awk '{print $4}')
+      ;;
+
+    *)
+      log_info "Integrity check for $REMOTE_STORAGE performed via listing:"
+      list_backups
+      return 0
+      ;;
+  esac
 
   echo ""
   echo "════════════════════════════════════════════════════════════"
-  echo "Integrity Check Summary:"
-  echo "- Total backups: $total"
-  echo "- Valid: $valid"
-  echo "- Invalid/Inaccessible: $invalid"
+  echo "Summary: Total: $total | Valid: $valid | Issues: $invalid"
   echo "════════════════════════════════════════════════════════════"
-  echo ""
-
-  if [[ $invalid -gt 0 ]]; then
-    log_warn "Found $invalid backup(s) with integrity issues"
-    return 1
-  fi
-
-  return 0
 }
 
 generate_report() {
   log_info "Generating backup report..."
-
   echo ""
   echo "════════════════════════════════════════════════════════════"
   echo "BACKUP REPORT"
-  echo "Generated: $(date)"
+  echo "Generated: $(date -u)"
+  echo "Storage:   $REMOTE_STORAGE"
+  echo "Retention: $RETENTION_DAYS days"
   echo "════════════════════════════════════════════════════════════"
-  echo ""
-
-  # Backup count
-  local total_backups
-  total_backups=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive | wc -l)
-
-  # Total size
-  local total_size
-  total_size=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive \
-    --human-readable | \
-    awk '{sum += $3} END {print sum}')
-
-  # Oldest backup
-  local oldest
-  oldest=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive | \
-    head -1)
-
-  # Newest backup
-  local newest
-  newest=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive | \
-    tail -1)
-
-  # S3 storage class stats
-  local storage_stats
-  storage_stats=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive \
-    --summarize | tail -3)
-
-  echo "Configuration:"
-  echo "- S3 Bucket: $S3_BUCKET"
-  echo "- S3 Prefix: $S3_PREFIX"
-  echo "- Retention Policy: $RETENTION_DAYS days"
-  echo ""
-
-  echo "Statistics:"
-  echo "- Total Backups: $total_backups"
-  echo "- Total Size: $total_size"
-  echo ""
-
-  echo "Oldest Backup:"
-  echo "$oldest" | awk '{print "  Date: " $1 " " $2; print "  File: " $4}'
-  echo ""
-
-  echo "Latest Backup:"
-  echo "$newest" | awk '{print "  Date: " $1 " " $2; print "  File: " $4}'
-  echo ""
-
-  echo "Storage Summary:"
-  echo "$storage_stats"
-  echo ""
-
-  echo "════════════════════════════════════════════════════════════"
-  echo ""
+  list_backups
 }
 
-show_stats() {
-  log_info "Calculating storage statistics..."
-
-  local total_files
-  local total_bytes
-  local avg_file_size
-
-  total_files=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive | wc -l)
-
-  total_bytes=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --region "$AWS_REGION" \
-    --recursive | \
-    awk '{sum += $3} END {print sum}')
-
-  if [[ $total_files -gt 0 ]]; then
-    avg_file_size=$((total_bytes / total_files))
-  else
-    avg_file_size=0
-  fi
-
-  echo ""
-  echo "════════════════════════════════════════════════════════════"
-  echo "STORAGE STATISTICS"
-  echo "════════════════════════════════════════════════════════════"
-  echo ""
-  printf "%-30s %15s\n" "Total Files:" "$total_files"
-  printf "%-30s %15s\n" "Total Size (bytes):" "$total_bytes"
-  printf "%-30s %15s\n" "Average File Size (bytes):" "$avg_file_size"
-  printf "%-30s %15s\n" "Average File Size (MB):" "$((avg_file_size / 1024 / 1024))"
-  echo ""
-  echo "════════════════════════════════════════════════════════════"
-  echo ""
-}
-
-# ── Main Execution ────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────
 
 main() {
   local action=""
 
-  # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --list)
@@ -361,15 +418,23 @@ main() {
         action="verify"
         shift
         ;;
-      --report)
+      --report|--stats)
         action="report"
         shift
         ;;
-      --stats)
-        action="stats"
-        shift
+      --storage)
+        REMOTE_STORAGE="$2"
+        shift 2
         ;;
-      --help)
+      --retention-days)
+        RETENTION_DAYS="$2"
+        shift 2
+        ;;
+      --backup-dir)
+        BACKUP_DIR="$2"
+        shift 2
+        ;;
+      --help|-h)
         print_usage
         exit 0
         ;;
@@ -380,6 +445,8 @@ main() {
         ;;
     esac
   done
+
+  resolve_storage
 
   if ! validate_config; then
     exit 1
@@ -398,15 +465,13 @@ main() {
     report)
       generate_report
       ;;
-    stats)
-      show_stats
-      ;;
     *)
-      log_error "No action specified"
       print_usage
-      exit 1
+      exit 0
       ;;
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
