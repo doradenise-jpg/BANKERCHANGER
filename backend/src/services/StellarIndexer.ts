@@ -24,6 +24,12 @@ interface MarketLockedEvent {
   tx_hash: string;
 }
 
+interface MarketCancelledEvent {
+  market_id: string;
+  reason: string;
+  tx_hash: string;
+}
+
 export class StellarIndexer {
   constructor(private db: Pool) {}
 
@@ -142,6 +148,59 @@ export class StellarIndexer {
     } catch (err) {
       await client.query('ROLLBACK');
       logger.error(`Failed to handle MarketResolved event ${tx_hash}`, err);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async handleMarketCancelled(event: MarketCancelledEvent): Promise<void> {
+    const { market_id, reason, tx_hash } = event;
+
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const updateResult = await client.query(
+        `UPDATE markets
+         SET status = 'cancelled',
+             cancel_reason = $1,
+             updated_at = NOW()
+         WHERE market_id = $2`,
+        [reason, market_id]
+      );
+
+      if (updateResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        logger.warn(`MarketCancelled ${tx_hash}: market ${market_id} not found, skipping`);
+        return;
+      }
+
+      const bettorsResult = await client.query(
+        `SELECT DISTINCT bettor_address FROM bets WHERE market_id = $1`,
+        [market_id]
+      );
+
+      for (const row of bettorsResult.rows) {
+        await client.query(
+          `INSERT INTO push_notifications (recipient_address, market_id, type, payload, created_at)
+           VALUES ($1, $2, $3, $4, NOW())`,
+          [
+            row.bettor_address,
+            market_id,
+            'market_cancelled',
+            JSON.stringify({ market_id, reason, refund: true }),
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+      logger.info(
+        `MarketCancelled ${market_id} reason='${reason}', enqueued refund notifications for ${bettorsResult.rowCount} bettors`
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error(`Failed to handle MarketCancelled event ${tx_hash}`, err);
       throw err;
     } finally {
       client.release();
