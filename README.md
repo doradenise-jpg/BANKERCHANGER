@@ -138,3 +138,6 @@ MIT
 
 <!-- handsoff-issue-1039 -->
 - #1039: Implement `withdraw_fees()` â€” allow admin to claim treasury balance
+
+<!-- handsoff-issue-1040 -->
+- #1040: Implement `get_treasury_state()` â€” read treasury balance and total collected
