@@ -29,6 +29,10 @@ pub struct MarketLocked {
 pub struct MarketResolved {
     pub market_id: u64,
     pub winning_outcome: u32,
+    pub oracle_address: Address,
+    pub winning_pool: i128,
+    pub losing_pool: i128,
+    pub fee: i128,
 }
 
 #[contracttype]
@@ -72,12 +76,24 @@ pub fn emit_market_locked(env: &Env, market_id: u64, locked_at: u64) {
     );
 }
 
-pub fn emit_market_resolved(env: &Env, market_id: u64, winning_outcome: u32) {
+pub fn emit_market_resolved(
+    env: &Env,
+    market_id: u64,
+    winning_outcome: u32,
+    oracle_address: Address,
+    winning_pool: i128,
+    losing_pool: i128,
+    fee: i128,
+) {
     env.events().publish(
         ("market_resolved",),
         MarketResolved {
             market_id,
             winning_outcome,
+            oracle_address,
+            winning_pool,
+            losing_pool,
+            fee,
         },
     );
 }
