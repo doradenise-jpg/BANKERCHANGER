@@ -197,6 +197,14 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   id                         BIGSERIAL   PRIMARY KEY,
   webhook_id                 TEXT        NOT NULL,
   target_url                 TEXT        NOT NULL,
-  signing_secret     
-
-/* … truncated 1099 chars — edit only what you need near the top … */
+  signing_secret             TEXT        NOT NULL,
+  event_type                 TEXT        NOT NULL,
+  payload                    JSONB       NOT NULL DEFAULT '{}',
+  status                     TEXT        NOT NULL DEFAULT 'pending',
+  attempts                   INTEGER     NOT NULL DEFAULT 0,
+  last_error                 TEXT,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  delivered_at               TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx ON webhook_deliveries (webhook_id);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_status_idx ON webhook_deliveries (status);
