@@ -170,14 +170,108 @@ export class StellarIndexer {
 
   private async processEvent(event: RawContractEvent): Promise<void> {
     // Dispatch to the appropriate handler based on contract and topic.
-    // Handlers are wired up by the indexer entrypoint; this base implementation
-    // logs the event so subclasses/consumers can override.
-    logger.info('Processing contract event', {
+    const topicName = this.getTopicName(event);
+
+    switch (topicName) {
+      case 'MarketCreated':
+        await this.handleMarketCreated(event);
+        break;
+      default:
+        logger.info('Processing contract event', {
+          ledger: event.ledger,
+          contractId: event.contractId,
+          txHash: event.txHash,
+          topic: event.topic,
+        });
+    }
+  }
+
+  private getTopicName(event: RawContractEvent): string | undefined {
+    const first = event.topic[0];
+    if (typeof first === 'string') return first;
+    if (first && typeof first === 'object' && 'symbol' in first) {
+      return String((first as { symbol: unknown }).symbol);
+    }
+    return undefined;
+  }
+
+  /**
+   * Handle a MarketCreated event emitted by the factory contract.
+   *
+   * Inserts a new market row with status 'open'. Uses ON CONFLICT DO NOTHING
+   * keyed on market_id so duplicate events are idempotent.
+   */
+  async handleMarketCreated(event: RawContractEvent): Promise<void> {
+    const data = this.extractEventData(event);
+
+    const marketId = this.requireField<string>(data, 'market_id');
+    const contractAddress = this.requireField<string>(data, 'contract_address');
+    const matchId = this.requireField<string>(data, 'match_id');
+    const fighterA = this.requireField<string>(data, 'fighter_a');
+    const fighterB = this.requireField<string>(data, 'fighter_b');
+    const weightClass = this.requireField<string>(data, 'weight_class');
+    const scheduledAt = this.requireField<string | number>(data, 'scheduled_at');
+    const feeBps = this.requireField<number>(data, 'fee_bps');
+    const venue = this.requireField<string>(data, 'venue');
+    const titleFight = this.requireField<boolean>(data, 'title_fight');
+
+    const createdAt = this.toTimestamp(scheduledAt);
+
+    await this.db.query(
+      `INSERT INTO markets
+         (market_id, contract_address, match_id, fighter_a, fighter_b,
+          weight_class, scheduled_at, fee_bps, venue, title_fight,
+          status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open', $11)
+       ON CONFLICT (market_id) DO NOTHING`,
+      [
+        marketId,
+        contractAddress,
+        matchId,
+        fighterA,
+        fighterB,
+        weightClass,
+        createdAt,
+        feeBps,
+        venue,
+        titleFight,
+        createdAt,
+      ],
+    );
+
+    logger.info('MarketCreated handled', {
       ledger: event.ledger,
-      contractId: event.contractId,
-      txHash: event.txHash,
-      topic: event.topic,
+      marketId,
+      contractAddress,
     });
+  }
+
+  private extractEventData(event: RawContractEvent): Record<string, unknown> {
+    const value = event.value;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return {};
+  }
+
+  private requireField<T>(data: Record<string, unknown>, field: string): T {
+    const value = data[field];
+    if (value === undefined || value === null) {
+      throw new Error(`MarketCreated event missing required field: ${field}`);
+    }
+    return value as T;
+  }
+
+  private toTimestamp(value: string | number): Date {
+    if (typeof value === 'number') {
+      // Soroban timestamps are unix seconds; convert to milliseconds.
+      return new Date(value * 1000);
+    }
+    const numeric = Number(value);
+    if (!Number.isNaN(numeric)) {
+      return new Date(numeric * 1000);
+    }
+    return new Date(value);
   }
 
   private sleep(ms: number): Promise<void> {
