@@ -133,3 +133,8 @@ Automated deployment on main branch push. Full guide: [docs/STAGING_ENVIRONMENT.
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1039 -->
+- #1039: Implement `withdraw_fees()` â€” allow admin to claim treasury balance
