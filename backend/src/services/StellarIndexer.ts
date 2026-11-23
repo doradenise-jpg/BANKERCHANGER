@@ -19,6 +19,11 @@ interface MarketResolvedEvent {
   tx_hash: string;
 }
 
+interface MarketLockedEvent {
+  market_id: string;
+  tx_hash: string;
+}
+
 export class StellarIndexer {
   constructor(private db: Pool) {}
 
@@ -61,6 +66,30 @@ export class StellarIndexer {
       throw err;
     } finally {
       client.release();
+    }
+  }
+
+  async handleMarketLocked(event: MarketLockedEvent): Promise<void> {
+    const { market_id, tx_hash } = event;
+
+    try {
+      const result = await this.db.query(
+        `UPDATE markets
+         SET status = 'locked',
+             updated_at = NOW()
+         WHERE market_id = $1`,
+        [market_id]
+      );
+
+      if (result.rowCount === 0) {
+        logger.warn(`MarketLocked ${tx_hash}: market ${market_id} not found, skipping`);
+        return;
+      }
+
+      logger.info(`MarketLocked ${market_id} status set to 'locked'`);
+    } catch (err) {
+      logger.error(`Failed to handle MarketLocked event ${tx_hash}`, err);
+      throw err;
     }
   }
 
