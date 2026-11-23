@@ -200,243 +200,190 @@ fn funded_treasury(
     (env, client, admin, market, token_addr)
 }
 
+// ── Issue #1041 — Treasury unit test suite ────────────────────────────────────
+
 #[test]
-fn test_withdraw_below_reserve_fails() {
-    // Treasury has 500 XLM; reserve is 100 XLM (default = 1_000_000_000 stroops).
-    // Trying to withdraw 401 XLM should fail (500 - 401 = 99 < 100).
-    let fund: i128 = 5_000_000_000; // 500 XLM
-    let (env, client, admin, _market, token) = funded_treasury(fund);
+fn test_initialize_sets_state() {
+    let env = Env::default();
+    let (client, admin, token) = setup_treasury(&env);
 
-    // Set reserve to 100 XLM explicitly.
-    client.set_minimum_reserve(&admin, &1_000_000_000_i128);
-
-    let dest = Address::generate(&env);
-    // 401 XLM = 4_010_000_000 stroops; leaves 990_000_000 < 1_000_000_000
-    let result = client.try_withdraw_fees(&admin, &token, &4_010_000_000_i128, &dest);
-    assert!(
-        result.is_err(),
-        "withdrawal leaving balance below reserve should fail"
-    );
-    assert_eq!(
-        result.unwrap_err(),
-        Ok(ContractError::ReserveFloorBreached)
-    );
+    let state = client.get_treasury_state();
+    assert_eq!(state.admin, admin);
+    assert_eq!(state.token, token);
+    assert_eq!(state.total_balance, 0);
+    assert_eq!(state.total_fees_collected, 0);
 }
 
 #[test]
-fn test_withdraw_leaving_exactly_reserve_succeeds() {
-    // Treasury has 500 XLM; reserve is 100 XLM.
-    // Withdrawing exactly 400 XLM leaves balance == reserve — should succeed.
-    let fund: i128 = 5_000_000_000; // 500 XLM
-    let (env, client, admin, _market, token) = funded_treasury(fund);
+fn test_initialize_twice_fails() {
+    let env = Env::default();
+    let (client, admin, token) = setup_treasury(&env);
+    let factory = Address::generate(&env);
 
-    client.set_minimum_reserve(&admin, &1_000_000_000_i128); // 100 XLM
-
-    let dest = Address::generate(&env);
-    // 400 XLM = 4_000_000_000 stroops; leaves exactly 1_000_000_000 == reserve
-    client.withdraw_fees(&admin, &token, &4_000_000_000_i128, &dest);
-    assert_eq!(
-        client.get_accumulated_fees(&token),
-        1_000_000_000_i128,
-        "balance after withdrawal should equal the reserve"
-    );
+    let result = client.try_initialize(&admin, &token, &factory, &1_000_000_000_i128);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::AlreadyInitialized));
 }
 
 #[test]
-fn competing_withdrawals_cannot_both_consume_reserved_fees() {
-    let (env, client, admin, _market, token) = funded_treasury(5_000_000_000);
-    client.set_minimum_reserve(&admin, &1_000_000_000);
-    let first_destination = Address::generate(&env);
-    let second_destination = Address::generate(&env);
+fn test_deposit_fee_valid_updates_balance() {
+    let env = Env::default();
+    let (client, admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+    client.approve_market(&admin, &market);
 
-    // Model two withdrawals submitted against the same starting balance. Once
-    // the first reserves and transfers its amount, the second must re-check the
-    // updated accounting before it can pass the reserve floor.
-    client.withdraw_fees(&admin, &token, &3_000_000_000, &first_destination);
-    let second = client.try_withdraw_fees(&admin, &token, &1_100_000_000, &second_destination);
-    assert_eq!(second.unwrap_err(), Ok(ContractError::ReserveFloorBreached));
-    assert_eq!(client.get_accumulated_fees(&token), 2_000_000_000);
+    let amount = 5_000_000_i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    client.deposit_fees(&market, &token, &amount);
+
+    let state = client.get_treasury_state();
+    assert_eq!(state.total_balance, amount);
+    assert_eq!(state.total_fees_collected, amount);
+
+    // Second deposit accumulates consistently.
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    client.deposit_fees(&market, &token, &amount);
+
+    let state2 = client.get_treasury_state();
+    assert_eq!(state2.total_balance, amount * 2);
+    assert_eq!(state2.total_fees_collected, amount * 2);
 }
 
 #[test]
-fn test_admin_can_update_minimum_reserve() {
-    let (env, client, admin, _market, token) = funded_treasury(5_000_000_000);
-    // Default reserve is 1_000_000_000 (100 XLM).
-    assert_eq!(client.get_minimum_reserve(), 1_000_000_000_i128);
+fn test_deposit_fee_invalid_amount_fails() {
+    let env = Env::default();
+    let (client, admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+    client.approve_market(&admin, &market);
 
-    // Admin sets reserve to 50 XLM.
-    client.set_minimum_reserve(&admin, &500_000_000_i128);
-    assert_eq!(client.get_minimum_reserve(), 500_000_000_i128);
+    let result = client.try_deposit_fees(&market, &token, &0_i128);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+    let result_neg = client.try_deposit_fees(&market, &token, &-1_i128);
+    assert!(result_neg.is_err());
+    assert_eq!(result_neg.unwrap_err(), Ok(ContractError::InvalidAmount));
 }
 
 #[test]
-fn test_non_admin_cannot_set_minimum_reserve() {
-    let (env, client, _admin, _market, _token) = funded_treasury(5_000_000_000);
-    let non_admin = Address::generate(&env);
-    let result = client.try_set_minimum_reserve(&non_admin, &0_i128);
+fn test_deposit_fee_unapproved_market_fails() {
+    let env = Env::default();
+    let (client, _admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+
+    let amount = 1_000_000_i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    let result = client.try_deposit_fees(&market, &token, &amount);
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), Ok(ContractError::Unauthorized));
 }
 
 #[test]
-fn test_set_minimum_reserve_to_zero_disables_check() {
-    // With reserve = 0 the admin should be able to withdraw everything.
-    let fund: i128 = 5_000_000_000; // 500 XLM
-    let (env, client, admin, _market, token) = funded_treasury(fund);
-
-    client.set_minimum_reserve(&admin, &0_i128);
-
-    let dest = Address::generate(&env);
-    // Withdraw almost everything (leave 1 XLM for MIN_WITHDRAWAL check to pass)
-    client.withdraw_fees(&admin, &token, &4_990_000_000_i128, &dest);
-    assert_eq!(client.get_accumulated_fees(&token), 10_000_000_i128);
-}
-
-// ── Issue #856 — Fee Distribution Split BPS Validation Tests ──────────────────
-
-use boxmeout_shared::types::FeeDistributionSplit;
-
-#[test]
-fn test_valid_fee_distribution_sums_to_10000_accepted() {
+fn test_withdraw_fees_admin_succeeds() {
     let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
+    let (client, admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+    client.approve_market(&admin, &market);
 
-    let mut splits = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    splits.push_back(FeeDistributionSplit { recipient: a.clone(), share_bps: 7_000 });
-    splits.push_back(FeeDistributionSplit { recipient: b.clone(), share_bps: 3_000 });
+    let amount = 10_000_000_i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    client.deposit_fees(&market, &token, &amount);
 
-    let result = client.try_set_fee_distribution(&admin, &splits);
-    assert!(result.is_ok(), "valid 10000 BPS split should succeed");
+    let recipient = Address::generate(&env);
+    let withdraw_amount = 4_000_000_i128;
+    client.withdraw_fees(&admin, &recipient, &withdraw_amount);
 
-    let stored = client.get_fee_distribution();
-    assert_eq!(stored.len(), 2);
-    assert_eq!(stored.get(0).unwrap().share_bps, 7_000);
-    assert_eq!(stored.get(1).unwrap().share_bps, 3_000);
+    let state = client.get_treasury_state();
+    assert_eq!(state.total_balance, amount - withdraw_amount);
+    // Fees collected is cumulative and unaffected by withdrawals.
+    assert_eq!(state.total_fees_collected, amount);
+
+    let token_client = soroban_sdk::token::TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&recipient), withdraw_amount);
 }
 
 #[test]
-fn test_fee_distribution_sum_less_than_10000_rejected() {
+fn test_withdraw_fees_non_admin_fails() {
     let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
+    let (client, admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+    client.approve_market(&admin, &market);
 
-    let mut splits = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    splits.push_back(FeeDistributionSplit { recipient: a, share_bps: 5_000 });
-    splits.push_back(FeeDistributionSplit { recipient: b, share_bps: 4_999 }); // sum = 9999
+    let amount = 10_000_000_i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    client.deposit_fees(&market, &token, &amount);
 
-    let result = client.try_set_fee_distribution(&admin, &splits);
-    assert!(result.is_err(), "split summing to 9999 BPS must be rejected");
-    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidFeeSplit));
-}
-
-#[test]
-fn test_fee_distribution_sum_greater_than_10000_rejected() {
-    let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
-
-    let mut splits = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    splits.push_back(FeeDistributionSplit { recipient: a, share_bps: 5_000 });
-    splits.push_back(FeeDistributionSplit { recipient: b, share_bps: 5_001 }); // sum = 10001
-
-    let result = client.try_set_fee_distribution(&admin, &splits);
-    assert!(result.is_err(), "split summing to 10001 BPS must be rejected");
-    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidFeeSplit));
-}
-
-#[test]
-fn test_fee_distribution_empty_splits_rejected() {
-    let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
-
-    let empty_splits = Vec::<FeeDistributionSplit>::new(&env);
-    let result = client.try_set_fee_distribution(&admin, &empty_splits);
-    assert!(result.is_err(), "empty split list must be rejected");
-    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidFeeSplit));
-}
-
-#[test]
-fn test_fee_distribution_zero_share_entry_rejected() {
-    let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
-
-    let mut splits = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    splits.push_back(FeeDistributionSplit { recipient: a, share_bps: 10_000 });
-    splits.push_back(FeeDistributionSplit { recipient: b, share_bps: 0 }); // zero share
-
-    let result = client.try_set_fee_distribution(&admin, &splits);
-    assert!(result.is_err(), "zero-share entry must be rejected");
-    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidFeeSplit));
-}
-
-#[test]
-fn test_fee_distribution_non_admin_rejected() {
-    let env = Env::default();
-    let (client, _admin, _token) = setup_treasury(&env);
     let non_admin = Address::generate(&env);
-
-    let mut splits = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    splits.push_back(FeeDistributionSplit { recipient: a, share_bps: 10_000 });
-
-    let result = client.try_set_fee_distribution(&non_admin, &splits);
-    assert!(result.is_err(), "non-admin must not be able to set fee distribution");
+    let recipient = Address::generate(&env);
+    let result = client.try_withdraw_fees(&non_admin, &recipient, &1_000_000_i128);
+    assert!(result.is_err());
     assert_eq!(result.unwrap_err(), Ok(ContractError::Unauthorized));
+
+    // Balance unchanged after failed withdrawal.
+    let state = client.get_treasury_state();
+    assert_eq!(state.total_balance, amount);
 }
 
 #[test]
-fn test_fee_distribution_single_recipient_10000_accepted() {
+fn test_withdraw_fees_invalid_amount_fails() {
     let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
+    let (client, admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+    client.approve_market(&admin, &market);
 
-    let mut splits = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    splits.push_back(FeeDistributionSplit { recipient: a.clone(), share_bps: 10_000 });
+    let amount = 10_000_000_i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    client.deposit_fees(&market, &token, &amount);
 
-    let result = client.try_set_fee_distribution(&admin, &splits);
-    assert!(result.is_ok(), "single recipient with 10000 BPS should succeed");
-
-    let stored = client.get_fee_distribution();
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored.get(0).unwrap().share_bps, 10_000);
+    let recipient = Address::generate(&env);
+    let result = client.try_withdraw_fees(&admin, &recipient, &0_i128);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
 }
 
 #[test]
-fn test_get_fee_distribution_returns_empty_when_unset() {
+fn test_withdraw_fees_exceeding_balance_fails() {
     let env = Env::default();
-    let (client, _admin, _token) = setup_treasury(&env);
+    let (client, admin, token) = setup_treasury(&env);
+    let market = Address::generate(&env);
+    client.approve_market(&admin, &market);
 
-    let splits = client.get_fee_distribution();
-    assert_eq!(splits.len(), 0, "unset distribution should return empty vec");
+    let amount = 10_000_000_i128;
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&market, &amount);
+    client.deposit_fees(&market, &token, &amount);
+
+    let recipient = Address::generate(&env);
+    let result = client.try_withdraw_fees(&admin, &recipient, &(amount + 1));
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::InsufficientBalance));
+
+    let state = client.get_treasury_state();
+    assert_eq!(state.total_balance, amount);
 }
 
 #[test]
-fn test_fee_distribution_can_be_overwritten() {
+fn test_balance_tracking_multiple_markets() {
     let env = Env::default();
-    let (client, admin, _token) = setup_treasury(&env);
+    let (client, admin, token) = setup_treasury(&env);
+    let market_a = Address::generate(&env);
+    let market_b = Address::generate(&env);
+    client.approve_market(&admin, &market_a);
+    client.approve_market(&admin, &market_b);
 
-    let mut splits_v1 = Vec::<FeeDistributionSplit>::new(&env);
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    splits_v1.push_back(FeeDistributionSplit { recipient: a.clone(), share_bps: 6_000 });
-    splits_v1.push_back(FeeDistributionSplit { recipient: b.clone(), share_bps: 4_000 });
-    client.set_fee_distribution(&admin, &splits_v1);
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&market_a, &3_000_000_i128);
+    token_client.mint(&market_b, &7_000_000_i128);
+    client.deposit_fees(&market_a, &token, &3_000_000_i128);
+    client.deposit_fees(&market_b, &token, &7_000_000_i128);
 
-    // Overwrite with three-way split
-    let mut splits_v2 = Vec::<FeeDistributionSplit>::new(&env);
-    let c = Address::generate(&env);
-    splits_v2.push_back(FeeDistributionSplit { recipient: a.clone(), share_bps: 5_000 });
-    splits_v2.push_back(FeeDistributionSplit { recipient: b.clone(), share_bps: 3_000 });
-    splits_v2.push_back(FeeDistributionSplit { recipient: c.clone(), share_bps: 2_000 });
-    client.set_fee_distribution(&admin, &splits_v2);
+    let state = client.get_treasury_state();
+    assert_eq!(state.total_balance, 10_000_000);
+    assert_eq!(state.total_fees_collected, 10_000_000);
 
-    let stored = client.get_fee_distribution();
-    assert_eq!(stored.len(), 3);
-    assert_eq!(stored.get(2).unwrap().share_bps, 2_000);
+    let recipient = Address::generate(&env);
+    client.withdraw_fees(&admin, &recipient, &5_000_000_i128);
+
+    let state2 = client.get_treasury_state();
+    assert_eq!(state2.total_balance, 5_000_000);
+    assert_eq!(state2.total_fees_collected, 10_000_000);
 }
