@@ -60,6 +60,7 @@ const LP_FEE_PER_SHARE: &str = "LP_FEE_PER_SHARE";
 const ALLOW_DRAW: &str       = "ALLOW_DRAW";
 /// Seed liquidity minimum — 1 XLM per pool side
 const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
+const MAX_SLIPPAGE_BPS: i128 = 3_000;
 /// Persistent key for betting token contract address
 const TOKEN: &str = "TOKEN";
 /// Grace period (24 hours) after scheduled fight start before expired market is refundable
@@ -292,7 +293,7 @@ impl Market {
     /// - `AlreadyInitialized`: Market has already been initialized
     ///
     /// # Security
-    /// - Caller must be the factory (NotFactory guard).
+    /// - The factory must be an authenticated contract address distinct from this market.
     /// - AlreadyInitialized guard prevents re-initialization.
     pub fn initialize(
         env: Env,
@@ -301,16 +302,20 @@ impl Market {
         fight: FightDetails,
         config: MarketConfig,
         treasury: Address,
-        tier: u32,
     ) -> Result<(), ContractError> {
         // CHECKS
-        factory.require_auth();
         if env.storage().persistent().has(&STATE) {
             return Err(ContractError::AlreadyInitialized);
         }
+        // Soroban encodes contract addresses with a C prefix and accounts with G.
+        let mut strkey = [0; 56];
+        factory.to_string().copy_into_slice(&mut strkey);
+        if strkey[0] != b'C' || factory == env.current_contract_address() {
+            return Err(ContractError::NotFactory);
+        }
+        factory.require_auth();
 
-        // Map the tier u32 to an OptionalMarketTier variant.
-        let market_tier = match tier {
+        let market_tier = match config.tier {
             8  => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier8),
             10 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier10),
             12 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier12),
@@ -948,6 +953,7 @@ impl Market {
                     state.market_id,
                     oracle,
                     soroban_sdk::String::from_str(&env, "draw_disabled_outcome_refund"),
+                    env.ledger().timestamp(),
                 );
                 return Ok(());
             }
@@ -1114,7 +1120,7 @@ impl Market {
             boxmeout_shared::emit_market_resolution_pending(
                 &env,
                 state.market_id,
-                outcome_byte as u8,
+                outcome_byte,
                 cooldown_end_ledger,
             );
         } else if conflicting_count > 0 && matching_count == 1 {
@@ -1491,7 +1497,7 @@ impl Market {
         FactoryClient::new(&env, &factory).cleanup_terminal_market(
             &env.current_contract_address(),
             &state.market_id,
-        )?;
+        );
 
         boxmeout_shared::emit_market_cancelled(
             &env,
@@ -1637,6 +1643,7 @@ impl Market {
                     state.market_id,
                     admin,
                     soroban_sdk::String::from_str(&env, "draw_disabled_outcome_refund"),
+                    env.ledger().timestamp(),
                 );
                 return Ok(());
             }

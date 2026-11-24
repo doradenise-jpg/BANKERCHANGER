@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use soroban_sdk::{contract, contractclient, contractimpl, Address, BytesN, Env, Map, Symbol, Vec};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 use boxmeout_shared::{
     errors::ContractError,
@@ -36,6 +36,19 @@ const DEFAULT_CONFIG: &str = "DEFAULT_CONFIG";
 const TREASURY: &str = "TREASURY";
 const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
 const OPEN_MARKETS: &str = "OPEN_MARKETS";
+
+/// Fight details and live status for a registered market.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketInfo {
+    pub market_id: u64,
+    pub contract_address: Address,
+    pub fighter_a: String,
+    pub fighter_b: String,
+    pub weight_class: String,
+    pub scheduled_at: u64,
+    pub status: MarketStatus,
+}
 
 #[contractclient(name = "MarketClient")]
 pub trait MarketInterface {
@@ -317,13 +330,13 @@ impl MarketFactory {
         let market_address = env
             .deployer()
             .with_address(env.current_contract_address(), salt)
-            .deploy(wasm_hash);
+            .deploy_v2(wasm_hash, ());
 
         let market_client = MarketClient::new(&env, &market_address);
         market_client.initialize(
             &env.current_contract_address(),
             &market_id,
-            &fight.clone(),
+            &fight,
             &effective_config,
             &treasury,
         );
@@ -382,32 +395,41 @@ impl MarketFactory {
         result
     }
 
-    /// Lists markets with pagination, returning `(market_id, status)` pairs.
+    /// Lists registered markets newest first, including closed markets.
     ///
-    /// - `offset`: first market ID to include (0-based)
-    /// - `limit`: maximum number of results; capped at 100
-    ///
-    /// Markets whose state cannot be read are silently skipped.
-    pub fn list_markets(env: Env, offset: u64, limit: u32) -> Vec<(u64, MarketStatus)> {
-        let count: u64 = env.storage().persistent().get(&MARKET_COUNT).unwrap_or(0);
+    /// IDs are assigned in creation order, so they also break timestamp ties.
+    /// Offset counts registrations from the newest market. Unreadable markets
+    /// are skipped within the requested slice, which is capped at 100.
+    pub fn list_markets(env: Env, offset: u64, limit: u32) -> Vec<MarketInfo> {
+        let mut result = Vec::new(&env);
+        let count = Self::get_market_count(env.clone());
+        let end = count.saturating_sub(offset);
+        if end == 0 || limit == 0 {
+            return result;
+        }
         let map: Map<u64, Address> = env
             .storage()
             .persistent()
             .get(&MARKET_MAP)
             .unwrap_or_else(|| Map::new(&env));
-        let cap = if limit > 100 { 100u32 } else { limit };
-        let mut result: Vec<(u64, MarketStatus)> = Vec::new(&env);
 
-        let mut i = offset;
-        let mut fetched = 0u32;
-        while i < count && fetched < cap {
-            if let Some(addr) = map.get(i) {
-                if let Ok(Ok(state)) = MarketClient::new(&env, &addr).try_get_state() {
-                    result.push_back((i, state.status));
-                    fetched += 1;
+        for market_id in (end.saturating_sub(u64::from(limit.min(100)))..end).rev() {
+            if let Some(address) = map.get(market_id) {
+                let market = MarketClient::new(&env, &address);
+                if let (Ok(Ok(state)), Ok(Ok(status))) =
+                    (market.try_get_state(), market.try_get_market_status())
+                {
+                    result.push_back(MarketInfo {
+                        market_id,
+                        contract_address: address,
+                        fighter_a: state.fight.fighter_a,
+                        fighter_b: state.fight.fighter_b,
+                        weight_class: state.fight.weight_class,
+                        scheduled_at: state.fight.scheduled_at,
+                        status,
+                    });
                 }
             }
-            i += 1;
         }
         result
     }
@@ -708,10 +730,14 @@ impl MarketFactory {
     ///
     /// # Errors
     /// - `NotAdmin`: Caller is not the admin
-    pub fn pause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn pause_factory(env: Env, admin: Address, reason: String) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&PAUSED, &true);
+        env.events().publish(
+            (Symbol::new(&env, "FactoryPaused"), admin),
+            (env.ledger().timestamp(), reason),
+        );
         Ok(())
     }
 
@@ -719,10 +745,14 @@ impl MarketFactory {
     ///
     /// # Errors
     /// - `NotAdmin`: Caller is not the admin
-    pub fn unpause_factory(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn unpause_factory(env: Env, admin: Address, reason: String) -> Result<(), ContractError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&PAUSED, &false);
+        env.events().publish(
+            (Symbol::new(&env, "FactoryUnpaused"), admin),
+            (env.ledger().timestamp(), reason),
+        );
         Ok(())
     }
 
@@ -949,6 +979,8 @@ impl MarketFactory {
 
 #[cfg(test)]
 mod tests {
+    mod factory_tests;
+
     use crate::{MarketFactory, MarketFactoryClient};
     use boxmeout_shared::types::{FactoryConfig, FightDetails, MarketConfig};
     use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
@@ -1043,7 +1075,7 @@ mod tests {
         client.initialize(&admin, &treasury, &oracle, &oracle_raw_key, &config);
 
         let result = client.try_initialize(&admin, &treasury, &oracle, &oracle_raw_key, &config);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::AlreadyInitialized));
     }
 
     // ── create_market validation tests ──────────────────────
@@ -1062,7 +1094,7 @@ mod tests {
             &oracle_raw_key,
             &default_config(),
         );
-        client.pause_factory(&admin);
+        client.pause_factory(&admin, &String::from_str(&env, "maintenance"));
 
         let caller = Address::generate(&env);
         let result = client.try_create_market(
@@ -1071,20 +1103,20 @@ mod tests {
             &sample_market_config(&env),
             &None,
         );
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::FactoryPaused));
     }
 
     #[test]
-    #[ignore = "pre-existing: env.ledger().timestamp() defaults to 0, causing subtract overflow"]
     fn test_create_market_fails_when_fight_in_past() {
         let (env, client) = setup();
         init_factory(&env, &client);
 
         let mut fight = sample_fight(&env);
-        fight.scheduled_at = env.ledger().timestamp() - 1;
+        soroban_sdk::testutils::Ledger::set_timestamp(&env.ledger(), 2);
+        fight.scheduled_at = 1;
         let caller = Address::generate(&env);
         let result = client.try_create_market(&caller, &fight, &sample_market_config(&env), &None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::InvalidTimeRange));
     }
 
     #[test]
@@ -1096,7 +1128,7 @@ mod tests {
         fight.fighter_a = String::from_str(&env, "");
         let caller = Address::generate(&env);
         let result = client.try_create_market(&caller, &fight, &sample_market_config(&env), &None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::InvalidMarketParameters));
     }
 
     #[test]
@@ -1108,7 +1140,7 @@ mod tests {
         config.min_bet_amount = 0;
         let caller = Address::generate(&env);
         let result = client.try_create_market(&caller, &sample_fight(&env), &config, &None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::BelowMinimum));
     }
 
     #[test]
@@ -1120,7 +1152,7 @@ mod tests {
         config.max_bet = config.min_bet_amount - 1;
         let caller = Address::generate(&env);
         let result = client.try_create_market(&caller, &sample_fight(&env), &config, &None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::InvalidMarketParameters));
     }
 
     #[test]
@@ -1132,7 +1164,7 @@ mod tests {
         config.fee_bps = 1001;
         let caller = Address::generate(&env);
         let result = client.try_create_market(&caller, &sample_fight(&env), &config, &None);
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::InvalidMarketParameters));
     }
 
     #[test]
@@ -1147,7 +1179,7 @@ mod tests {
             &sample_market_config(&env),
             &None,
         );
-        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Ok(boxmeout_shared::errors::ContractError::WasmHashNotSet));
     }
 
     #[test]
@@ -1510,7 +1542,7 @@ mod open_markets_cleanup_tests {
 mod admin_transfer_tests {
     use crate::{MarketFactory, MarketFactoryClient};
     use boxmeout_shared::types::FactoryConfig;
-    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, BytesN, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, BytesN, Env, String};
 
     fn setup() -> (Env, MarketFactoryClient<'static>, Address) {
         let env = Env::default();
@@ -1568,8 +1600,8 @@ mod admin_transfer_tests {
 
         // New admin can now call an admin-only function; old admin cannot
         let non_admin = Address::generate(&env);
-        let result_old = client.try_pause_factory(&admin);
-        let result_new = client.try_pause_factory(&new_admin);
+        let result_old = client.try_pause_factory(&admin, &String::from_str(&env, "maintenance"));
+        let result_new = client.try_pause_factory(&new_admin, &String::from_str(&env, "maintenance"));
         // old admin is rejected, new admin succeeds
         assert!(
             result_old.is_err(),
@@ -1761,7 +1793,7 @@ mod admin_transfer_tests {
 mod task12_factory_market_integrity_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
-        Address, BytesN, Env,
+        Address, BytesN, Env, String,
     };
     use boxmeout_shared::{
         errors::ContractError,
@@ -1852,10 +1884,10 @@ mod task12_factory_market_integrity_tests {
         assert_eq!(err_wasm.unwrap_err(), Ok(ContractError::NotAdmin));
 
         // Non-admin cannot pause / unpause factory
-        let err_pause = client.try_pause_factory(&non_admin);
+        let err_pause = client.try_pause_factory(&non_admin, &String::from_str(&env, "maintenance"));
         assert_eq!(err_pause.unwrap_err(), Ok(ContractError::NotAdmin));
 
-        let err_unpause = client.try_unpause_factory(&non_admin);
+        let err_unpause = client.try_unpause_factory(&non_admin, &String::from_str(&env, "maintenance"));
         assert_eq!(err_unpause.unwrap_err(), Ok(ContractError::NotAdmin));
 
         // Non-admin cannot propose admin
@@ -1946,6 +1978,10 @@ mod task12_factory_market_integrity_tests {
         client.remove_oracle(&admin, &oracle2);
         assert_eq!(client.get_oracles().len(), 1);
         assert_eq!(client.get_oracle_key(&oracle2), None);
+        assert_eq!(
+            client.try_remove_oracle(&admin, &oracle2),
+            Err(Ok(ContractError::OracleNotWhitelisted)),
+        );
     }
 
     // ── 5. Duplicate Fighter Names Validation (Issue #639 / #13) ──
@@ -1968,6 +2004,7 @@ mod task12_factory_market_integrity_tests {
         let config = MarketConfig {
             min_bet_amount: 1_000_000,
             max_bet: 100_000_000_000,
+            max_bet_share_bps: 2_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
             resolution_window: 86_400,
@@ -2128,6 +2165,7 @@ mod fighter_name_whitespace_tests {
             resolution_window: 86_400,
             tier: 0,
             dispute_cooldown_ledgers: 0,
+            dispute_cooldown_secs: 0,
         }
     }
 

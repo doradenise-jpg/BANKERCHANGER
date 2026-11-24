@@ -60,7 +60,7 @@ fn setup_market(env: &Env, scheduled_at: u64) -> (MarketClient<'static>, Address
 
     let contract_id = env.register(Market, ());
     let client = MarketClient::new(env, &contract_id);
-    client.initialize(&factory, &1u64, &sample_fight(env, scheduled_at), &sample_config(), &treasury, &0u32);
+    client.initialize(&factory, &1u64, &sample_fight(env, scheduled_at), &sample_config(), &treasury);
 
     (client, contract_id, factory, treasury, token_id)
 }
