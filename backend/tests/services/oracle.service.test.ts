@@ -3,12 +3,21 @@ import { Keypair } from '@stellar/stellar-sdk';
 import * as OracleService from '../../src/oracle/OracleService';
 import * as StellarService from '../../src/services/StellarService';
 import { pool } from '../../src/config/db';
+import { cacheGet, cacheSet, redis } from '../../src/services/cache.service';
 
 jest.mock('../../src/services/StellarService');
 jest.mock('../../src/config/db');
 
-const mockRedisIncr = jest.fn().mockResolvedValue(1);
-const mockRedisExpire = jest.fn().mockResolvedValue(1);
+const mockIncrWithExpire = jest.fn();
+jest.mock('../../src/services/redis-lua', () => ({
+  incrWithExpire: (...args: unknown[]) => mockIncrWithExpire(...args),
+}));
+
+const mockGetLatestLedgerCloseTime = jest.fn();
+jest.mock('../../src/indexer/StellarIndexer', () => ({
+  getLatestLedgerCloseTime: (...args: unknown[]) => mockGetLatestLedgerCloseTime(...args),
+}));
+
 const mockRedisGet = jest.fn().mockResolvedValue(null);
 const mockRedisDel = jest.fn().mockResolvedValue(1);
 const mockRedisSet = jest.fn().mockResolvedValue('OK');
@@ -20,8 +29,6 @@ jest.mock('../../src/services/cache.service', () => {
     cacheGet: jest.fn().mockResolvedValue(undefined),
     cacheSet: jest.fn().mockResolvedValue(undefined),
     redis: {
-      incr: jest.fn((...args: any[]) => mockRedisIncr(...args)),
-      expire: jest.fn((...args: any[]) => mockRedisExpire(...args)),
       get: jest.fn((...args: any[]) => mockRedisGet(...args)),
       del: jest.fn((...args: any[]) => mockRedisDel(...args)),
       set: jest.fn((...args: any[]) => mockRedisSet(...args)),
@@ -42,6 +49,9 @@ describe('OracleService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockIncrWithExpire.mockResolvedValue(1);
+    (cacheGet as jest.Mock).mockResolvedValue(undefined);
+    (cacheSet as jest.Mock).mockResolvedValue(undefined);
     process.env.ORACLE_PRIVATE_KEY = mockKeypair.secret();
     process.env.ADMIN_PRIVATE_KEY = Keypair.random().secret();
     process.env.ORACLE_WHITELIST = mockOracleAddress;
@@ -396,7 +406,7 @@ describe('OracleService', () => {
       mockFetch.mockRejectedValue(new Error('API error'));
       
       // Set up redis mocks for 3rd failure
-      mockRedisIncr.mockResolvedValue(3);
+      mockIncrWithExpire.mockResolvedValue(3);
       mockRedisGet.mockResolvedValue(null);
 
       // Set ALERT_WEBHOOK_URL
@@ -455,6 +465,90 @@ describe('OracleService', () => {
       const result = await OracleService.fetchExternalFightResult(mockMatchId);
       expect(result).toBe(mockOutcome);
     });
+
+    it('requires API configuration and returns a cached result without fetching', async () => {
+      delete process.env.BOXING_API_URL;
+      await expect(OracleService.fetchExternalFightResult(mockMatchId))
+        .rejects.toThrow('BOXING_API_URL env var is required');
+      process.env.BOXING_API_URL = 'http://mock-boxing-api';
+      delete process.env.BOXING_API_KEY;
+      await expect(OracleService.fetchExternalFightResult(mockMatchId))
+        .rejects.toThrow('BOXING_API_KEY env var is required');
+
+      process.env.BOXING_API_KEY = 'mock-key';
+      (cacheGet as jest.Mock).mockResolvedValueOnce(mockOutcome);
+      await expect(OracleService.fetchExternalFightResult(mockMatchId)).resolves.toBe(mockOutcome);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('caches 404 and missing fights as no result, and returns null for unconfirmed fights', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ status: 404, ok: false })
+        .mockResolvedValueOnce({
+          status: 200,
+          ok: true,
+          json: async () => ({ fights: [{ fight_id: 'another-fight', status: 'confirmed', result: 'draw' }] }),
+        })
+        .mockResolvedValueOnce({
+          status: 200,
+          ok: true,
+          json: async () => ({ fights: [{ fight_id: mockMatchId, status: 'pending' }] }),
+        });
+
+      await expect(OracleService.fetchExternalFightResult(mockMatchId)).resolves.toBeNull();
+      await expect(OracleService.fetchExternalFightResult(mockMatchId)).resolves.toBeNull();
+      await expect(OracleService.fetchExternalFightResult(mockMatchId)).resolves.toBeNull();
+      expect(cacheSet).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      [503, 'Boxing API down'],
+      [400, 'Boxing API responded'],
+    ])('throws for non-success HTTP status %s', async (status, message) => {
+      mockFetch.mockResolvedValueOnce({ status, ok: false });
+      await expect(OracleService.fetchExternalFightResult(mockMatchId)).rejects.toThrow(message);
+    });
+
+    it('rejects a confirmed result with an unsupported outcome', async () => {
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        json: async () => ({
+          fights: [{ fight_id: mockMatchId, status: 'confirmed', result: 'unknown' }],
+        }),
+      });
+      await expect(OracleService.fetchExternalFightResult(mockMatchId))
+        .rejects.toThrow('unexpected outcome');
+    });
+  });
+
+  describe('scheduled Oracle jobs', () => {
+    it('returns zeroed results when no markets are pending', async () => {
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rows: [] });
+      await expect(OracleService.runAutoResolutionJob()).resolves.toEqual({
+        resolved: 0,
+        skipped: 0,
+        failed: 0,
+      });
+    });
+
+    it('returns zeroed results when the pending-market query fails', async () => {
+      (pool.query as jest.Mock).mockRejectedValueOnce(new Error('database unavailable'));
+      await expect(OracleService.runAutoResolutionJob()).resolves.toEqual({
+        resolved: 0,
+        skipped: 0,
+        failed: 0,
+      });
+    });
+
+    it('skips auto-locking when the market update no longer matches an open row', async () => {
+      mockGetLatestLedgerCloseTime.mockResolvedValue(new Date());
+      (pool.query as jest.Mock)
+        .mockResolvedValueOnce({ rows: [{ market_id: 'm1', contract_address: 'contract', scheduled_at: new Date(), lock_before_secs: null }] })
+        .mockResolvedValueOnce({ rowCount: 0 });
+
+      await expect(OracleService.runAutoLockMarketsJob()).resolves.toEqual({ locked: 0, failed: 0 });
+    });
   });
 
   describe('getOraclePublicKey', () => {
@@ -469,6 +563,43 @@ describe('OracleService', () => {
       expect(() => OracleService.getOraclePublicKey()).toThrow(
         'ORACLE_PRIVATE_KEY env var is required',
       );
+    });
+  });
+
+  describe('Oracle cache and persistence failures', () => {
+    it('flushes the whitelist cache and propagates Redis deletion errors', async () => {
+      await expect(OracleService.flushOracleWhitelistCache()).resolves.toBeUndefined();
+      expect(redis.del).toHaveBeenCalledWith('oracle:whitelist');
+
+      mockRedisDel.mockRejectedValueOnce(new Error('Redis unavailable'));
+      await expect(OracleService.flushOracleWhitelistCache()).rejects.toThrow('Redis unavailable');
+    });
+
+    it('rejects persistence errors while recording a result', async () => {
+      delete process.env.ORACLE_PRIVATE_KEY;
+      await expect(OracleService.submitFightResult(mockMatchId, mockOutcome))
+        .rejects.toThrow('ORACLE_PRIVATE_KEY env var is required');
+
+      process.env.ORACLE_PRIVATE_KEY = mockKeypair.secret();
+      (pool.query as jest.Mock).mockRejectedValueOnce(new Error('database unavailable'));
+      await expect(OracleService.submitFightResult(mockMatchId, mockOutcome))
+        .rejects.toThrow('database unavailable');
+    });
+
+    it('rejects manual overrides when configuration or the target market is missing', async () => {
+      delete process.env.ADMIN_PRIVATE_KEY;
+      await expect(OracleService.adminOverrideResult(mockMatchId, mockOutcome, 'sig'))
+        .rejects.toThrow('ADMIN_PRIVATE_KEY env var is required');
+      await expect(OracleService.raiseDispute(mockMatchId, mockOutcome, 'sig'))
+        .rejects.toThrow('ADMIN_PRIVATE_KEY env var is required');
+
+      process.env.ADMIN_PRIVATE_KEY = Keypair.random().secret();
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rowCount: 0, rows: [] });
+      await expect(OracleService.adminOverrideResult(mockMatchId, mockOutcome, 'sig'))
+        .rejects.toThrow('Market not found');
+      (pool.query as jest.Mock).mockResolvedValueOnce({ rowCount: 0, rows: [] });
+      await expect(OracleService.raiseDispute(mockMatchId, mockOutcome, 'sig'))
+        .rejects.toThrow('Market not found');
     });
   });
 });

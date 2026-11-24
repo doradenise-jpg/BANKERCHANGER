@@ -130,6 +130,11 @@ describe('sendEmail()', () => {
     expect(mail.html as string).toContain('http://custom-url');
   });
 
+  it('escapes HTML in user-controlled template data', async () => {
+    await sendEmail('a@b.com', 'verify_email', { verifyUrl: `&<>"'` });
+    expect(lastSendMailCall().html).toContain('&amp;&lt;&gt;&quot;&#x27;');
+  });
+
   // ── Graceful failure ──────────────────────────────────────────────────────
   describe('graceful failure', () => {
     it('does not throw when sendMail rejects', async () => {
