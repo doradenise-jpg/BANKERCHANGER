@@ -2227,14 +2227,7 @@ mod fighter_name_whitespace_tests {
         let caller = Address::generate(&env);
         // Will fail at WasmHashNotSet, not at name validation — that's fine.
         let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
-        // Must NOT fail with DuplicateFighterName.
-        if let Err(ref e) = result {
-            assert_ne!(
-                *e,
-                Ok(ContractError::DuplicateFighterName),
-                "Distinct names must not be flagged as duplicates"
-            );
-        }
+        assert_eq!(result.unwrap_err(), Ok(ContractError::WasmHashNotSet));
     }
 
     /// " Ali " vs " Frazier " — distinct names with padding must pass name check.
@@ -2246,12 +2239,6 @@ mod fighter_name_whitespace_tests {
         let fight = base_fight(&env, " Ali ", " Frazier ");
         let caller = Address::generate(&env);
         let result = client.try_create_market(&caller, &fight, &sample_config(), &None);
-        if let Err(ref e) = result {
-            assert_ne!(
-                *e,
-                Ok(ContractError::DuplicateFighterName),
-                "Distinct padded names must not be flagged as duplicates"
-            );
-        }
+        assert_eq!(result.unwrap_err(), Ok(ContractError::WasmHashNotSet));
     }
 }

@@ -1,10 +1,13 @@
 extern crate std;
 
 use super::{init_factory, sample_fight, sample_market_config, setup};
-use crate::{MarketClient, MARKET_COUNT, MARKET_MAP};
+use crate::{MarketClient, DEFAULT_CONFIG, MARKET_COUNT, MARKET_MAP, OPEN_MARKETS};
 use boxmeout_shared::{
     errors::ContractError,
-    types::{MarketState, MarketStatus, OptionalMarketTier, OptionalOracleRole, OptionalOutcome},
+    types::{
+        BetRecord, BetSide, MarketState, MarketStatus, OptionalMarketTier, OptionalOracleRole,
+        OptionalOutcome,
+    },
 };
 use soroban_sdk::{
     contract, contractimpl,
@@ -22,7 +25,11 @@ impl ListedMarket {
             market_id: 0,
             fight: sample_fight(&env),
             config: sample_market_config(&env),
-            status: MarketStatus::Open,
+            status: env
+                .storage()
+                .instance()
+                .get(&"status")
+                .unwrap_or(MarketStatus::Open),
             outcome: OptionalOutcome::None,
             pool_a: 0,
             pool_b: 0,
@@ -32,6 +39,21 @@ impl ListedMarket {
             oracle_used: OptionalOracleRole::None,
             tier: OptionalMarketTier::None,
         }
+    }
+
+    pub fn get_bets_by_address(env: Env, bettor: Address) -> Vec<BetRecord> {
+        let mut bets = Vec::new(&env);
+        for (amount, claimed) in [(0, false), (5, true), (10, false)] {
+            bets.push_back(BetRecord {
+                bettor: bettor.clone(),
+                market_id: 0,
+                side: BetSide::FighterA,
+                amount,
+                placed_at: 0,
+                claimed,
+            });
+        }
+        bets
     }
 
     pub fn get_market_status(_env: Env) -> MarketStatus {
@@ -51,6 +73,7 @@ fn list_markets_returns_newest_first_and_limits_registry_reads() {
         addresses.set(id, market.clone());
     }
     addresses.set(101, unreadable);
+    addresses.remove(0);
     env.as_contract(&factory.address, || {
         env.storage().persistent().set(&MARKET_MAP, &addresses);
         env.storage().persistent().set(&MARKET_COUNT, &103u64);
@@ -60,6 +83,7 @@ fn list_markets_returns_newest_first_and_limits_registry_reads() {
     assert!(factory.list_markets(&u64::MAX, &1).is_empty());
     assert!(factory.list_markets(&0, &0).is_empty());
     assert!(factory.list_markets(&1, &1).is_empty());
+    assert!(factory.list_markets(&102, &1).is_empty());
 
     let page = factory.list_markets(&2, &u32::MAX);
     assert_eq!(page.len(), 100);
@@ -236,4 +260,138 @@ fn create_market_rejects_invalid_override_and_missing_treasury() {
         factory.try_create_market(&caller, &fight, &config, &Some(1000)),
         Err(Ok(ContractError::NotFactory)),
     );
+}
+
+#[test]
+fn market_creation_validates_both_names_and_accepts_distinct_names_of_equal_length() {
+    let (env, factory) = setup();
+    init_factory(&env, &factory);
+    let caller = Address::generate(&env);
+    let mut fight = sample_fight(&env);
+    let config = sample_market_config(&env);
+    fight.fighter_b = String::from_str(&env, "");
+    assert_eq!(
+        factory.try_create_market(&caller, &fight, &config, &None),
+        Err(Ok(ContractError::InvalidMarketParameters)),
+    );
+    for (fighter_a, fighter_b) in [("Ali", "Lee"), (" ", "  ")] {
+        fight.fighter_a = String::from_str(&env, fighter_a);
+        fight.fighter_b = String::from_str(&env, fighter_b);
+        assert_eq!(
+            factory.try_create_market(&caller, &fight, &config, &None),
+            Err(Ok(ContractError::WasmHashNotSet)),
+        );
+    }
+}
+
+#[test]
+fn admin_configuration_rejects_invalid_values_and_missing_proposal() {
+    let (env, factory) = setup();
+    init_factory(&env, &factory);
+    let admin = factory.get_admin();
+    assert_eq!(
+        factory.try_update_market_wasm(&admin, &BytesN::from_array(&env, &[0; 32])),
+        Err(Ok(ContractError::InvalidMarketParameters)),
+    );
+    assert_eq!(
+        factory.try_cancel_admin_proposal(&admin),
+        Err(Ok(ContractError::NotAdmin)),
+    );
+    let mut config = sample_market_config(&env);
+    for invalid_share in [0, 10_001] {
+        config.max_bet_share_bps = invalid_share;
+        assert_eq!(
+            factory.try_update_default_config(&admin, &config),
+            Err(Ok(ContractError::InvalidMarketParameters)),
+        );
+    }
+    config.max_bet_share_bps = 10_000;
+    factory.update_default_config(&admin, &config);
+    env.as_contract(&factory.address, || {
+        assert_eq!(
+            env.storage().persistent().get(&DEFAULT_CONFIG),
+            Some(config)
+        );
+    });
+}
+
+#[test]
+fn open_registry_removal_checks_authorization_and_status() {
+    let (env, factory) = setup();
+    init_factory(&env, &factory);
+    let admin = factory.get_admin();
+    let oracle = factory.get_oracles().first().unwrap();
+    let outsider = Address::generate(&env);
+    let market = env.register(ListedMarket, ());
+    env.as_contract(&factory.address, || {
+        let mut map = Map::new(&env);
+        map.set(0u64, market.clone());
+        map.set(1u64, market.clone());
+        env.storage().persistent().set(&MARKET_MAP, &map);
+        env.storage()
+            .persistent()
+            .set(&OPEN_MARKETS, &Vec::from_array(&env, [0u64, 1]));
+    });
+
+    assert!(factory.list_market_ids(&0, &0).is_empty());
+    assert_eq!(
+        factory.list_market_ids(&0, &1),
+        Vec::from_array(&env, [0u64])
+    );
+    assert_eq!(
+        factory.try_remove_open_market(&outsider, &0),
+        Err(Ok(ContractError::NotAdmin)),
+    );
+    assert_eq!(
+        factory.try_remove_open_market(&admin, &0),
+        Err(Ok(ContractError::MarketNotOpen)),
+    );
+    assert_eq!(
+        factory.try_cleanup_terminal_market(&outsider, &0),
+        Err(Ok(ContractError::MarketNotFound)),
+    );
+    assert_eq!(
+        factory.try_cleanup_terminal_market(&market, &0),
+        Err(Ok(ContractError::MarketNotOpen)),
+    );
+
+    env.as_contract(&market, || {
+        env.storage()
+            .instance()
+            .set(&"status", &MarketStatus::Cancelled)
+    });
+    factory.remove_open_market(&oracle, &0);
+    assert_eq!(factory.get_open_market_ids(), Vec::from_array(&env, [1u64]));
+
+    env.as_contract(&factory.address, || {
+        env.storage()
+            .persistent()
+            .set(&OPEN_MARKETS, &Vec::from_array(&env, [0u64, 1]));
+    });
+    factory.cleanup_terminal_market(&market, &1);
+    assert_eq!(factory.get_open_market_ids(), Vec::from_array(&env, [0u64]));
+}
+
+#[test]
+fn user_positions_filter_claimed_and_empty_bets_and_reject_oversized_queries() {
+    let (env, factory) = setup();
+    init_factory(&env, &factory);
+    let bettor = Address::generate(&env);
+    let market = env.register(ListedMarket, ());
+    env.as_contract(&factory.address, || {
+        let mut map = Map::new(&env);
+        map.set(0u64, market);
+        env.storage().persistent().set(&MARKET_MAP, &map);
+    });
+    assert_eq!(
+        factory.try_get_user_positions_all(&bettor, &Vec::from_array(&env, [0u64; 21])),
+        Err(Ok(ContractError::TooManyMarkets)),
+    );
+    assert_eq!(
+        factory.try_get_user_positions_all(&bettor, &Vec::from_array(&env, [1u64])),
+        Err(Ok(ContractError::MarketNotFound)),
+    );
+    let positions = factory.get_user_positions_all(&bettor, &Vec::from_array(&env, [0u64]));
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions.first().unwrap().amount, 10);
 }
