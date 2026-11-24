@@ -47,14 +47,9 @@ const deriveOperation = (query: unknown): string => {
 };
 
 const updateConnectionGauge = (): void => {
-  dbConnections.set(
-    {
-      total: pool.totalCount,
-      idle: pool.idleCount,
-      waiting: pool.waitingCount,
-    },
-    pool.totalCount,
-  );
+  dbConnections.set({ state: 'total' }, pool.totalCount);
+  dbConnections.set({ state: 'idle' }, pool.idleCount);
+  dbConnections.set({ state: 'waiting' }, pool.waitingCount);
 };
 
 const observeQuery = <T extends QueryResultRow = any>(
