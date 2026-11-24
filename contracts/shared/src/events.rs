@@ -46,7 +46,7 @@ pub fn emit_market_resolution_pending(
     cooldown_end_ledger: u32,
 ) {
     let topics = (Symbol::new(env, "market_resolution_pending"), market_id);
-    env.events().publish(topics, (outcome_byte as u32, cooldown_end_ledger));
+    env.events().publish(topics, (outcome_byte, cooldown_end_ledger));
 }
 
 /// Emits a `resolution_finalized` event when anyone successfully calls
@@ -56,7 +56,7 @@ pub fn emit_market_resolution_pending(
 /// Data:   `(outcome_byte: u32)`
 pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u32) {
     let topics = (Symbol::new(env, "resolution_finalized"), market_id);
-    env.events().publish(topics, outcome_byte as u32);
+    env.events().publish(topics, outcome_byte);
 }
 
 /// Emits a legacy `bet_placed` event containing only the BetRecord.
@@ -493,6 +493,7 @@ pub fn emit_liquidity_added(
 ///
 /// Topics: `(Symbol("liquidity_removed"), market_id)`
 /// Data:   `(provider, lp_shares_burned, amount_a, amount_b, amount_draw, fees_claimed)`
+#[allow(clippy::too_many_arguments)]
 pub fn emit_liquidity_removed(
     env: &Env,
     market_id: u64,

@@ -46,6 +46,7 @@ pub trait MarketInterface {
         fight: FightDetails,
         config: MarketConfig,
         treasury: Address,
+        tier: u32,
     ) -> Result<(), ContractError>;
     fn get_bets_by_address(env: Env, bettor: Address) -> Vec<BetRecord>;
     fn get_state(env: Env) -> Result<MarketState, ContractError>;
@@ -55,6 +56,7 @@ pub trait MarketInterface {
     fn get_status(env: Env) -> Result<MarketStatus, ContractError>;
     fn get_market_status(env: Env) -> Result<MarketStatus, ContractError>;
     fn refund_expired(env: Env, market_id: u64) -> Result<(), ContractError>;
+    fn cancel_market(env: Env, caller: Address, reason: soroban_sdk::String) -> Result<(), ContractError>;
     fn finalize_resolution(env: Env, market_id: u64) -> Result<(), ContractError>;
 }
 
@@ -317,7 +319,7 @@ impl MarketFactory {
         let market_address = env
             .deployer()
             .with_address(env.current_contract_address(), salt)
-            .deploy(wasm_hash);
+            .deploy_v2(wasm_hash, ());
 
         let market_client = MarketClient::new(&env, &market_address);
         market_client.initialize(
@@ -326,6 +328,7 @@ impl MarketFactory {
             &fight.clone(),
             &effective_config,
             &treasury,
+            &effective_config.tier,
         );
 
         let mut market_map: Map<u64, Address> = env
@@ -782,6 +785,21 @@ impl MarketFactory {
         Ok(())
     }
 
+    /// Cancels a registered market on behalf of the factory and removes it from the open list.
+    pub fn cancel_market(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let market = Self::get_market_address(env.clone(), market_id)?;
+        MarketClient::new(&env, &market).cancel_market(&env.current_contract_address(), &reason);
+        Self::remove_from_open_list(&env, market_id);
+        Ok(())
+    }
+
     /// Returns the registered admin address of the factory.
     ///
     /// Used by market contracts to cross-call and verify upgrade authorization.
@@ -834,19 +852,33 @@ impl MarketFactory {
             return Err(ContractError::MarketNotOpen);
         }
 
+        Self::remove_from_open_list(&env, market_id);
+        Ok(())
+    }
+
+    /// Accepts a cancellation notification from the registered market itself.
+    pub fn market_cancelled(env: Env, market_address: Address, market_id: u64) -> Result<(), ContractError> {
+        market_address.require_auth();
+        if Self::get_market_address(env.clone(), market_id)? != market_address {
+            return Err(ContractError::MarketNotFound);
+        }
+        Self::remove_from_open_list(&env, market_id);
+        Ok(())
+    }
+
+    fn remove_from_open_list(env: &Env, market_id: u64) {
         let open: Vec<u64> = env
             .storage()
             .persistent()
             .get(&OPEN_MARKETS)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut updated: Vec<u64> = Vec::new(&env);
+            .unwrap_or_else(|| Vec::new(env));
+        let mut updated: Vec<u64> = Vec::new(env);
         for id in open.iter() {
             if id != market_id {
                 updated.push_back(id);
             }
         }
         env.storage().persistent().set(&OPEN_MARKETS, &updated);
-        Ok(())
     }
 
     /// Updates the default market configuration.
@@ -956,7 +988,7 @@ mod tests {
     fn setup() -> (Env, MarketFactoryClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, MarketFactory);
+        let contract_id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(&env, &contract_id);
         (env, client)
     }
@@ -1200,7 +1232,7 @@ mod scheduled_at_validation_tests {
     fn setup() -> (Env, MarketFactoryClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, MarketFactory);
+        let contract_id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(&env, &contract_id);
         (env, client)
     }
@@ -1446,7 +1478,7 @@ mod open_markets_cleanup_tests {
     fn setup() -> (Env, MarketFactoryClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, MarketFactory);
+        let contract_id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
@@ -1515,7 +1547,7 @@ mod admin_transfer_tests {
     fn setup() -> (Env, MarketFactoryClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, MarketFactory);
+        let contract_id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let treasury = Address::generate(&env);
@@ -1782,7 +1814,7 @@ mod task12_factory_market_integrity_tests {
             max_entry_ttl: 6_311_520,
         });
 
-        let contract_id = env.register_contract(None, MarketFactory);
+        let contract_id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(env, &contract_id);
         let admin = Address::generate(env);
         let treasury = Address::generate(env);
@@ -1967,6 +1999,7 @@ mod task12_factory_market_integrity_tests {
 
         let config = MarketConfig {
             min_bet_amount: 1_000_000,
+            max_bet_share_bps: 10_000,
             max_bet: 100_000_000_000,
             fee_bps: 200,
             lock_before_secs: 3_600,
@@ -2081,7 +2114,7 @@ mod fighter_name_whitespace_tests {
     fn setup() -> (Env, MarketFactoryClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let id = env.register_contract(None, MarketFactory);
+        let id = env.register(MarketFactory, ());
         let client = MarketFactoryClient::new(&env, &id);
         (env, client)
     }
@@ -2128,6 +2161,7 @@ mod fighter_name_whitespace_tests {
             resolution_window: 86_400,
             tier: 0,
             dispute_cooldown_ledgers: 0,
+            dispute_cooldown_secs: 0,
         }
     }
 

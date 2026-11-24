@@ -6,7 +6,8 @@
 
 use soroban_sdk::contracterror;
 
-#[contracterror]
+// The full set exceeds the 50 entries permitted by the WASM error specification.
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ContractError {
     // ── Authorization ──────────────────────────────────────
@@ -145,7 +146,7 @@ pub enum ContractError {
 }
 
 // Preserve the legacy source-level names without growing Soroban's exported
-// error specification, which is already at its maximum number of cases.
+// error discriminants.
 #[allow(non_upper_case_globals)]
 impl ContractError {
     /// Legacy name for `AdminTransferExpired`.

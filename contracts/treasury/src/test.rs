@@ -8,10 +8,10 @@ use crate::{Treasury, TreasuryClient};
 
 fn setup_treasury(env: &Env) -> (TreasuryClient<'static>, Address, Address) {
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, Treasury);
+    let contract_id = env.register(Treasury, ());
     let client = TreasuryClient::new(env, &contract_id);
     let admin = Address::generate(env);
-    let token = env.register_stellar_asset_contract(admin.clone());
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let factory = Address::generate(env);
     client.initialize(&admin, &token, &factory, &1_000_000_000_i128);
     (client, admin, token)
@@ -186,10 +186,10 @@ fn funded_treasury(
 ) -> (Env, TreasuryClient<'static>, Address, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, Treasury);
+    let contract_id = env.register(Treasury, ());
     let client = TreasuryClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let factory = Address::generate(&env);
     let market = Address::generate(&env);
     // Initialize with a large per-tx withdrawal limit so it does not interfere.

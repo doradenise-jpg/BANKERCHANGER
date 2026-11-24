@@ -30,6 +30,7 @@ fn sample_fight(env: &Env, scheduled_at: u64) -> FightDetails {
 fn sample_config() -> MarketConfig {
     MarketConfig {
         min_bet_amount: 1_000_000,
+        max_bet_share_bps: 10_000,
         max_bet: 100_000_000_000,
         fee_bps: 200,
         lock_before_secs: 3600,
@@ -56,7 +57,7 @@ fn setup_market(env: &Env, scheduled_at: u64) -> (MarketClient<'static>, Address
     let factory = Address::generate(env);
     let treasury = Address::generate(env);
     let token_admin = Address::generate(env);
-    let token_id = env.register_stellar_asset_contract(token_admin);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
 
     let contract_id = env.register(Market, ());
     let client = MarketClient::new(env, &contract_id);
