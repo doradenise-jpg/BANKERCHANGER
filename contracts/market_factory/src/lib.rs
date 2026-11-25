@@ -10,8 +10,8 @@ use soroban_sdk::{contract, contractclient, contractimpl, Address, BytesN, Env, 
 use boxmeout_shared::{
     errors::ContractError,
     types::{
-        BetRecord, FactoryConfig, FightDetails, MarketConfig, MarketState, MarketStatus,
-        UserPosition,
+        BetRecord, ContractMetadata, FactoryConfig, FightDetails, MarketConfig, MarketState,
+        MarketStatus, UserPosition,
     },
 };
 
@@ -36,6 +36,10 @@ const DEFAULT_CONFIG: &str = "DEFAULT_CONFIG";
 const TREASURY: &str = "TREASURY";
 const MARKET_WASM_HASH: &str = "MARKET_WASM_HASH";
 const OPEN_MARKETS: &str = "OPEN_MARKETS";
+/// Current contract version. Bump on every breaking or feature upgrade.
+pub const CONTRACT_VERSION: u32 = 1;
+/// Storage key holding the persisted `ContractMetadata` (version, deployed_at, upgrader).
+const CONTRACT_METADATA: &str = "CONTRACT_METADATA";
 
 #[contractclient(name = "MarketClient")]
 pub trait MarketInterface {
@@ -150,6 +154,14 @@ impl MarketFactory {
             .persistent()
             .set(&ADMIN_TIMELOCK, &DEFAULT_ADMIN_TIMELOCK_SECS);
 
+        // Persist deployment metadata for versioning / upgrade tracking.
+        let metadata = ContractMetadata {
+            version: CONTRACT_VERSION,
+            deployed_at: env.ledger().timestamp(),
+            upgrader_address: admin.clone(),
+        };
+        env.storage().persistent().set(&CONTRACT_METADATA, &metadata);
+
         env.storage().instance().extend_ttl(50_000, 100_000);
         env.storage().persistent().extend_ttl(&ADMIN, 50_000, 100_000);
         env.storage().persistent().extend_ttl(&TREASURY, 50_000, 100_000);
@@ -160,6 +172,65 @@ impl MarketFactory {
         env.storage().persistent().extend_ttl(&DEFAULT_CONFIG, 50_000, 100_000);
         env.storage().persistent().extend_ttl(&MARKET_WASM_HASH, 50_000, 100_000);
         env.storage().persistent().extend_ttl(&OPEN_MARKETS, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&CONTRACT_METADATA, 50_000, 100_000);
+        Ok(())
+    }
+
+    /// Returns the current contract version.
+    pub fn contract_version(_env: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+
+    /// Returns the persisted deployment metadata (version, deployed_at, upgrader_address).
+    ///
+    /// # Errors
+    /// - `NotInitialized`: Factory has not been initialized yet
+    pub fn get_contract_metadata(env: Env) -> Result<ContractMetadata, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&CONTRACT_METADATA)
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Upgrades the factory contract to a new WASM implementation without redeploying.
+    ///
+    /// Validates the caller is the admin and that `new_wasm_hash` is non-zero, then
+    /// swaps the contract's executable WASM and persists updated `ContractMetadata`.
+    /// All existing storage (markets, admin, config) is preserved across the upgrade.
+    ///
+    /// # Errors
+    /// - `NotAdmin`: Caller is not the admin
+    /// - `InvalidMarketParameters`: `new_wasm_hash` is the zero hash
+    pub fn upgrade_contract(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        if new_wasm_hash == zero_hash {
+            return Err(ContractError::InvalidMarketParameters);
+        }
+
+        // Swap the contract executable to the new WASM implementation.
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        // Persist updated deployment metadata; state is preserved across the upgrade.
+        let metadata = ContractMetadata {
+            version: CONTRACT_VERSION,
+            deployed_at: env.ledger().timestamp(),
+            upgrader_address: admin.clone(),
+        };
+        env.storage().persistent().set(&CONTRACT_METADATA, &metadata);
+        env.storage().persistent().extend_ttl(&CONTRACT_METADATA, 50_000, 100_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "ContractUpgraded"), admin.clone()),
+            (CONTRACT_VERSION, new_wasm_hash, admin),
+        );
         Ok(())
     }
 

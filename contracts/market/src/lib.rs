@@ -64,6 +64,10 @@ const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
 const TOKEN: &str = "TOKEN";
 /// Grace period (24 hours) after scheduled fight start before expired market is refundable
 pub const EXPIRY_GRACE_PERIOD: u64 = 86_400;
+/// Current contract version. Bumped on every upgrade.
+pub const CONTRACT_VERSION: u32 = 1;
+/// Persistent key holding deployment metadata (version, deployed_at, upgrader).
+const CONTRACT_METADATA: &str = "CONTRACT_METADATA";
 
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
 /// Maximum TTL for market data (30 days in ledger entries)
@@ -72,6 +76,19 @@ const MAX_TTL: u32 = 2_592_000;
 pub const CLAIM_WINDOW_LEDGERS: u32 = 2_000_000;
 /// Maximum age for unresolved oracle reports before stale entries are pruned.
 const REPORT_TTL: u64 = 172_800;
+
+// ─── Deployment metadata ──────────────────────────────────────────────────────
+/// Metadata persisted under `CONTRACT_METADATA` describing the current deployment.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractMetadata {
+    /// Contract version at the time of the last deployment/upgrade.
+    pub version: u32,
+    /// Unix timestamp (seconds) of the last deployment/upgrade.
+    pub deployed_at: u64,
+    /// Address that performed the last upgrade.
+    pub upgrader_address: Address,
+}
 
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
@@ -274,6 +291,30 @@ impl Market {
         }
         true
     }
+
+    fn load_metadata(env: &Env) -> Option<ContractMetadata> {
+        env.storage().persistent().get(&CONTRACT_METADATA)
+    }
+
+    fn save_metadata(env: &Env, metadata: &ContractMetadata) {
+        env.storage().persistent().set(&CONTRACT_METADATA, metadata);
+        env.storage()
+            .persistent()
+            .extend_ttl(&CONTRACT_METADATA, MAX_TTL, MAX_TTL);
+    }
+
+    /// Returns true if the hash is all zero bytes (an invalid WASM hash).
+    fn is_zero_hash(hash: &BytesN<32>) -> bool {
+        let bytes = hash.to_array();
+        let mut all_zero = true;
+        for b in bytes.iter() {
+            if *b != 0 {
+                all_zero = false;
+                break;
+            }
+        }
+        all_zero
+    }
 }
 
 #[contractimpl]
@@ -341,6 +382,14 @@ impl Market {
             .set(&BETTOR_LIST, &Vec::<Address>::new(&env));
         env.storage().instance().set(&PAUSED, &false);
         env.storage().instance().set(&CLAIMING, &false);
+
+        // Persist deployment metadata for the initial deployment.
+        let metadata = ContractMetadata {
+            version: CONTRACT_VERSION,
+            deployed_at: env.ledger().timestamp(),
+            upgrader_address: factory.clone(),
+        };
+        Self::save_metadata(&env, &metadata);
 
         // Set TTL on market data entries
         Self::extend_market_ttl(&env);
@@ -2062,18 +2111,44 @@ impl Market {
         Self::emergency_unpause(env, admin)
     }
 
-    /// Upgrades the contract WASM. Only callable by the factory's registered admin.
+    /// Returns the current contract version.
+    ///
+    /// Reads the version from the persisted `CONTRACT_METADATA` entry, falling
+    /// back to the compile-time `CONTRACT_VERSION` constant if no metadata has
+    /// been written yet (e.g. a contract deployed before versioning existed).
+    pub fn contract_version(env: Env) -> u32 {
+        match Self::load_metadata(&env) {
+            Some(metadata) => metadata.version,
+            None => CONTRACT_VERSION,
+        }
+    }
+
+    /// Returns the persisted deployment metadata, if any.
+    pub fn get_contract_metadata(env: Env) -> Option<ContractMetadata> {
+        Self::load_metadata(&env)
+    }
+
+    /// Upgrades the contract WASM and records the new deployment metadata.
     ///
     /// Cross-calls `factory.get_admin()` to retrieve the authoritative admin address
     /// and rejects the call if `admin` does not match. This prevents any address
     /// (including the factory contract itself) from triggering an upgrade without
     /// holding the factory's registered admin key.
     ///
+    /// The new WASM hash must be non-zero. On success the `CONTRACT_METADATA`
+    /// entry is updated with the bumped version, the current ledger timestamp,
+    /// and the upgrading address.
+    ///
     /// # Errors
-    /// - `Unauthorized`: Caller is not the factory admin
     /// - `NotFactory`: Factory address not found in storage
     /// - `NotAdmin`: Caller is not the factory's registered admin
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    /// - `InvalidWasmHash`: The provided WASM hash is all zero bytes
+    pub fn upgrade_contract(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        // CHECKS
         admin.require_auth();
         let factory: Address = env
             .storage()
@@ -2088,9 +2163,36 @@ impl Market {
         if admin != factory_admin {
             return Err(ContractError::NotAdmin);
         }
+        if Self::is_zero_hash(&new_wasm_hash) {
+            return Err(ContractError::InvalidWasmHash);
+        }
+
+        // EFFECTS — record the new deployment metadata before swapping the WASM.
+        let previous_version = match Self::load_metadata(&env) {
+            Some(metadata) => metadata.version,
+            None => CONTRACT_VERSION,
+        };
+        let metadata = ContractMetadata {
+            version: previous_version.saturating_add(1),
+            deployed_at: env.ledger().timestamp(),
+            upgrader_address: admin.clone(),
+        };
+        Self::save_metadata(&env, &metadata);
+
+        // INTERACTIONS — swap the contract WASM last.
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         boxmeout_shared::emit_contract_upgraded(&env, new_wasm_hash);
         Ok(())
+    }
+
+    /// Alias for `upgrade_contract`, retained for backwards compatibility.
+    ///
+    /// # Errors
+    /// - `NotFactory`: Factory address not found in storage
+    /// - `NotAdmin`: Caller is not the factory's registered admin
+    /// - `InvalidWasmHash`: The provided WASM hash is all zero bytes
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        Self::upgrade_contract(env, admin, new_wasm_hash)
     }
 }

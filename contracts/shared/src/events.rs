@@ -7,13 +7,58 @@ use soroban_sdk::{contracttype, Address, Env, String, Symbol};
 
 use crate::types::{AuditEntry, BetPlacedPayload, BetRecord, ClaimReceipt, OddsSnapshot, Outcome};
 
+// ─── Centralized Topic Symbols ───────────────────────────────────────────────
+// All event topic names are defined here to guarantee consistency and avoid
+// typos or divergent topic strings across emission helpers.
+
+/// Topic symbol for `market_created` events.
+pub const TOPIC_MARKET_CREATED: &str = "market_created";
+/// Topic symbol for `market_locked` events.
+pub const TOPIC_MARKET_LOCKED: &str = "market_locked";
+/// Topic symbol for `market_resolved` events.
+pub const TOPIC_MARKET_RESOLVED: &str = "market_resolved";
+/// Topic symbol for `bet_placed` events.
+pub const TOPIC_BET_PLACED: &str = "bet_placed";
+
+// ─── Typed Event Data ────────────────────────────────────────────────────────
+
+/// Data payload for the `market_created` event.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketCreatedEvent {
+    pub contract_address: Address,
+    pub match_id: String,
+}
+
+/// Data payload for the `bet_placed` event.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BetPlacedEvent {
+    pub bet: BetRecord,
+    pub odds_at_bet_time: OddsSnapshot,
+}
+
+/// Data payload for the `market_resolved` event.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketResolvedEvent {
+    pub outcome: Outcome,
+    pub oracle_address: Address,
+}
+
 /// Emits a `market_created` event when a new market is deployed.
 ///
 /// Topics: `(Symbol("market_created"), market_id)`
-/// Data:   `(contract_address, match_id)`
+/// Data:   `MarketCreatedEvent { contract_address, match_id }`
 pub fn emit_market_created(env: &Env, market_id: u64, contract_address: Address, match_id: String) {
-    let topics = (Symbol::new(env, "market_created"), market_id);
-    env.events().publish(topics, (contract_address, match_id));
+    let topics = (Symbol::new(env, TOPIC_MARKET_CREATED), market_id);
+    env.events().publish(
+        topics,
+        MarketCreatedEvent {
+            contract_address,
+            match_id,
+        },
+    );
 }
 
 /// Emits a `market_locked` event when betting is closed.
@@ -21,17 +66,23 @@ pub fn emit_market_created(env: &Env, market_id: u64, contract_address: Address,
 /// Topics: `(Symbol("market_locked"), market_id)`
 /// Data:   `()`
 pub fn emit_market_locked(env: &Env, market_id: u64) {
-    let topics = (Symbol::new(env, "market_locked"), market_id);
+    let topics = (Symbol::new(env, TOPIC_MARKET_LOCKED), market_id);
     env.events().publish(topics, ());
 }
 
 /// Emits a `market_resolved` event when an oracle submits a final outcome.
 ///
 /// Topics: `(Symbol("market_resolved"), market_id)`
-/// Data:   `(outcome, oracle_address)`
+/// Data:   `MarketResolvedEvent { outcome, oracle_address }`
 pub fn emit_market_resolved(env: &Env, market_id: u64, outcome: Outcome, oracle_address: Address) {
-    let topics = (Symbol::new(env, "market_resolved"), market_id);
-    env.events().publish(topics, (outcome, oracle_address));
+    let topics = (Symbol::new(env, TOPIC_MARKET_RESOLVED), market_id);
+    env.events().publish(
+        topics,
+        MarketResolvedEvent {
+            outcome,
+            oracle_address,
+        },
+    );
 }
 
 /// Emits a `market_resolution_pending` event when oracle consensus is reached
@@ -59,26 +110,24 @@ pub fn emit_resolution_finalized(env: &Env, market_id: u64, outcome_byte: u32) {
     env.events().publish(topics, outcome_byte as u32);
 }
 
-/// Emits a legacy `bet_placed` event containing only the BetRecord.
+/// Emits a `bet_placed` event.
+///
+/// This is the single canonical emission path for `bet_placed` events. It
+/// publishes a [`BetPlacedEvent`] carrying the bet record and the odds snapshot
+/// captured at bet time.
 ///
 /// Topics: `(Symbol("bet_placed"), market_id)`
-/// Data:   `BetRecord`
-pub fn emit_bet_placed(env: &Env, market_id: u64, bet: BetRecord) {
-    let topics = (Symbol::new(env, "bet_placed"), market_id);
-    env.events().publish(topics, bet);
-}
-
-/// Emits a `bet_placed` event with the odds offered before the bet was added.
-pub fn emit_bet_placed_with_odds(
+/// Data:   `BetPlacedEvent { bet, odds_at_bet_time }`
+pub fn emit_bet_placed(
     env: &Env,
     market_id: u64,
     bet: BetRecord,
     odds_at_bet_time: OddsSnapshot,
 ) {
-    let topics = (Symbol::new(env, "bet_placed"), market_id);
+    let topics = (Symbol::new(env, TOPIC_BET_PLACED), market_id);
     env.events().publish(
         topics,
-        BetPlacedPayload {
+        BetPlacedEvent {
             bet,
             odds_at_bet_time,
         },
@@ -597,7 +646,7 @@ mod tests {
 
     use crate::{
         events::*,
-        types::{BetRecord, BetSide, ClaimReceipt, Outcome},
+        types::{BetRecord, BetSide, ClaimReceipt, OddsSnapshot, Outcome},
     };
 
     #[contract]
@@ -645,6 +694,40 @@ mod tests {
     }
 
     #[test]
+    fn test_market_created_topic_and_payload() {
+        use soroban_sdk::{FromVal, IntoVal, Symbol, Val, Vec};
+
+        let (env, id) = env();
+        let contract = addr(&env);
+        let match_id = str(&env, "FURY-USYK-2025");
+        env.as_contract(&id, || {
+            emit_market_created(&env, 42, contract.clone(), match_id.clone());
+        });
+
+        let all = env.events().all();
+        let (emitter, topics, data) = all
+            .iter()
+            .find(|(addr, _, _)| addr == &id)
+            .expect("market_created event not emitted");
+
+        assert_eq!(emitter, id);
+        assert_eq!(topics.len(), 2);
+        let topic0 = Symbol::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic0, Symbol::new(&env, TOPIC_MARKET_CREATED));
+        let topic1 = u64::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(topic1, 42);
+
+        let payload = MarketCreatedEvent::from_val(&env, &data);
+        assert_eq!(payload.contract_address, contract);
+        assert_eq!(payload.match_id, match_id);
+
+        // Ensure no duplicate emission paths produced extra events.
+        let count = all.iter().filter(|(addr, _, _)| addr == &id).count();
+        assert_eq!(count, 1, "expected exactly one market_created event");
+        let _ = (Vec::<Val>::new(&env),);
+    }
+
+    #[test]
     fn test_emit_market_locked() {
         let (env, id) = env();
         env.as_contract(&id, || {
@@ -666,6 +749,36 @@ mod tests {
     }
 
     #[test]
+    fn test_market_resolved_topic_and_payload() {
+        use soroban_sdk::{FromVal, Symbol};
+
+        let (env, id) = env();
+        let oracle = addr(&env);
+        env.as_contract(&id, || {
+            emit_market_resolved(&env, 77, Outcome::FighterB, oracle.clone());
+        });
+
+        let all = env.events().all();
+        let (_, topics, data) = all
+            .iter()
+            .find(|(addr, _, _)| addr == &id)
+            .expect("market_resolved event not emitted");
+
+        assert_eq!(topics.len(), 2);
+        let topic0 = Symbol::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic0, Symbol::new(&env, TOPIC_MARKET_RESOLVED));
+        let topic1 = u64::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(topic1, 77);
+
+        let payload = MarketResolvedEvent::from_val(&env, &data);
+        assert_eq!(payload.outcome, Outcome::FighterB);
+        assert_eq!(payload.oracle_address, oracle);
+
+        let count = all.iter().filter(|(addr, _, _)| addr == &id).count();
+        assert_eq!(count, 1, "expected exactly one market_resolved event");
+    }
+
+    #[test]
     fn test_emit_bet_placed() {
         let (env, id) = env();
         let bettor = addr(&env);
@@ -677,11 +790,67 @@ mod tests {
             placed_at: 1_000_000,
             claimed: false,
         };
+        let odds = OddsSnapshot {
+            pool_a: 10_000_000,
+            pool_b: 10_000_000,
+            pool_draw: 10_000_000,
+            odds_a_bps: 3_333,
+            odds_b_bps: 3_333,
+            odds_draw_bps: 3_334,
+            captured_at: 1_000_000,
+        };
         env.as_contract(&id, || {
-            emit_bet_placed(&env, 4, bet);
+            emit_bet_placed(&env, 4, bet.clone(), odds.clone());
         });
 
         sole_event!(env, &id);
+    }
+
+    #[test]
+    fn test_bet_placed_topic_and_payload() {
+        use soroban_sdk::{FromVal, Symbol};
+
+        let (env, id) = env();
+        let bettor = addr(&env);
+        let bet = BetRecord {
+            bettor: bettor.clone(),
+            market_id: 55,
+            side: BetSide::Draw,
+            amount: 2_500_000,
+            placed_at: 1_234_567,
+            claimed: false,
+        };
+        let odds = OddsSnapshot {
+            pool_a: 5_000_000,
+            pool_b: 6_000_000,
+            pool_draw: 7_000_000,
+            odds_a_bps: 4_000,
+            odds_b_bps: 3_500,
+            odds_draw_bps: 2_500,
+            captured_at: 1_234_567,
+        };
+        env.as_contract(&id, || {
+            emit_bet_placed(&env, 55, bet.clone(), odds.clone());
+        });
+
+        let all = env.events().all();
+        let (_, topics, data) = all
+            .iter()
+            .find(|(addr, _, _)| addr == &id)
+            .expect("bet_placed event not emitted");
+
+        assert_eq!(topics.len(), 2);
+        let topic0 = Symbol::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic0, Symbol::new(&env, TOPIC_BET_PLACED));
+        let topic1 = u64::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(topic1, 55);
+
+        let payload = BetPlacedEvent::from_val(&env, &data);
+        assert_eq!(payload.bet, bet);
+        assert_eq!(payload.odds_at_bet_time, odds);
+
+        let count = all.iter().filter(|(addr, _, _)| addr == &id).count();
+        assert_eq!(count, 1, "expected exactly one bet_placed event");
     }
 
     #[test]

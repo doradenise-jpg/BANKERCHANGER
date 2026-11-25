@@ -58,6 +58,20 @@ const MINIMUM_RESERVE: &str              = "MINIMUM_RESERVE";               // i
 /// Default minimum reserve: 100 XLM in stroops.
 /// Prevents the treasury from being drained to zero while markets have pending payouts.
 const DEFAULT_MINIMUM_RESERVE: i128      = 1_000_000_000;
+const CONTRACT_METADATA: &str            = "CONTRACT_METADATA";            // ContractMetadata
+
+// ── Contract Versioning ──────────────────────────────────────────────────────
+/// Current version of the treasury contract. Bumped on every upgrade.
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Deployment metadata persisted across upgrades.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractMetadata {
+    pub version: u32,
+    pub deployed_at: u64,
+    pub upgrader_address: Address,
+}
 
 // ── Action symbols for events ────────────────────────────────────────────────
 #[allow(dead_code)]
@@ -829,6 +843,7 @@ mod tests {
         env.storage().persistent().extend_ttl(&AUDIT_LOG, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&AUDIT_NEXT_ID, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&MINIMUM_RESERVE, 518_400, 518_400);
+        env.storage().persistent().extend_ttl(&CONTRACT_METADATA, 518_400, 518_400);
     }
 
     /// Sets the fee-distribution splits for this treasury.
@@ -890,6 +905,53 @@ mod tests {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    /// Returns the current contract version.
+    pub fn contract_version(_env: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+
+    /// Returns the persisted deployment metadata, if any.
+    pub fn get_contract_metadata(env: Env) -> Option<ContractMetadata> {
+        env.storage().persistent().get(&CONTRACT_METADATA)
+    }
+
+    /// Upgrades the contract to a new WASM hash.
+    ///
+    /// Validates that the caller is the admin and that the new WASM hash is
+    /// non-zero, then swaps the deployed WASM and persists fresh deployment
+    /// metadata (version, deployed_at, upgrader_address).
+    pub fn upgrade_contract(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        // Reject an all-zero hash, which cannot correspond to a real WASM blob.
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        if new_wasm_hash == zero_hash {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        let metadata = ContractMetadata {
+            version: CONTRACT_VERSION,
+            deployed_at: env.ledger().timestamp(),
+            upgrader_address: admin.clone(),
+        };
+        env.storage().persistent().set(&CONTRACT_METADATA, &metadata);
+
+        env.events().publish(
+            (Symbol::new(&env, "contract_upgraded"),),
+            (admin, CONTRACT_VERSION),
+        );
+
         Ok(())
     }
 }
@@ -1075,5 +1137,65 @@ mod tests {
 
         client.deposit(&500_000i128);
         assert_eq!(client.get_accumulated_fees(&token), 750_000i128);
+    }
+
+    #[test]
+    fn test_contract_version_returns_current() {
+        let (_env, client, _admin, _market, _token, _factory) = setup(10_000_000);
+        assert_eq!(client.contract_version(), CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn test_upgrade_contract_persists_metadata() {
+        let (env, client, admin, _market, _token, _factory) = setup(10_000_000);
+        set_time(&env, 1_000_000);
+
+        let new_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.upgrade_contract(&admin, &new_hash);
+
+        let metadata = client.get_contract_metadata().unwrap();
+        assert_eq!(metadata.version, CONTRACT_VERSION);
+        assert_eq!(metadata.deployed_at, 1_000_000);
+        assert_eq!(metadata.upgrader_address, admin);
+    }
+
+    #[test]
+    fn test_upgrade_contract_rejects_zero_hash() {
+        let (env, client, admin, _market, _token, _factory) = setup(10_000_000);
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let result = client.try_upgrade_contract(&admin, &zero_hash);
+        assert!(result.is_err());
+        assert!(client.get_contract_metadata().is_none());
+    }
+
+    #[test]
+    fn test_upgrade_contract_rejects_non_admin() {
+        let (env, client, _admin, _market, _token, _factory) = setup(10_000_000);
+        let impostor = Address::generate(&env);
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        let result = client.try_upgrade_contract(&impostor, &new_hash);
+        assert!(result.is_err());
+        assert!(client.get_contract_metadata().is_none());
+    }
+
+    #[test]
+    fn test_upgrade_path_preserves_state_and_metadata() {
+        let (env, client, admin, _market, token, _factory) = setup(10_000_000);
+        client.deposit(&250_000i128);
+        set_time(&env, 500_000);
+
+        let new_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.upgrade_contract(&admin, &new_hash);
+
+        // State survives the upgrade.
+        assert_eq!(client.get_accumulated_fees(&token), 250_000i128);
+        assert_eq!(client.get_admin(), admin);
+
+        // Metadata persists and reflects the upgrade.
+        let metadata = client.get_contract_metadata().unwrap();
+        assert_eq!(metadata.version, CONTRACT_VERSION);
+        assert_eq!(metadata.deployed_at, 500_000);
+        assert_eq!(metadata.upgrader_address, admin);
+        assert_eq!(client.contract_version(), CONTRACT_VERSION);
     }
 }
