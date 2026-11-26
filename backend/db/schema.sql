@@ -199,22 +199,12 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   target_url                 TEXT        NOT NULL,
   signing_secret             TEXT        NOT NULL,
   event_type                 TEXT        NOT NULL,
-  event_key                  TEXT        NOT NULL,
-  payload                    JSONB       NOT NULL,
-  status                     TEXT        NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'retrying', 'success', 'failed')),
-  attempt_count              INTEGER     NOT NULL DEFAULT 0,
-  retry_count                INTEGER     NOT NULL DEFAULT 0,
-  next_attempt_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  locked_at                  TIMESTAMPTZ,
-  last_error_response_code   INTEGER,
+  payload                    JSONB       NOT NULL DEFAULT '{}',
+  status                     TEXT        NOT NULL DEFAULT 'pending',
+  attempts                   INTEGER     NOT NULL DEFAULT 0,
   last_error                 TEXT,
   created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  delivered_at               TIMESTAMPTZ,
-  CONSTRAINT webhook_deliveries_unique_event UNIQUE (webhook_id, event_type, event_key)
+  delivered_at               TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS webhook_deliveries_status_attempt_idx
-  ON webhook_deliveries (status, next_attempt_at);
-CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx
-  ON webhook_deliveries (webhook_id);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id_idx ON webhook_deliveries (webhook_id);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_status_idx ON webhook_deliveries (status);
