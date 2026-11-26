@@ -39,6 +39,7 @@ const PENDING_ADMIN_UNLOCK: &str         = "PENDING_ADMIN_UNLOCK";
 const PENDING_ADMIN_TTL_SECS: u64        = 604_800; // 7 days
 const DEFAULT_ADMIN_TIMELOCK_SECS: u64   = 86_400;  // 24 hours
 const BET_TOKEN: &str                    = "BET_TOKEN";
+const TOTAL_FEES_COLLECTED: &str = "TOTAL_FEES_COLLECTED";
 const FACTORY: &str                      = "FACTORY";
 const ACCUMULATED_FEES: &str             = "ACCUMULATED_FEES";             // Map<Address, i128>
 const ACCUMULATED_FEES_BY_MARKET: &str   = "ACCUMULATED_FEES_BY_MARKET";  // Map<u64, Map<Address, i128>>
@@ -131,12 +132,7 @@ impl Treasury {
         daily.set(bucket, today + amount);
 
         let mut stale: Vec<u64> = Vec::new(env);
-        let mut scanned = 0u32;
-        for (k, _) in daily.iter() {
-            if scanned >= MAX_STALE_BUCKETS_PRUNED_PER_CALL {
-                break;
-            }
-            scanned += 1;
+        for (k, _) in daily.iter().take(MAX_STALE_BUCKETS_PRUNED_PER_CALL as usize) {
             if k.saturating_add(1) < bucket {
                 stale.push_back(k);
             }
@@ -145,6 +141,14 @@ impl Treasury {
             daily.remove(k);
         }
         env.storage().persistent().set(&key, &daily);
+    }
+
+    fn add_collected_fees(env: &Env, amount: i128) -> Result<(), ContractError> {
+        let total = Self::get_total_fees_collected(env.clone())?
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        env.storage().persistent().set(&TOTAL_FEES_COLLECTED, &total);
+        Ok(())
     }
 
     fn record_audit(
@@ -183,7 +187,7 @@ impl Treasury {
 
 #[contractimpl]
 impl Treasury {
-    /// Initializes the treasury contract.
+    /// Stores the factory address and initializes the treasury fee balances to zero.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -191,12 +195,14 @@ impl Treasury {
         factory: Address,
         withdrawal_limit: i128,
     ) -> Result<(), ContractError> {
+        admin.require_auth();
         if env.storage().persistent().has(&ADMIN) {
             return Err(ContractError::AlreadyInitialized);
         }
         env.storage().persistent().set(&ADMIN, &admin);
         env.storage().persistent().set(&BET_TOKEN, &bet_token);
         env.storage().persistent().set(&FACTORY, &factory);
+        env.storage().persistent().set(&TOTAL_FEES_COLLECTED, &0i128);
         env.storage().persistent().set(&WITHDRAWAL_LIMIT, &withdrawal_limit);
         env.storage().persistent().set(&ACCUMULATED_FEES, &Map::<Address, i128>::new(&env));
         env.storage().persistent().set(&ACCUMULATED_FEES_BY_MARKET, &Map::<u64, Map<Address, i128>>::new(&env));
@@ -299,6 +305,8 @@ impl Treasury {
             &env.current_contract_address(),
             &amount,
         );
+
+        Self::add_collected_fees(&env, amount)?;
 
         Self::record_audit(
             &env,
@@ -513,29 +521,6 @@ impl Treasury {
         Ok(())
     }
 
-#[cfg(test)]
-mod tests {
-    use soroban_sdk::{
-        testutils::{Address as _, Events},
-        token::StellarAssetClient,
-        Address, Env, Symbol,
-    };
-
-    use super::{Treasury, TreasuryClient};
-
-    fn setup() -> (Env, TreasuryClient<'static>, Address, Address) {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let market = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
-        client.initialize(&admin, &bet_token, &factory, &1_000_000_i128);
-        (env, client, admin, market)
-    }
-
     pub fn get_token_daily_withdrawn(env: Env, token: Address) -> i128 {
         let bucket = Self::day_bucket(&env);
         Self::token_withdrawn_today(&env, &token, bucket)
@@ -557,6 +542,21 @@ mod tests {
 
     pub fn is_withdrawals_paused(env: Env) -> bool {
         env.storage().persistent().get(&WITHDRAWALS_PAUSED).unwrap_or(false)
+    }
+
+    /// Returns lifetime fee deposits in raw token units.
+    pub fn get_total_fees_collected(env: Env) -> Result<i128, ContractError> {
+        if let Some(total) = env.storage().persistent().get(&TOTAL_FEES_COLLECTED) {
+            return Ok(total);
+        }
+
+        // Treasuries initialized before the counter was added can recover it from the audit log.
+        Self::get_audit_log(env)
+            .iter()
+            .filter(|entry| entry.action == AuditAction::FeeDeposited)
+            .try_fold(0i128, |total, entry| {
+                total.checked_add(entry.amount).ok_or(ContractError::ArithmeticOverflow)
+            })
     }
 
     pub fn get_accumulated_fees(env: Env, token: Address) -> i128 {
@@ -584,20 +584,6 @@ mod tests {
     pub fn get_audit_log_count(env: Env) -> u64 {
         Self::get_audit_log_len(env)
     }
-
-    /// Seed ACCUMULATED_FEES by depositing via an approved market, then drain.
-    fn setup_with_deposit(
-        amount: i128,
-    ) -> (Env, TreasuryClient<'static>, Address, Address, Address) {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let market = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
-        client.initialize(&admin, &bet_token, &factory, &1_000_000_i128);
 
     // ── Dynamic Fee Tiers ─────────────────────────────────────────────────
 
@@ -641,24 +627,8 @@ mod tests {
             return 0;
         }
 
-        let events = env.events().all();
-        let last = events.events().last().unwrap();
-        let body = match &last.body {
-            soroban_sdk::xdr::ContractEventBody::V0(body) => body,
-            _ => panic!("unsupported event body variant"),
-        };
-        let topic_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(0).unwrap().clone()).unwrap();
-        let topic_sym: soroban_sdk::Symbol =
-            soroban_sdk::TryFromVal::try_from_val(&env, &topic_val).unwrap();
-        assert_eq!(topic_sym, Symbol::new(&env, "emergency_drain"));
-        let data_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.data).unwrap();
-        let (ev_token, ev_amount, ev_admin): (Address, i128, Address) =
-            soroban_sdk::TryFromVal::try_from_val(&env, &data_val).unwrap();
-        assert_eq!(ev_token, token);
-        assert_eq!(ev_amount, 250_000_i128);
-        assert_eq!(ev_admin, admin);
-    }
-
+        let tiers = Self::get_fee_tiers(env);
+        let mut rate_bps = 0;
         for tier in tiers.iter() {
             if market_total_volume <= tier.volume_threshold {
                 rate_bps = tier.fee_bps;
@@ -668,21 +638,6 @@ mod tests {
         }
 
         ((bet_amount as u128 * rate_bps as u128) / 10_000) as u64
-    }
-
-    fn setup() -> (Env, TreasuryClient<'static>, Address, Address, Address) {
-        let env = Env::default();
-        env.mock_all_auths();
-        let id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(&env, &id);
-        let admin = Address::generate(&env);
-        let market = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
-        client.initialize(&admin, &bet_token, &factory, &1_000_000_i128);
-        let token = env.register_stellar_asset_contract(admin.clone());
-        StellarAssetClient::new(&env, &token).mint(&market, &10_000_000_i128);
-        (env, client, admin, market, token)
     }
 
     /// Sets the admin timelock in seconds. Only callable by admin.
@@ -710,28 +665,13 @@ mod tests {
         env.storage().persistent().get(&PENDING_ADMIN)
     }
 
-    #[test]
-    fn fee_deposited_event_emitted_with_correct_payload() {
-        let (env, client, admin, market, token) = setup();
-        client.approve_market(&admin, &market);
-        client.deposit_fees(&market, &token, &500_000_i128);
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().persistent().get(&ADMIN).unwrap()
+    }
 
-        let events = env.events().all();
-        let last = events.events().last().unwrap();
-        let body = match &last.body {
-            soroban_sdk::xdr::ContractEventBody::V0(body) => body,
-            _ => panic!("unsupported event body variant"),
-        };
-        let topic_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.topics.get(0).unwrap().clone()).unwrap();
-        let topic_sym: Symbol =
-            soroban_sdk::TryFromVal::try_from_val(&env, &topic_val).unwrap();
-        assert_eq!(topic_sym, Symbol::new(&env, "fee_deposited"));
-        let data_val: soroban_sdk::Val = soroban_sdk::TryFromVal::try_from_val(&env, &body.data).unwrap();
-        let (ev_market, ev_token, ev_amount): (Address, Address, i128) =
-            soroban_sdk::TryFromVal::try_from_val(&env, &data_val).unwrap();
-        assert_eq!(ev_market, market);
-        assert_eq!(ev_token, token);
-        assert_eq!(ev_amount, 500_000_i128);
+    pub fn get_audit_entry(env: Env, index: u64) -> Option<AuditEntry> {
+        let index = u32::try_from(index).ok()?;
+        Self::get_audit_log(env).get(index)
     }
 
     /// Proposes a new admin address, starting the two-step transfer.
@@ -743,67 +683,84 @@ mod tests {
         current_admin.require_auth();
         Self::require_admin(&env, &current_admin)?;
 
-    fn setup_client(env: &Env) -> TreasuryClient<'static> {
-        env.mock_all_auths();
-        let id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(env, &id);
-        client
+        let timelock = env
+            .storage()
+            .persistent()
+            .get(&ADMIN_TIMELOCK)
+            .unwrap_or(DEFAULT_ADMIN_TIMELOCK_SECS);
+        let now = env.ledger().timestamp();
+        let unlock_at = now.saturating_add(timelock);
+        let expiry = now.saturating_add(PENDING_ADMIN_TTL_SECS);
+
+        env.storage().persistent().set(&PENDING_ADMIN, &new_admin);
+        env.storage().persistent().set(&PENDING_ADMIN_UNLOCK, &unlock_at);
+        env.storage()
+            .persistent()
+            .set(&PENDING_ADMIN_EXPIRY, &expiry);
+        boxmeout_shared::emit_admin_proposed(&env, current_admin, new_admin);
+        Ok(())
     }
 
-    /// First call stores admin and withdrawal_limit correctly.
-    #[test]
-    fn test_initialize_stores_correct_state() {
-        let env = Env::default();
-        let client = setup_client(&env);
-        let admin = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
+    /// Completes the two-step admin transfer.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
 
-        client.initialize(&admin, &bet_token, &factory, &5_000_000i128);
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
 
         if new_admin != pending {
             return Err(ContractError::Unauthorized);
         }
 
-    /// Second call returns AlreadyInitialized.
-    #[test]
-    fn test_initialize_second_call_returns_already_initialized() {
-        let env = Env::default();
-        let client = setup_client(&env);
-        let admin = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
+        let unlock_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN_UNLOCK)
+            .unwrap_or(0);
+        if env.ledger().timestamp() < unlock_at {
+            return Err(ContractError::AdminTimelockActive);
+        }
 
-        client.initialize(&admin, &bet_token, &factory, &1_000_000i128);
-        let result = client.try_initialize(&admin, &bet_token, &factory, &1_000_000i128);
-        assert!(result.is_err());
-    }
+        let expiry: u64 = env
+            .storage()
+            .persistent()
+            .get(&PENDING_ADMIN_EXPIRY)
+            .ok_or(ContractError::Unauthorized)?;
+        if env.ledger().timestamp() > expiry {
+            env.storage().persistent().remove(&PENDING_ADMIN);
+            env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
+            env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
+            return Err(ContractError::PendingAdminExpired);
+        }
 
-    /// Withdrawal limit is enforced after initialization.
-    #[test]
-    fn test_initialize_withdrawal_limit_enforced() {
-        let env = Env::default();
-        let client = setup_client(&env);
-        let admin = Address::generate(&env);
-        let limit = 1_000_000i128;
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&ADMIN)
+            .ok_or(ContractError::Unauthorized)?;
 
-        client.initialize(&admin, &bet_token, &factory, &limit);
+        env.storage().persistent().set(&ADMIN, &new_admin);
+        env.storage().persistent().remove(&PENDING_ADMIN);
+        env.storage().persistent().remove(&PENDING_ADMIN_UNLOCK);
+        env.storage().persistent().remove(&PENDING_ADMIN_EXPIRY);
 
         boxmeout_shared::emit_admin_transferred(&env, old_admin, new_admin);
         Ok(())
     }
 
-    /// ACCUMULATED_FEES map starts empty (zero for any token).
-    #[test]
-    fn test_initialize_accumulated_fees_empty() {
-        let env = Env::default();
-        let client = setup_client(&env);
-        let admin = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
-        client.initialize(&admin, &bet_token, &factory, &1_000_000i128);
+    /// Deposits fees into the treasury (e.g. from market place_bet).
+    pub fn deposit(env: Env, fee_amount: i128) -> Result<(), ContractError> {
+        if fee_amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let token: Address = env
+            .storage()
+            .persistent()
+            .get(&BET_TOKEN)
+            .ok_or(ContractError::Unauthorized)?;
 
         let mut fees: Map<Address, i128> = env
             .storage()
@@ -811,18 +768,23 @@ mod tests {
             .get(&ACCUMULATED_FEES)
             .unwrap_or_else(|| Map::new(&env));
         let current = fees.get(token.clone()).unwrap_or(0);
-        fees.set(token.clone(), current + fee_amount);
+        let updated = current.checked_add(fee_amount).ok_or(ContractError::ArithmeticOverflow)?;
+        if token::Client::new(&env, &token).balance(&env.current_contract_address()) < updated {
+            return Err(ContractError::InsufficientBalance);
+        }
+        fees.set(token.clone(), updated);
         env.storage().persistent().set(&ACCUMULATED_FEES, &fees);
 
-    /// DAILY_WITHDRAWN map starts empty (zero on first day).
-    #[test]
-    fn test_initialize_daily_withdrawn_empty() {
-        let env = Env::default();
-        let client = setup_client(&env);
-        let admin = Address::generate(&env);
-        let bet_token = Address::generate(&env);
-        let factory = Address::generate(&env);
-        client.initialize(&admin, &bet_token, &factory, &1_000_000i128);
+        Self::add_collected_fees(&env, fee_amount)?;
+
+        Self::record_audit(
+            &env,
+            AuditAction::FeeDeposited,
+            token.clone(),
+            fee_amount,
+            env.current_contract_address(),
+            env.current_contract_address(),
+        );
 
         boxmeout_shared::emit_fee_deposited(&env, env.current_contract_address(), token, fee_amount);
         Ok(())
@@ -833,6 +795,9 @@ mod tests {
         env.storage().persistent().extend_ttl(&ADMIN_TIMELOCK, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&BET_TOKEN, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&FACTORY, 518_400, 518_400);
+        if env.storage().persistent().has(&TOTAL_FEES_COLLECTED) {
+            env.storage().persistent().extend_ttl(&TOTAL_FEES_COLLECTED, 518_400, 518_400);
+        }
         env.storage().persistent().extend_ttl(&WITHDRAWAL_LIMIT, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&ACCUMULATED_FEES, 518_400, 518_400);
         env.storage().persistent().extend_ttl(&APPROVED_MARKETS, 518_400, 518_400);
@@ -968,14 +933,11 @@ mod tests {
     fn setup(limit: i128) -> (Env, TreasuryClient<'static>, Address, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let id = env.register_contract(None, Treasury);
-        let client = TreasuryClient::new(env, &id);
-        let admin = Address::generate(env);
-        let market = Address::generate(env);
-        let bet_token = Address::generate(env);
-        let factory = Address::generate(env);
-        client.initialize(&admin, &bet_token, &factory, &limit);
-        let token = env.register_stellar_asset_contract(admin.clone());
+        let id = env.register(Treasury, ());
+        let client = TreasuryClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let market = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
         let factory = Address::generate(&env);
         client.initialize(&admin, &token, &factory, &limit);
         client.approve_market(&admin, &market);
@@ -987,6 +949,7 @@ mod tests {
         fund: i128,
     ) -> (Env, TreasuryClient<'static>, Address, Address, Address) {
         let (env, client, admin, market, token, _) = setup(limit);
+        client.set_minimum_reserve(&admin, &0);
         StellarAssetClient::new(&env, &token).mint(&market, &fund);
         client.deposit_fees(&market, &token, &fund);
         (env, client, admin, market, token)
@@ -1128,8 +1091,28 @@ mod tests {
     }
 
     #[test]
+    fn initialization_stores_factory_and_zero_fees_and_rejects_reinitialization() {
+        let (env, client, admin, _, token, factory) = setup(10_000_000);
+        assert_eq!(client.get_accumulated_fees(&token), 0);
+
+        let replacement = Address::generate(&env);
+        assert_eq!(
+            client.try_initialize(&admin, &token, &replacement, &20_000_000),
+            Err(Ok(ContractError::AlreadyInitialized)),
+        );
+
+        env.as_contract(&client.address, || {
+            let storage = env.storage().persistent();
+            assert_eq!(storage.get::<_, Address>(&FACTORY), Some(factory));
+            assert_eq!(storage.get::<_, i128>(&TOTAL_FEES_COLLECTED), Some(0));
+            assert!(storage.get::<_, Map<Address, i128>>(&ACCUMULATED_FEES).unwrap().is_empty());
+        });
+    }
+
+    #[test]
     fn test_deposit_accumulates_fees() {
-        let (_env, client, _admin, _market, token, _factory) = setup(10_000_000);
+        let (env, client, _admin, _market, token, _factory) = setup(10_000_000);
+        StellarAssetClient::new(&env, &token).mint(&client.address, &750_000);
         assert_eq!(client.get_accumulated_fees(&token), 0);
 
         client.deposit(&250_000i128);
@@ -1137,6 +1120,7 @@ mod tests {
 
         client.deposit(&500_000i128);
         assert_eq!(client.get_accumulated_fees(&token), 750_000i128);
+        assert_eq!(client.get_total_fees_collected(), 750_000);
     }
 
     #[test]

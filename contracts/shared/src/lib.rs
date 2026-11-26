@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(target_family = "wasm", no_std)]
 //! ============================================================
 //! BANKERCHANGER — Shared Types and Errors
 //! All contracts import from this crate.
