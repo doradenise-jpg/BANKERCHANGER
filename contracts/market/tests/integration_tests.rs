@@ -1,7 +1,7 @@
 use boxmeout_market::{Market, MarketClient};
 use boxmeout_shared::{
     event_parser::parse_market_cancelled_event,
-    types::{BetSide, FightDetails, MarketConfig},
+    types::{BetSide, FightDetails, MarketConfig, MarketState, MarketStatus, Outcome},
 };
 use boxmeout_treasury::{Treasury, TreasuryClient};
 use soroban_sdk::{
@@ -41,6 +41,7 @@ fn sample_fight(env: &Env) -> FightDetails {
 fn sample_config() -> MarketConfig {
     MarketConfig {
         min_bet_amount: 1_000_000,
+        max_bet_share_bps: 10_000,
         max_bet: 100_000_000_000,
         fee_bps: 200, // 2%
         lock_before_secs: 3600,
@@ -51,14 +52,9 @@ fn sample_config() -> MarketConfig {
     }
 }
 
-/// Issue #636 (#10): Fee Collection Routes Through Treasury Contract
-/// Acceptance Criteria:
-/// - [x] place_bet calls treasury.deposit(fee_amount) via cross-contract call
-/// - [x] Treasury emits a FeeDeposited event
-/// - [x] Test verifies treasury balance increases by exact fee amount
-/// - [x] No direct token transfers to admin address from market contract
+/// Settlement sends the fee to Treasury while open bets remain fully refundable.
 #[test]
-fn test_fee_routing_to_treasury_on_place_bet() {
+fn test_fee_routing_to_treasury_on_settlement() {
     let env = setup_env();
 
     let admin = Address::generate(&env);
@@ -75,7 +71,6 @@ fn test_fee_routing_to_treasury_on_place_bet() {
     let treasury_id = env.register(Treasury, ());
     let treasury_client = TreasuryClient::new(&env, &treasury_id);
     treasury_client.initialize(&admin, &token_id.address(), &factory, &100_000_000_000i128);
-    std::println!("Events after treasury init: {}", env.events().all().len());
 
     // Deploy and initialize Market contract
     let market_id = env.register(Market, ());
@@ -87,12 +82,10 @@ fn test_fee_routing_to_treasury_on_place_bet() {
         &sample_config(),
         &treasury_id,
     );
-    std::println!("Events after market init: {}", env.events().all().len());
 
     // Mint 10_000_000 stroops (1 XLM) to bettor
     let bet_amount = 10_000_000i128;
     stellar_client.mint(&bettor, &bet_amount);
-    std::println!("Events after mint: {}", env.events().all().len());
 
     // Check balances before bet:
     assert_eq!(token_client.balance(&treasury_id), 0);
@@ -107,8 +100,18 @@ fn test_fee_routing_to_treasury_on_place_bet() {
         &token_id.address(),
         &0i128,
     );
-    let events = env.events().all();
     assert_eq!(bet_record.amount, bet_amount);
+    assert_eq!(token_client.balance(&market_id), bet_amount);
+    assert_eq!(token_client.balance(&treasury_id), 0);
+
+    env.as_contract(&market_id, || {
+        let mut state: MarketState = env.storage().persistent().get(&"STATE").unwrap();
+        state.status = MarketStatus::Disputed;
+        env.storage().persistent().set(&"STATE", &state);
+    });
+    market_client.resolve_dispute(&factory, &Outcome::FighterA);
+    market_client.claim_winnings(&bettor, &token_id.address());
+    let events = env.events().all();
 
     // Expected fee is 2% of 10_000_000 = 200_000 stroops
     let expected_fee = (bet_amount * 200) / 10_000;

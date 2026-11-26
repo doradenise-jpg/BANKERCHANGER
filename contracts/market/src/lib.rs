@@ -13,7 +13,7 @@ extern crate std;
 mod tests;
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, token, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 use boxmeout_shared::{
@@ -32,9 +32,11 @@ const STATE: &str = "STATE";
 /// other bettor's bets (see issue #255).
 const BET_PREFIX: &str = "BET";
 const BETTOR_LIST: &str = "BETTOR_LIST";
+const REFUND_RESERVE: &str = "REFUND_RESERVE";
 const FACTORY: &str = "FACTORY";
 const CONFIG: &str = "CONFIG";
 const TREASURY: &str = "TREASURY";
+const FEE_COLLECTED: &str = "FEE_COLLECTED";
 /// Reentrancy guard — set true while a claim/refund transfer is in flight
 const CLAIMING: &str = "CLAIMING";
 /// Emergency pause — when true all fund-moving operations are blocked
@@ -60,15 +62,10 @@ const LP_FEE_PER_SHARE: &str = "LP_FEE_PER_SHARE";
 const ALLOW_DRAW: &str       = "ALLOW_DRAW";
 /// Seed liquidity minimum — 1 XLM per pool side
 const MIN_SEED_LIQUIDITY: i128 = 10_000_000;
-const MAX_SLIPPAGE_BPS: i128 = 3_000;
 /// Persistent key for betting token contract address
 const TOKEN: &str = "TOKEN";
 /// Grace period (24 hours) after scheduled fight start before expired market is refundable
 pub const EXPIRY_GRACE_PERIOD: u64 = 86_400;
-/// Current contract version. Bumped on every upgrade.
-pub const CONTRACT_VERSION: u32 = 1;
-/// Persistent key holding deployment metadata (version, deployed_at, upgrader).
-const CONTRACT_METADATA: &str = "CONTRACT_METADATA";
 
 // ─── Storage TTL Constants ────────────────────────────────────────────────────
 /// Maximum TTL for market data (30 days in ledger entries)
@@ -78,19 +75,6 @@ pub const CLAIM_WINDOW_LEDGERS: u32 = 2_000_000;
 /// Maximum age for unresolved oracle reports before stale entries are pruned.
 const REPORT_TTL: u64 = 172_800;
 
-// ─── Deployment metadata ──────────────────────────────────────────────────────
-/// Metadata persisted under `CONTRACT_METADATA` describing the current deployment.
-#[soroban_sdk::contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractMetadata {
-    /// Contract version at the time of the last deployment/upgrade.
-    pub version: u32,
-    /// Unix timestamp (seconds) of the last deployment/upgrade.
-    pub deployed_at: u64,
-    /// Address that performed the last upgrade.
-    pub upgrader_address: Address,
-}
-
 // ─── Cross-contract client for oracle whitelist check ─────────────────────────
 #[contractclient(name = "FactoryClient")]
 pub trait FactoryInterface {
@@ -99,17 +83,32 @@ pub trait FactoryInterface {
     fn is_paused(env: Env) -> bool;
     /// Returns the registered admin address of the factory.
     fn get_admin(env: Env) -> Address;
-    fn cleanup_terminal_market(
-        env: Env,
-        market_address: Address,
-        market_id: u64,
-    ) -> Result<(), ContractError>;
+    fn market_cancelled(env: Env, market: Address, market_id: u64) -> Result<(), ContractError>;
 }
 
 // ─── Cross-contract client for treasury fee deposits ─────────────────────────
 #[contractclient(name = "TreasuryClient")]
 pub trait TreasuryInterface {
     fn deposit(env: Env, fee_amount: i128) -> Result<(), ContractError>;
+}
+
+/// Public read-only view of a market.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketStateView {
+    pub match_id: String,
+    pub fighter_a: String,
+    pub fighter_b: String,
+    pub status: MarketStatus,
+    pub scheduled_at: u64,
+    pub pool_a: i128,
+    pub pool_b: i128,
+    pub pool_draw: i128,
+    pub outcome: OptionalOutcome,
+    pub total_pool: i128,
+    pub fee_bps: u32,
+    pub venue: String,
+    pub title_fight: bool,
 }
 
 #[contract]
@@ -173,6 +172,72 @@ impl Market {
             .extend_ttl(&key, MAX_TTL, MAX_TTL);
     }
 
+    fn bettor_list(env: &Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&BETTOR_LIST)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn refund_reserve(env: &Env) -> Result<i128, ContractError> {
+        if let Some(amount) = env.storage().persistent().get(&REFUND_RESERVE) {
+            return Ok(amount);
+        }
+        // Existing markets may already have bets recorded before the reserve was added.
+        Self::bettor_list(env).iter().try_fold(0i128, |total, bettor| {
+            Self::load_bets(env, &bettor)
+                .iter()
+                .filter(|bet| !bet.claimed)
+                .try_fold(total, |total, bet| {
+                    total.checked_add(bet.amount).ok_or(ContractError::ArithmeticOverflow)
+                })
+        })
+    }
+
+    fn refund_all_bettors(env: &Env) -> Result<Vec<(Address, i128)>, ContractError> {
+        let mut refunds = Vec::new(env);
+        for bettor in Self::bettor_list(env).iter() {
+            let mut amount = 0i128;
+            let mut updated_bets = Vec::new(env);
+            for mut bet in Self::load_bets(env, &bettor).iter() {
+                if !bet.claimed {
+                    amount = amount
+                        .checked_add(bet.amount)
+                        .ok_or(ContractError::ArithmeticOverflow)?;
+                    bet.claimed = true;
+                }
+                updated_bets.push_back(bet);
+            }
+            if amount > 0 {
+                Self::save_bets(env, &bettor, &updated_bets);
+                refunds.push_back((bettor, amount));
+            }
+        }
+
+        if !refunds.is_empty() {
+            let token: Address = env
+                .storage()
+                .persistent()
+                .get(&TOKEN)
+                .ok_or(ContractError::InvalidMarketParameters)?;
+            let client = token::Client::new(env, &token);
+            let market = env.current_contract_address();
+            for (bettor, amount) in refunds.iter() {
+                client.transfer(&market, &bettor, &amount);
+            }
+        }
+        Ok(refunds)
+    }
+
+    fn check_bet_token(env: &Env, token: &Address) -> Result<(), ContractError> {
+        if let Some(stored_token) = env.storage().persistent().get::<_, Address>(&TOKEN) {
+            if stored_token != *token {
+                return Err(ContractError::InvalidMarketParameters);
+            }
+        }
+        Ok(())
+    }
+
     fn exceeds_bet_share_cap(user_total: i128, pool_total: i128, cap_bps: u32) -> bool {
         if pool_total <= 0 {
             return false;
@@ -211,12 +276,18 @@ impl Market {
 
     /// Extend TTL on market data entries to prevent premature expiration.
     fn extend_market_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(MAX_TTL, MAX_TTL);
         env.storage()
             .persistent()
             .extend_ttl(&STATE, MAX_TTL, MAX_TTL);
         env.storage()
             .persistent()
             .extend_ttl(&BETTOR_LIST, MAX_TTL, MAX_TTL);
+        for key in [FACTORY, TREASURY, TOKEN, REFUND_RESERVE] {
+            if env.storage().persistent().has(&key) {
+                env.storage().persistent().extend_ttl(&key, MAX_TTL, MAX_TTL);
+            }
+        }
     }
 
     fn extend_claim_ttl(env: &Env, bettor: &Address) {
@@ -292,30 +363,6 @@ impl Market {
         }
         true
     }
-
-    fn load_metadata(env: &Env) -> Option<ContractMetadata> {
-        env.storage().persistent().get(&CONTRACT_METADATA)
-    }
-
-    fn save_metadata(env: &Env, metadata: &ContractMetadata) {
-        env.storage().persistent().set(&CONTRACT_METADATA, metadata);
-        env.storage()
-            .persistent()
-            .extend_ttl(&CONTRACT_METADATA, MAX_TTL, MAX_TTL);
-    }
-
-    /// Returns true if the hash is all zero bytes (an invalid WASM hash).
-    fn is_zero_hash(hash: &BytesN<32>) -> bool {
-        let bytes = hash.to_array();
-        let mut all_zero = true;
-        for b in bytes.iter() {
-            if *b != 0 {
-                all_zero = false;
-                break;
-            }
-        }
-        all_zero
-    }
 }
 
 #[contractimpl]
@@ -334,7 +381,7 @@ impl Market {
     /// - `AlreadyInitialized`: Market has already been initialized
     ///
     /// # Security
-    /// - The factory must be an authenticated contract address distinct from this market.
+    /// - Caller must be the factory (NotFactory guard).
     /// - AlreadyInitialized guard prevents re-initialization.
     pub fn initialize(
         env: Env,
@@ -343,20 +390,16 @@ impl Market {
         fight: FightDetails,
         config: MarketConfig,
         treasury: Address,
+        tier: u32,
     ) -> Result<(), ContractError> {
         // CHECKS
+        factory.require_auth();
         if env.storage().persistent().has(&STATE) {
             return Err(ContractError::AlreadyInitialized);
         }
-        // Soroban encodes contract addresses with a C prefix and accounts with G.
-        let mut strkey = [0; 56];
-        factory.to_string().copy_into_slice(&mut strkey);
-        if strkey[0] != b'C' || factory == env.current_contract_address() {
-            return Err(ContractError::NotFactory);
-        }
-        factory.require_auth();
 
-        let market_tier = match config.tier {
+        // Map the tier u32 to an OptionalMarketTier variant.
+        let market_tier = match tier {
             8  => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier8),
             10 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier10),
             12 => OptionalMarketTier::Some(boxmeout_shared::types::MarketTier::Tier12),
@@ -380,6 +423,7 @@ impl Market {
             tier: market_tier,
         };
         env.storage().persistent().set(&STATE, &state);
+        env.storage().persistent().set(&REFUND_RESERVE, &0i128);
         env.storage().persistent().set(&FACTORY, &factory);
         env.storage().persistent().set(&TREASURY, &treasury);
         env.storage()
@@ -387,14 +431,6 @@ impl Market {
             .set(&BETTOR_LIST, &Vec::<Address>::new(&env));
         env.storage().instance().set(&PAUSED, &false);
         env.storage().instance().set(&CLAIMING, &false);
-
-        // Persist deployment metadata for the initial deployment.
-        let metadata = ContractMetadata {
-            version: CONTRACT_VERSION,
-            deployed_at: env.ledger().timestamp(),
-            upgrader_address: factory.clone(),
-        };
-        Self::save_metadata(&env, &metadata);
 
         // Set TTL on market data entries
         Self::extend_market_ttl(&env);
@@ -529,7 +565,13 @@ impl Market {
             );
         }
 
+        Self::check_bet_token(&env, &token)?;
+        let reserve = Self::refund_reserve(&env)?
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
         // ── EFFECTS ───────────────────────────────────────────────────────────
+        env.storage().persistent().set(&REFUND_RESERVE, &reserve);
         let mut new_state = state.clone();
         match side {
             BetSide::FighterA => new_state.pool_a += amount,
@@ -586,22 +628,8 @@ impl Market {
 
         // ── INTERACTIONS ──────────────────────────────────────────────────────
         let token_client = token::Client::new(&env, &token);
+        // Keep the full stake in escrow until settlement so cancellation can refund it.
         token_client.transfer(&bettor, &env.current_contract_address(), &amount);
-
-        // Platform fee routing to Treasury (Issue #636)
-        let fee_amount = if new_state.config.fee_bps > 0 {
-            amount.checked_mul(new_state.config.fee_bps as i128).unwrap_or(0) / 10_000
-        } else {
-            0
-        };
-
-        if fee_amount > 0 {
-            if let Some(treasury) = env.storage().persistent().get::<_, Address>(&TREASURY) {
-                // Route fees to treasury (no direct token transfers to admin address)
-                token_client.transfer(&env.current_contract_address(), &treasury, &fee_amount);
-                let _ = TreasuryClient::new(&env, &treasury).try_deposit(&fee_amount);
-            }
-        }
 
         boxmeout_shared::emit_bet_placed_with_odds(
             &env,
@@ -665,7 +693,7 @@ impl Market {
         if !pools_were_zero {
             let max_bps = boxmeout_shared::amm::tier_params(tier_byte)
                 .map(|p| p.max_slippage_bps)
-                .unwrap_or(MAX_SLIPPAGE_BPS);
+                .unwrap_or(3_000);
             boxmeout_shared::emit_slippage_checked(
                 &env,
                 new_state.market_id,
@@ -734,6 +762,8 @@ impl Market {
             .and_then(|v| v.checked_add(amount_draw))
             .ok_or(ContractError::InsufficientAmount)?;
 
+        Self::check_bet_token(&env, &token)?;
+
         // Give callers a clear contract error before attempting the transfer.
         let caller_balance = token::Client::new(&env, &token).balance(&provider);
         if caller_balance < total_in {
@@ -778,6 +808,9 @@ impl Market {
             entered_at: env.ledger().timestamp(),
         };
         Self::save_lp_position(&env, &provider, &position);
+        if !env.storage().persistent().has(&TOKEN) {
+            env.storage().persistent().set(&TOKEN, &token);
+        }
         Self::extend_market_ttl(&env);
 
         // ── INTERACTIONS ──────────────────────────────────────────────────────
@@ -864,6 +897,15 @@ impl Market {
             lp_shares_to_burn,
         );
 
+        Self::check_bet_token(&env, &token)?;
+        let payout = total_out.saturating_add(fees_claimed);
+        let token_client = token::Client::new(&env, &token);
+        let market = env.current_contract_address();
+        let reserve = Self::refund_reserve(&env)?;
+        if reserve > 0 && token_client.balance(&market).saturating_sub(payout) < reserve {
+            return Err(ContractError::InsufficientBalance);
+        }
+
         // ── EFFECTS ───────────────────────────────────────────────────────────
         state.pool_a = state.pool_a.saturating_sub(withdraw_a);
         state.pool_b = state.pool_b.saturating_sub(withdraw_b);
@@ -886,10 +928,8 @@ impl Market {
         Self::extend_market_ttl(&env);
 
         // ── INTERACTIONS ──────────────────────────────────────────────────────
-        let payout = total_out.saturating_add(fees_claimed);
         if payout > 0 {
-            let token_client = token::Client::new(&env, &token);
-            token_client.transfer(&env.current_contract_address(), &provider, &payout);
+            token_client.transfer(&market, &provider, &payout);
         }
 
         boxmeout_shared::emit_liquidity_removed(
@@ -1064,7 +1104,7 @@ impl Market {
 
         // Store this report
         pending.set(oracle.clone(), report.clone());
-        env.storage().persistent().set(&PENDING_REPORTS, &pending);
+        Self::save_pending_reports(&env, &pending);
 
         // Count matching and conflicting reports
         let mut matching_count = 1u32;
@@ -1153,7 +1193,7 @@ impl Market {
                 .set(&COOLDOWN_END_TIMESTAMP, &cooldown_end_timestamp);
 
             // Clear pending reports — they are no longer needed.
-            env.storage().persistent().set(&PENDING_REPORTS, &Map::<Address, OracleReport>::new(&env));
+            Self::save_pending_reports(&env, &Map::new(&env));
 
             // Emit consensus_reached first so subscribers can correlate.
             boxmeout_shared::emit_consensus_reached(
@@ -1180,6 +1220,12 @@ impl Market {
         Ok(())
     }
 
+    fn save_pending_reports(env: &Env, reports: &Map<Address, OracleReport>) {
+        let storage = env.storage().persistent();
+        storage.set(&PENDING_REPORTS, reports);
+        storage.extend_ttl(&PENDING_REPORTS, MAX_TTL, MAX_TTL);
+    }
+
     /// Removes stale pending oracle reports older than REPORT_TTL.
     fn prune_stale_reports(env: &Env) -> u32 {
         let pending: Map<Address, OracleReport> = env.storage().persistent()
@@ -1194,7 +1240,7 @@ impl Market {
                 retained.set(oracle, report);
             }
         }
-        env.storage().persistent().set(&PENDING_REPORTS, &retained);
+        Self::save_pending_reports(env, &retained);
         cleared
     }
 
@@ -1307,6 +1353,8 @@ impl Market {
             0
         };
 
+        Self::check_bet_token(&env, &token)?;
+
         // ── EFFECTS ───────────────────────────────────────────────────────────
         // Set reentrancy lock BEFORE any transfer
         env.storage().instance().set(&CLAIMING, &true);
@@ -1338,10 +1386,11 @@ impl Market {
             .get(&TREASURY)
             .ok_or(ContractError::Unauthorized)?;
 
-        // Transfer fee to treasury if not already routed during place_bet
-        let current_balance = token_client.balance(&env.current_contract_address());
-        if current_balance >= payout + fee && fee > 0 {
-            token_client.transfer(&env.current_contract_address(), &treasury, &fee);
+        let market = env.current_contract_address();
+        let fee_collected = env.storage().instance().has(&FEE_COLLECTED);
+        if !fee_collected && fee > 0 && token_client.balance(&market).saturating_sub(payout) >= fee {
+            env.storage().instance().set(&FEE_COLLECTED, &true);
+            token_client.transfer(&market, &treasury, &fee);
             let _ = TreasuryClient::new(&env, &treasury).try_deposit(&fee);
         }
         // Transfer payout to bettor
@@ -1407,6 +1456,8 @@ impl Market {
             return Err(ContractError::AlreadyClaimed);
         }
 
+        Self::check_bet_token(&env, &token)?;
+
         // ── EFFECTS ───────────────────────────────────────────────────────────
         env.storage().instance().set(&CLAIMING, &true);
 
@@ -1468,70 +1519,41 @@ impl Market {
         state.status = MarketStatus::Cancelled;
         Self::save_state(&env, &state);
 
-        let bettor_list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&BETTOR_LIST)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let token_opt: Option<Address> = env.storage().persistent().get(&TOKEN);
+        let refunds = Self::refund_all_bettors(&env)?;
         let mut total_refunded = 0i128;
-
-        for bettor in bettor_list.iter() {
-            let bets = Self::load_bets(&env, &bettor);
-            let mut bettor_refund: i128 = 0;
-            let mut updated_bets = Vec::new(&env);
-            for mut bet in bets.iter() {
-                if !bet.claimed {
-                    bettor_refund += bet.amount;
-                    bet.claimed = true;
-                }
-                updated_bets.push_back(bet);
-            }
-            Self::save_bets(&env, &bettor, &updated_bets);
-
-            if bettor_refund > 0 {
-                total_refunded = total_refunded.saturating_add(bettor_refund);
-                if let Some(ref token) = token_opt {
-                    let token_client = token::Client::new(&env, token);
-                    token_client.transfer(&env.current_contract_address(), &bettor, &bettor_refund);
-                }
-                boxmeout_shared::emit_market_expired_refund(&env, state.market_id, bettor.clone(), bettor_refund);
-            }
+        for (bettor, amount) in refunds.iter() {
+            total_refunded = total_refunded
+                .checked_add(amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            boxmeout_shared::emit_market_expired_refund(&env, state.market_id, bettor, amount);
         }
 
-        // ── CLEANUP ───────────────────────────────────────────────────────────
         env.storage().instance().set(&CLAIMING, &false);
         Self::extend_market_ttl(&env);
         boxmeout_shared::emit_market_expired_refunded(&env, state.market_id, total_refunded);
-
         Ok(())
     }
 
     // =========================================================================
     // CANCEL MARKET
     // =========================================================================
-    /// Cancels the market, making all bets eligible for refund.
-    ///
-    /// # Errors
-    /// - `Unauthorized`: Caller is not a whitelisted oracle or admin
-    /// - `InvalidMarketStatus`: Market is not Open or Locked
+    /// Cancels an open or locked market and refunds its bettors in the same transaction.
     pub fn cancel_market(
         env: Env,
         caller: Address,
-        reason: soroban_sdk::String,
+        reason: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         Self::require_not_paused(&env)?;
+        Self::require_not_claiming(&env)?;
 
-        // Caller must be a whitelisted oracle OR the factory admin
         let factory: Address = env
             .storage()
             .persistent()
             .get(&FACTORY)
             .ok_or(ContractError::NotFactory)?;
-        if caller != factory && !Self::is_oracle_whitelisted(&env, &caller)? {
-            return Err(ContractError::NotOracle);
+        if caller != factory && caller != FactoryClient::new(&env, &factory).get_admin() {
+            return Err(ContractError::Unauthorized);
         }
 
         let mut state = Self::load_state(&env)?;
@@ -1540,13 +1562,18 @@ impl Market {
         }
 
         state.status = MarketStatus::Cancelled;
+        env.storage().instance().set(&CLAIMING, &true);
         Self::save_state(&env, &state);
+        Self::refund_all_bettors(&env)?;
+        env.storage().instance().set(&CLAIMING, &false);
         Self::extend_market_ttl(&env);
 
-        FactoryClient::new(&env, &factory).cleanup_terminal_market(
-            &env.current_contract_address(),
-            &state.market_id,
-        );
+        // A factory that called this function can update its own index after we return.
+        // Older factories can prune cancelled markets through their public cleanup method.
+        if caller != factory {
+            let _ = FactoryClient::new(&env, &factory)
+                .try_market_cancelled(&env.current_contract_address(), &state.market_id);
+        }
 
         boxmeout_shared::emit_market_cancelled(
             &env,
@@ -1756,6 +1783,31 @@ impl Market {
     /// Returns the current state of the market.
     pub fn get_state(env: Env) -> Result<MarketState, ContractError> {
         Self::load_state(&env)
+    }
+
+    /// Returns market parameters without updating storage or invoking other contracts.
+    pub fn get_market_state(env: Env) -> Result<MarketStateView, ContractError> {
+        let state = Self::load_state(&env)?;
+        let outcome = if state.status == MarketStatus::Resolved {
+            state.outcome
+        } else {
+            OptionalOutcome::None
+        };
+        Ok(MarketStateView {
+            match_id: state.fight.match_id,
+            fighter_a: state.fight.fighter_a,
+            fighter_b: state.fight.fighter_b,
+            status: state.status,
+            scheduled_at: state.fight.scheduled_at,
+            pool_a: state.pool_a,
+            pool_b: state.pool_b,
+            pool_draw: state.pool_draw,
+            outcome,
+            total_pool: state.total_pool,
+            fee_bps: state.config.fee_bps,
+            venue: state.fight.venue,
+            title_fight: state.fight.title_fight,
+        })
     }
 
     /// Returns all bets placed by a specific bettor.
@@ -2118,44 +2170,18 @@ impl Market {
         Self::emergency_unpause(env, admin)
     }
 
-    /// Returns the current contract version.
-    ///
-    /// Reads the version from the persisted `CONTRACT_METADATA` entry, falling
-    /// back to the compile-time `CONTRACT_VERSION` constant if no metadata has
-    /// been written yet (e.g. a contract deployed before versioning existed).
-    pub fn contract_version(env: Env) -> u32 {
-        match Self::load_metadata(&env) {
-            Some(metadata) => metadata.version,
-            None => CONTRACT_VERSION,
-        }
-    }
-
-    /// Returns the persisted deployment metadata, if any.
-    pub fn get_contract_metadata(env: Env) -> Option<ContractMetadata> {
-        Self::load_metadata(&env)
-    }
-
-    /// Upgrades the contract WASM and records the new deployment metadata.
+    /// Upgrades the contract WASM. Only callable by the factory's registered admin.
     ///
     /// Cross-calls `factory.get_admin()` to retrieve the authoritative admin address
     /// and rejects the call if `admin` does not match. This prevents any address
     /// (including the factory contract itself) from triggering an upgrade without
     /// holding the factory's registered admin key.
     ///
-    /// The new WASM hash must be non-zero. On success the `CONTRACT_METADATA`
-    /// entry is updated with the bumped version, the current ledger timestamp,
-    /// and the upgrading address.
-    ///
     /// # Errors
+    /// - `Unauthorized`: Caller is not the factory admin
     /// - `NotFactory`: Factory address not found in storage
     /// - `NotAdmin`: Caller is not the factory's registered admin
-    /// - `InvalidWasmHash`: The provided WASM hash is all zero bytes
-    pub fn upgrade_contract(
-        env: Env,
-        admin: Address,
-        new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        // CHECKS
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
         admin.require_auth();
         let factory: Address = env
             .storage()
@@ -2170,36 +2196,9 @@ impl Market {
         if admin != factory_admin {
             return Err(ContractError::NotAdmin);
         }
-        if Self::is_zero_hash(&new_wasm_hash) {
-            return Err(ContractError::InvalidWasmHash);
-        }
-
-        // EFFECTS — record the new deployment metadata before swapping the WASM.
-        let previous_version = match Self::load_metadata(&env) {
-            Some(metadata) => metadata.version,
-            None => CONTRACT_VERSION,
-        };
-        let metadata = ContractMetadata {
-            version: previous_version.saturating_add(1),
-            deployed_at: env.ledger().timestamp(),
-            upgrader_address: admin.clone(),
-        };
-        Self::save_metadata(&env, &metadata);
-
-        // INTERACTIONS — swap the contract WASM last.
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         boxmeout_shared::emit_contract_upgraded(&env, new_wasm_hash);
         Ok(())
-    }
-
-    /// Alias for `upgrade_contract`, retained for backwards compatibility.
-    ///
-    /// # Errors
-    /// - `NotFactory`: Factory address not found in storage
-    /// - `NotAdmin`: Caller is not the factory's registered admin
-    /// - `InvalidWasmHash`: The provided WASM hash is all zero bytes
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
-        Self::upgrade_contract(env, admin, new_wasm_hash)
     }
 }

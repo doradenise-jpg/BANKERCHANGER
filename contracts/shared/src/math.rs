@@ -80,14 +80,12 @@ pub fn calculate_payout(
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use soroban_sdk::Env;
 
     const MIN: i128 = i128::MIN;
     const MAX: i128 = i128::MAX;
 
     #[test]
     fn mul_div_uses_wide_intermediate_and_checks_result_bounds() {
-        let env = Env::default();
         assert_eq!(mul_div(MAX, 2, 2), Ok(MAX));
         assert_eq!(mul_div(i128::MIN, 1, 1), Ok(i128::MIN));
         assert_eq!(mul_div(MAX, 2, 1), Err(ContractError::MathOverflow));
