@@ -6,7 +6,9 @@
 
 use soroban_sdk::contracterror;
 
-#[contracterror]
+// XDR limits a single error enum specification to 50 cases. Keep all runtime
+// error codes and conversions available to Rust clients.
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ContractError {
     // ── Authorization ──────────────────────────────────────
@@ -144,8 +146,7 @@ pub enum ContractError {
     InvalidFeeSplit = 74,
 }
 
-// Preserve the legacy source-level names without growing Soroban's exported
-// error specification, which is already at its maximum number of cases.
+// Preserve the legacy source-level names without changing runtime codes.
 #[allow(non_upper_case_globals)]
 impl ContractError {
     /// Legacy name for `AdminTransferExpired`.

@@ -1,7 +1,11 @@
+#![no_std]
 //! ============================================================
 //! BANKERCHANGER — Shared Types and Errors
 //! All contracts import from this crate.
 //! ============================================================
+
+#[cfg(test)]
+extern crate std;
 
 pub mod amm;
 pub mod errors;

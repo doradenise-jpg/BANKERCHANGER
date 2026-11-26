@@ -86,7 +86,6 @@ fn test_fee_routing_to_treasury_on_place_bet() {
         &sample_fight(&env),
         &sample_config(),
         &treasury_id,
-        &0u32,
     );
     std::println!("Events after market init: {}", env.events().all().len());
 
@@ -180,7 +179,6 @@ fn test_cancel_market_emits_parseable_event() {
         &sample_fight(&env),
         &sample_config(),
         &treasury,
-        &0u32,
     );
 
     let cancel_reason = String::from_str(&env, "Fighter injured during warmup");

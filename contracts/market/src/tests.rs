@@ -4707,6 +4707,8 @@ mod upgrade_safety_tests {
             lock_before_secs: 3_600,
             resolution_window: 86_400,
             tier: 0,
+            dispute_cooldown_ledgers: 0,
+            dispute_cooldown_secs: 0,
         }
     }
 
@@ -4940,6 +4942,53 @@ mod upgrade_safety_tests {
             0,
             "BETTOR_LIST must be an empty Vec immediately after initialize()"
         );
+    }
+
+    #[test]
+    fn initialize_validates_factory_address_and_stores_fight_config() {
+        use boxmeout_shared::{
+            errors::ContractError,
+            types::{MarketTier, OptionalMarketTier},
+        };
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let market = env.register(Market, ());
+        let client = crate::MarketClient::new(&env, &market);
+        let account = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        let factory = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let fight = fight(&env);
+        let mut config = config();
+        config.tier = 12;
+
+        for invalid in [&account, &market] {
+            assert_eq!(
+                client.try_initialize(invalid, &3, &fight, &config, &treasury),
+                Err(Ok(ContractError::NotFactory)),
+            );
+        }
+        client.initialize(&factory, &3, &fight, &config, &treasury);
+        let state = client.get_state();
+        assert_eq!(state.market_id, 3);
+        assert_eq!(state.fight, fight);
+        assert_eq!(state.config, config);
+        assert_eq!(state.tier, OptionalMarketTier::Some(MarketTier::Tier12));
+        assert_eq!(client.get_status(), MarketStatus::Open);
+        assert_eq!(client.get_pools(), (0, 0, 0));
+        env.as_contract(&market, || {
+            assert_eq!(
+                env.storage().persistent().get::<_, Address>(&crate::FACTORY),
+                Some(factory),
+            );
+            assert_eq!(
+                env.storage().persistent().get::<_, Address>(&crate::TREASURY),
+                Some(treasury),
+            );
+        });
     }
 
     // ── 6. Re-initialization is blocked ──────────────────────────────────────
@@ -8963,7 +9012,7 @@ mod issue_631_to_634_tests {
         let treasury = Address::generate(env);
         let contract_id = env.register_contract(None, Market);
         let client = crate::MarketClient::new(env, &contract_id);
-        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury, &0u32);
+        client.initialize(&factory, &1u64, &fight(env), &config(), &treasury);
 
         let token_id = env.register_stellar_asset_contract(factory.clone());
         (client, contract_id, factory, token_id)
@@ -9159,7 +9208,7 @@ mod issue_859_858_regression_tests {
             dispute_cooldown_ledgers: 10,
             dispute_cooldown_secs: 0,
         };
-        client.initialize(&factory, &1, &fight, &config, &factory, &0);
+        client.initialize(&factory, &1, &fight, &config, &factory);
         (client, id)
     }
 
