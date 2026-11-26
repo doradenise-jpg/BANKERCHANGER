@@ -40,7 +40,9 @@ const VALID_WEIGHT_CLASSES = [
 
 const listMarketsQuerySchema = z.object({
   status: z
-    .enum(VALID_STATUSES)
+    .enum(VALID_STATUSES, {
+      errorMap: () => ({ message: `status must be one of: ${VALID_STATUSES.join(', ')}` }),
+    })
     .optional(),
   weight_class: z
     .enum(VALID_WEIGHT_CLASSES)
@@ -261,233 +263,21 @@ export async function streamMarketOdds(
     }
   };
 
-  const done = await push();
-  if (done) { res.end(); return; }
+  const shouldClose = await push();
+  if (shouldClose) {
+    res.end();
+    return;
+  }
 
   const timer = setInterval(async () => {
-    const finished = await push();
-    if (finished) { clearInterval(timer); res.end(); }
+    const done = await push();
+    if (done) {
+      clearInterval(timer);
+      res.end();
+    }
   }, INTERVAL_MS);
 
-  req.on('close', () => clearInterval(timer));
-}
-
-const simulateQuerySchema = z.object({
-  amount: z.coerce.number().positive({ message: 'amount must be a positive number' }),
-  outcome: z.enum(MARKET_ODDS_OUTCOMES),
-});
-
-/**
- * GET /api/markets/:market_id/simulate
- * Query params: amount (stroops, positive number), outcome (fighter_a | fighter_b | draw)
- *
- * Returns the projected payout for a hypothetical bet using parimutuel formula.
- * Responds 200 with { amount, formatted_xlm }.
- */
-export const simulatePayoutValidation = validateQuery(simulateQuerySchema);
-
-export async function simulatePayout(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  try {
-    const { market_id } = req.params;
-    const { amount, outcome } = req.query as unknown as { amount: number; outcome: 'fighter_a' | 'fighter_b' | 'draw' };
-
-    const payout = await MarketService.simulateProjectedPayout(
-      market_id,
-      String(amount),
-      outcome,
-    );
-    res.status(200).json(payout);
-  } catch (err) {
-    if (err instanceof AppError && err.statusCode === 404) {
-      return next(err);
-    }
-    next(err);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Issue #22 — getPortfolio
-// ---------------------------------------------------------------------------
-
-const portfolioAddressSchema = z.object({
-  address: z
-    .string()
-    .refine((v) => StrKey.isValidEd25519PublicKey(v), {
-      message: 'Invalid Stellar address format — must be a valid G... public key',
-    }),
-});
-
-/**
- * GET /api/portfolio/:address
- *
- * Returns a Portfolio summary for the given Stellar address.
- * - Responds 200 with Portfolio object (zeros for unknown addresses, never 404)
- * - Responds 400 if address format is invalid
- */
-export async function getPortfolio(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parseResult = portfolioAddressSchema.safeParse({ address: req.params.address });
-    if (!parseResult.success) {
-      const errors = parseResult.error.issues.map((e) => ({
-        field: e.path.join('.'),
-        message: e.message,
-      }));
-      res.status(400).json({ errors });
-      return;
-    }
-
-    const { address } = parseResult.data;
-
-    const portfolio = await MarketService.getPortfolioByAddress(address);
-    res.status(200).json(portfolio);
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * GET /api/portfolio/:address/roi
- *
- * Returns ROI, win rate, and the current resolved-bet streak for a Stellar address.
- */
-export async function getPortfolioRoi(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  try {
-    const parseResult = portfolioAddressSchema.safeParse({ address: req.params.address });
-    if (!parseResult.success) {
-      const errors = parseResult.error.issues.map((e) => ({
-        field: e.path.join('.'),
-        message: e.message,
-      }));
-      res.status(400).json({ errors });
-      return;
-    }
-
-    const roi = await MarketService.getPortfolioRoiByAddress(parseResult.data.address);
-    res.status(200).json(roi);
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * GET /api/bets/:bettor_address
- *
- * Returns all bets placed by a given Stellar address across all markets.
- * Returns an empty array (never 404) when the address has no bets.
- * Responds 400 on invalid address format.
- */
-export async function getBetsByAddress(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { bettor_address } = req.params;
-
-    if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
-      throw AppError.badRequest('Invalid Stellar address format — must be a valid G... public key');
-    }
-
-    const bets = await MarketService.getBetsByAddress(bettor_address);
-    res.status(200).json(bets);
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * GET /api/stats
- *
- * Returns aggregate platform statistics for the home page banner.
- * Cached for 60 seconds.
- * Responds 200 with { totalMarkets, activeMarkets, totalVolume, totalBets }.
- */
-export async function getPlatformStats(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const stats = await MarketService.getPlatformStats();
-    res.status(200).json(stats);
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * GET /api/market-stats
- *
- * Returns aggregated platform market statistics. Always responds 200; if the
- * stats service is unavailable, returns zero-valued statistics.
- */
-export async function getPlatformMarketStats(
-  _req: Request,
-  res: Response,
-): Promise<void> {
-  try {
-    const stats = await MarketService.getPlatformMarketStats();
-    res.status(200).json(stats);
-  } catch (err) {
-    logger.error({ err }, 'GET /api/market-stats failed');
-    res.status(200).json({
-      total_markets_count: 0,
-      total_volume_xlm: 0,
-      total_bets_count: 0,
-      live_markets_count: 0,
-      unique_bettors_count: 0,
-      platform_fees_collected_xlm: 0,
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Issue #745 — resolveMarket (admin)
-// ---------------------------------------------------------------------------
-
-const VALID_RESOLVE_OUTCOMES = ['fighter_a', 'fighter_b', 'draw', 'no_contest'] as const;
-
-const resolveMarketBodySchema = z.object({
-  winning_outcome: z.enum(VALID_RESOLVE_OUTCOMES),
-});
-
-/**
- * POST /api/markets/:market_id/resolve
- * Protected by requireAdmin middleware.
- *
- * Resolves a market with the given winning_outcome.
- * Returns 409 if market is already resolved.
- * Returns 200 with updated market on success.
- */
-export async function resolveMarket(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { market_id } = req.params;
-
-    const parsed = resolveMarketBodySchema.safeParse(req.body);
-    if (!parsed.success) {
-      const errors = parsed.error.issues.map((e) => ({ field: e.path.join('.'), message: e.message }));
-      res.status(400).json({ errors });
-      return;
-    }
-
-    const { winning_outcome } = parsed.data;
-
-    const market = await MarketService.db().findMarketById(market_id);
-    if (!market) throw AppError.notFound(
-      `Market not found: ${market_id}`,
-      ERROR_CODES.MARKET_NOT_FOUND
-    );
-
-    if (market.status === 'resolved') {
-      res.status(409).json({ error: 'Market is already resolved' });
-      return;
-    }
-
-    await OracleService.submitFightResult(market.match_id, winning_outcome);
-
-    const updated = await MarketService.db().findMarketById(market_id);
-    res.status(200).json(updated);
-  } catch (err) {
-    next(err);
-  }
+  req.on('close', () => {
+    clearInterval(timer);
+  });
 }
