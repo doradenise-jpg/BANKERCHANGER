@@ -14,7 +14,7 @@ const rpc = {
 const horizon = {
   loadAccount:   jest.fn<() => Promise<unknown>>(),
   feeStats:      jest.fn<() => Promise<unknown>>(),
-  transactions:  jest.fn<() => Promise<unknown>>(),
+  transactions:  jest.fn<() => unknown>(),
 };
 
 jest.mock('@stellar/stellar-sdk', () => {
@@ -68,7 +68,17 @@ jest.mock('@stellar/stellar-sdk', () => {
 (global as any).__rpcMock = rpc;
 (global as any).__horizonMock = horizon;
 
-import { invokeContract, StellarInvocationError } from '../../src/services/StellarService';
+import {
+  classifySubmitError,
+  fetchHistoricalEvents,
+  getCurrentBaseFee,
+  getTreasuryBalance,
+  invokeContract,
+  parseScVal,
+  readContractState,
+  StellarInvocationError,
+  withRetry,
+} from '../../src/services/StellarService';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -84,6 +94,9 @@ describe('invokeContract()', () => {
   afterEach(() => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+    delete process.env.HORIZON_URL;
+    delete process.env.TREASURY_ADDRESS;
+    delete process.env.TREASURY_CONTRACT_ADDRESS;
   });
 
   beforeEach(() => {
@@ -248,5 +261,95 @@ describe('invokeContract()', () => {
     delete process.env.STELLAR_RPC_URL;
     await expect(invokeContract(CONTRACT, METHOD, ARGS, KEYPAIR))
       .rejects.toThrow('STELLAR_RPC_URL');
+  });
+});
+
+describe('Stellar helpers', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.STELLAR_RPC_URL = 'https://soroban-testnet.stellar.org';
+  });
+
+  it('classifies retryable and non-retryable submit errors conservatively', () => {
+    expect(classifySubmitError({ status: 'TIMEOUT' })).toEqual({ code: 'TIMEOUT', retryable: true });
+    expect(classifySubmitError(new Error('HTTP 503 unavailable'))).toEqual({ code: '503', retryable: true });
+    expect(classifySubmitError(new Error('tx_bad_auth'))).toEqual({ code: 'tx_bad_auth', retryable: false });
+    expect(classifySubmitError({ unknown: true })).toEqual({ code: null, retryable: false });
+  });
+
+  it('retries transient errors with backoff and immediately propagates permanent errors', async () => {
+    jest.useFakeTimers();
+    const operation = jest.fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error('TIMEOUT'))
+      .mockResolvedValueOnce('done');
+    const result = withRetry(operation, 3);
+    await Promise.resolve();
+    await jest.advanceTimersByTimeAsync(200);
+    await expect(result).resolves.toBe('done');
+    expect(operation).toHaveBeenCalledTimes(2);
+
+    const permanent = new Error('tx_bad_auth');
+    const fail = jest.fn<() => Promise<string>>().mockRejectedValue(permanent);
+    await expect(withRetry(fail)).rejects.toBe(permanent);
+    expect(fail).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
+  it('parses supported ScVal values recursively and rejects unsupported variants', () => {
+    expect(parseScVal(xdr.ScVal.scvBool(true))).toBe(true);
+    expect(parseScVal(xdr.ScVal.scvU32(42))).toBe(42);
+    expect(parseScVal(xdr.ScVal.scvI32(-4))).toBe(-4);
+    expect(parseScVal(xdr.ScVal.scvString('value'))).toBe('value');
+    expect(parseScVal(xdr.ScVal.scvSymbol('symbol'))).toBe('symbol');
+    expect(parseScVal(xdr.ScVal.scvVec([xdr.ScVal.scvString('nested')]))).toEqual(['nested']);
+    expect(() => parseScVal(xdr.ScVal.scvVoid())).toThrow('Unsupported ScVal type');
+  });
+
+  it('reads contract state and surfaces simulation failures and missing return values', async () => {
+    rpc.simulateTransaction.mockResolvedValueOnce({
+      results: [{ status: 'SUCCESS', returnValue: xdr.ScVal.scvString('read-value') }],
+    });
+    await expect(readContractState('CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM', 'read', []))
+      .resolves.toBe('read-value');
+
+    rpc.simulateTransaction.mockResolvedValueOnce({ error: 'failed' });
+    await expect(readContractState('CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM', 'read', []))
+      .rejects.toThrow('Simulation error');
+
+    rpc.simulateTransaction.mockResolvedValueOnce({ results: [{ status: 'SUCCESS' }] });
+    await expect(readContractState('CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM', 'read', []))
+      .rejects.toThrow('no returnValue');
+  });
+
+  it('reads the recommended fee and applies treasury balance fallbacks', async () => {
+    horizon.feeStats.mockResolvedValue({ p70_accepted_fee: '123' });
+    await expect(getCurrentBaseFee()).resolves.toBe(123);
+
+    delete process.env.TREASURY_ADDRESS;
+    delete process.env.TREASURY_CONTRACT_ADDRESS;
+    await expect(getTreasuryBalance()).resolves.toBe('10000000000000');
+
+    process.env.TREASURY_ADDRESS = KEYPAIR.publicKey();
+    horizon.loadAccount.mockResolvedValue({
+      balances: [{ asset_type: 'credit_alphanum4', balance: '5' }, { asset_type: 'native', balance: '1.25' }],
+    });
+    await expect(getTreasuryBalance()).resolves.toBe('12500000');
+
+    horizon.loadAccount.mockRejectedValue(new Error('Horizon unavailable'));
+    await expect(getTreasuryBalance()).resolves.toBe('10000000000000');
+  });
+
+  it('returns an empty historical event list when Horizon has no transactions', async () => {
+    const call = jest.fn<() => Promise<unknown>>().mockResolvedValue({ records: [] });
+    const forLedger = jest.fn<() => unknown>().mockReturnValue({ call });
+    horizon.transactions.mockReturnValue({ forLedger });
+    await expect(fetchHistoricalEvents(100, 200)).resolves.toEqual([]);
+    expect(forLedger).toHaveBeenCalledWith(100);
+    expect(call).toHaveBeenCalledWith(expect.objectContaining({ to_ledger: 200, order: 'asc' }));
   });
 });

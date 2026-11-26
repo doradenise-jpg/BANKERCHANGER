@@ -128,8 +128,45 @@ describe('rateLimit middleware', () => {
     });
   });
 
+  it('uses the key prefix and rounds a fractional window up to one second', async () => {
+    mockIncrWithExpire.mockResolvedValue(1);
+    const mw = rateLimit({ windowMs: 1, max: 1, keyBy: 'ip', keyPrefix: 'api' });
+    const { req, res, next } = makeReqRes('10.0.0.1', '/ignored');
+
+    await mw(req, res, next);
+
+    expect(mockIncrWithExpire).toHaveBeenCalledWith(
+      expect.any(Object),
+      'rl:api:10.0.0.1',
+      1,
+    );
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('propagates Redis increment errors to Express error handling', async () => {
+    const error = new Error('Redis unavailable');
+    mockIncrWithExpire.mockRejectedValueOnce(error);
+    const { req, res, next } = makeReqRes();
+
+    await expect(rateLimit({ windowMs: 1000, max: 1, keyBy: 'ip' })(req, res, next))
+      .rejects.toBe(error);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('propagates TTL lookup errors instead of allowing an over-limit request', async () => {
+    mockIncrWithExpire.mockResolvedValue(2);
+    const error = new Error('Redis TTL failed');
+    mockTtl.mockRejectedValueOnce(error);
+    const { req, res, next } = makeReqRes();
+
+    await expect(rateLimit({ windowMs: 1000, max: 1, keyBy: 'ip' })(req, res, next))
+      .rejects.toBe(error);
+    expect(res.set).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+
   describe('crash scenario simulation', () => {
-    it('would lose expire if process crashed between INCR and EXPIRE (before fix)', () => {
+    it('uses the atomic increment-and-expire operation', async () => {
       // OLD BEHAVIOR (before Lua script):
       // 1. redis.incr(key) -> returns 1, key created
       // 2. [CRASH HERE] Process dies before expire is set
@@ -148,7 +185,8 @@ describe('rateLimit middleware', () => {
       
       // The atomic operation is guaranteed to succeed fully
       // If process crashes mid-script on Redis side, both ops roll back
-      expect(mw(req, res, next)).resolves.not.toThrow();
+      await expect(mw(req, res, next)).resolves.toBeUndefined();
+      expect(next).toHaveBeenCalledWith();
     });
   });
 });
