@@ -6,6 +6,9 @@ import { AppError } from '../utils/AppError';
 import { validateBody } from '../middleware/validation.middleware';
 import { rateLimit } from '../middleware/rate-limit.middleware';
 import { requireAuth } from '../middleware/auth.middleware';
+import { logoutBody, refreshBody } from '../schemas/validation.schemas';
+import { redis } from '../config/redis';
+import { incrWithExpire } from '../services/redis-lua';
 
 const router = Router();
 const LOGIN_FAILURE_THRESHOLD = 5;

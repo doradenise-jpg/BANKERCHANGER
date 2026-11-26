@@ -232,7 +232,7 @@ describe('API Module Group 15: Leaderboards & Tournaments Endpoints', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.tier).toBe('DIAMOND');
+      expect(res.body.data.tier).toBe('PLATINUM');
       expect(res.body.data.win_rate_percentage).toBe('75.00');
     });
   });

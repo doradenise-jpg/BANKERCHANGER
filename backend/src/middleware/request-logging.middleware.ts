@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import pinoHttp from 'pino-http';
 import { requestContext } from '../utils/requestContext';
 import { randomUUID } from 'crypto';
 import { logger } from '../utils/logger';
@@ -23,6 +24,8 @@ const SENSITIVE_PATHS = [
 export function requestLogging(req: Request, res: Response, next: NextFunction): void {
   const incomingId = req.get('x-request-id');
   const requestId = incomingId && incomingId.trim() ? incomingId.trim() : randomUUID();
+  const startTime = Date.now();
+  const method = req.method;
 
   // Record HTTP metrics on response finish
   res.on('finish', () => {
@@ -33,12 +36,6 @@ export function requestLogging(req: Request, res: Response, next: NextFunction):
     httpRequestsTotal.inc({ method, route, status_code: statusCode });
   });
 
-  // Capture response end to log status and response time
-  const originalSend = res.send;
-  res.send = function (data: unknown) {
-    const responseTime = Date.now() - startTime;
-    const statusCode = res.statusCode;
-
   const isSensitive = SENSITIVE_PATHS.some((p) => req.path.startsWith(p));
 
   const httpLogger = pinoHttp({
@@ -47,7 +44,7 @@ export function requestLogging(req: Request, res: Response, next: NextFunction):
     customProps: () => ({ request_id: requestId }),
     serializers: {
       req: (request: Request) => {
-        const authHeader = request.get('authorization');
+        const authHeader = request.headers.authorization;
         return {
           method: request.method,
           path: request.path,

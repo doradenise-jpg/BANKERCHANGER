@@ -171,7 +171,7 @@ describe('ActivityFeed integration', () => {
     }
 
     await new Promise((r) => setTimeout(r, 100));
-    expect(received).toHaveLength(20);
+    expect(received.filter((message) => JSON.parse(message).type === 'trade')).toHaveLength(20);
 
     ws.close();
   });

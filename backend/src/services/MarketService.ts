@@ -59,43 +59,101 @@ export function validateStatusTransition(currentStatus: string, newStatus: strin
 
 export interface DbAdapter {
   findMarkets(filters?: MarketFilters): Promise<Market[]>;
+  findMarketsPage?(filters: MarketFilters | undefined, pagination: Pagination): Promise<MarketListResult>;
   findMarketById(market_id: string): Promise<Market | null>;
   findBetsByAddress(bettor_address: string): Promise<Bet[]>;
   findBetsByMarket(market_id: string, bettor_address?: string): Promise<Bet[]>;
   updateMarketStatus(market_id: string, status: string): Promise<void>;
 }
 
+function buildMarketWhere(filters?: MarketFilters): { sql: string; values: unknown[] } {
+  const whereClauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters?.status) {
+    values.push(filters.status);
+    whereClauses.push(`status = $${values.length}`);
+  }
+  if (filters?.weight_class) {
+    values.push(filters.weight_class);
+    whereClauses.push(`weight_class = $${values.length}`);
+  }
+  if (filters?.fighter) {
+    values.push(`%${filters.fighter}%`);
+    whereClauses.push(`(fighter_a ILIKE $${values.length} OR fighter_b ILIKE $${values.length})`);
+  }
+  if (filters?.dateFrom) {
+    values.push(filters.dateFrom);
+    whereClauses.push(`scheduled_at >= $${values.length}`);
+  }
+  if (filters?.dateTo) {
+    values.push(filters.dateTo);
+    whereClauses.push(`scheduled_at <= $${values.length}`);
+  }
+
+  return {
+    sql: whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '',
+    values,
+  };
+}
+
+function marketOrderBy(filters?: MarketFilters): string {
+  if (filters?.sort === 'date_desc') return 'ORDER BY scheduled_at DESC';
+  if (filters?.sort === 'pool_desc') return 'ORDER BY total_pool DESC';
+  return 'ORDER BY scheduled_at ASC';
+}
+
+type MarketDbRow = Omit<Market, 'scheduled_at' | 'created_at' | 'updated_at' | 'resolved_at'> & {
+  scheduled_at: Date | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+  resolved_at: Date | string | null;
+  bet_count?: number | string | null;
+};
+
+function mapMarketRow(row: MarketDbRow): Market & { bet_count: number } {
+  return {
+    ...row,
+    bet_count: Number(row.bet_count ?? 0),
+    scheduled_at: new Date(row.scheduled_at),
+    created_at: new Date(row.created_at),
+    updated_at: new Date(row.updated_at),
+    resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
+  };
+}
+
+async function queryMarketsPage(
+  filters: MarketFilters | undefined,
+  pagination: Pagination,
+): Promise<MarketListResult> {
+  const { sql: whereSql, values } = buildMarketWhere(filters);
+  const offset = (pagination.page - 1) * pagination.limit;
+  const [marketsResult, countResult] = await Promise.all([
+    marketQuery(
+      `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
+       FROM markets m
+       LEFT JOIN (
+         SELECT market_id, COUNT(*) AS bet_count
+         FROM bets
+         GROUP BY market_id
+       ) b ON m.market_id = b.market_id
+       ${whereSql} ${marketOrderBy(filters)} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, pagination.limit, offset],
+    ),
+    marketQuery(`SELECT COUNT(*) AS total FROM markets ${whereSql}`, values),
+  ]);
+  const total = Number(countResult.rows[0]?.total ?? 0);
+
+  return {
+    markets: marketsResult.rows.map(mapMarketRow),
+    total,
+    hasNextPage: offset + pagination.limit < total,
+  };
+}
+
 export const defaultDbAdapter: DbAdapter = {
   async findMarkets(filters?: MarketFilters): Promise<Market[]> {
-    const whereClauses: string[] = [];
-    const values: unknown[] = [];
-
-    if (filters?.status) {
-      values.push(filters.status);
-      whereClauses.push(`status = $${values.length}`);
-    }
-    if (filters?.weight_class) {
-      values.push(filters.weight_class);
-      whereClauses.push(`weight_class = $${values.length}`);
-    }
-    if (filters?.fighter) {
-      values.push(`%${filters.fighter}%`);
-      whereClauses.push(`(fighter_a ILIKE $${values.length} OR fighter_b ILIKE $${values.length})`);
-    }
-    if (filters?.dateFrom) {
-      values.push(filters.dateFrom);
-      whereClauses.push(`scheduled_at >= $${values.length}`);
-    }
-    if (filters?.dateTo) {
-      values.push(filters.dateTo);
-      whereClauses.push(`scheduled_at <= $${values.length}`);
-    }
-
-    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-    const orderBySql =
-      filters?.sort === 'date_asc' ? 'ORDER BY scheduled_at ASC' :
-      filters?.sort === 'pool_desc' ? 'ORDER BY total_pool DESC' :
-      'ORDER BY scheduled_at DESC';
+    const { sql: whereSql, values } = buildMarketWhere(filters);
 
     const { rows } = await marketQuery(
       `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
@@ -105,19 +163,14 @@ export const defaultDbAdapter: DbAdapter = {
          FROM bets
          GROUP BY market_id
        ) b ON m.market_id = b.market_id
-       ${whereSql} ${orderBySql}`,
+       ${whereSql} ${marketOrderBy(filters)}`,
       values,
     );
 
-    return rows.map((row) => ({
-      ...row,
-      bet_count: Number(row.bet_count ?? 0),
-      scheduled_at: new Date(row.scheduled_at),
-      created_at: new Date(row.created_at),
-      updated_at: new Date(row.updated_at),
-      resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-    } as Market & { bet_count: number }));
+    return rows.map(mapMarketRow);
   },
+
+  findMarketsPage: queryMarketsPage,
 
   async findMarketById(market_id: string): Promise<Market | null> {
     const { rows } = await marketQuery(
@@ -224,6 +277,7 @@ export interface Pagination {
 export interface MarketListResult {
   markets: Market[];
   total: number;
+  hasNextPage: boolean;
 }
 
 export interface MarketOdds {
@@ -300,7 +354,7 @@ export interface ProjectedPayout {
  *   2. Apply pagination (LIMIT / OFFSET)
  *   3. Check Redis cache — return cached result if fresh (TTL 30s)
  *   4. Query DB if cache miss; store result in cache before returning
- *   5. Sort by scheduled_at DESC by default
+ *   5. Sort by scheduled_at ASC by default
  */
 export async function getMarkets(
   filters?: MarketFilters,
@@ -311,15 +365,22 @@ export async function getMarkets(
   const fighterKey = filters?.fighter ?? '';
   const dateFromKey = filters?.dateFrom?.toISOString() ?? '';
   const dateToKey = filters?.dateTo?.toISOString() ?? '';
-  const sortKey = filters?.sort ?? 'date_desc';
+  const sortKey = filters?.sort ?? 'date_asc';
   const page = pagination?.page ?? 1;
   const limit = pagination?.limit ?? 50;
-  const cacheKey = `markets:${statusKey}:${weightKey}:${fighterKey}:${dateFromKey}:${dateToKey}:${sortKey}:${page}:${limit}`;
+  const baseCacheKey = `markets:${statusKey}:${weightKey}:${page}:${limit}`;
+  const hasExtendedFilters = Boolean(fighterKey || dateFromKey || dateToKey || sortKey !== 'date_asc');
+  const cacheKey = hasExtendedFilters
+    ? `${baseCacheKey}:${fighterKey}:${dateFromKey}:${dateToKey}:${sortKey}`
+    : baseCacheKey;
   const cached = await cache.get<MarketListResult>(cacheKey);
   if (cached) return cached;
 
   let result: MarketListResult;
-  if (_db) {
+  const adapter = _db;
+  if (adapter?.findMarketsPage) {
+    result = await adapter.findMarketsPage(filters, { page, limit });
+  } else if (adapter) {
     const markets = await db().findMarkets(filters);
     const filtered = markets.filter((market) => {
       if (filters?.status && market.status !== filters.status) return false;
@@ -337,77 +398,20 @@ export async function getMarkets(
     });
 
     let sorted: Market[];
-    if (filters?.sort === 'date_asc') {
-      sorted = [...filtered].sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
-    } else if (filters?.sort === 'pool_desc') {
+    if (filters?.sort === 'pool_desc') {
       sorted = [...filtered].sort((a, b) => Number(b.total_pool) - Number(a.total_pool));
-    } else {
+    } else if (filters?.sort === 'date_desc') {
       sorted = [...filtered].sort((a, b) => new Date(b.scheduled_at).getTime() - new Date(a.scheduled_at).getTime());
+    } else {
+      sorted = [...filtered].sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
     }
 
     const offset = (page - 1) * limit;
     const paged = sorted.slice(offset, offset + limit);
-    result = { markets: paged, total: sorted.length };
+    result = { markets: paged, total: sorted.length, hasNextPage: offset + limit < sorted.length };
   } else {
-    const whereClauses: string[] = [];
-    const values: unknown[] = [];
-
-    if (filters?.status) {
-      values.push(filters.status);
-      whereClauses.push(`status = $${values.length}`);
-    }
-    if (filters?.weight_class) {
-      values.push(filters.weight_class);
-      whereClauses.push(`weight_class = $${values.length}`);
-    }
-    if (filters?.fighter) {
-      values.push(`%${filters.fighter}%`);
-      whereClauses.push(`(fighter_a ILIKE $${values.length} OR fighter_b ILIKE $${values.length})`);
-    }
-    if (filters?.dateFrom) {
-      values.push(filters.dateFrom);
-      whereClauses.push(`scheduled_at >= $${values.length}`);
-    }
-    if (filters?.dateTo) {
-      values.push(filters.dateTo);
-      whereClauses.push(`scheduled_at <= $${values.length}`);
-    }
-
-    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-    const orderBySql = 
-      filters?.sort === 'date_asc' ? 'ORDER BY scheduled_at ASC' :
-      filters?.sort === 'pool_desc' ? 'ORDER BY total_pool DESC' :
-      'ORDER BY scheduled_at DESC';
-    const offset = (page - 1) * limit;
-
     try {
-      const rows = await marketQuery(
-        `SELECT m.*, COALESCE(b.bet_count, 0) AS bet_count
-         FROM markets m
-         LEFT JOIN (
-           SELECT market_id, COUNT(*) AS bet_count
-           FROM bets
-           GROUP BY market_id
-         ) b ON m.market_id = b.market_id
-         ${whereSql} ${orderBySql} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-        [...values, limit, offset],
-      );
-
-      const countRows = await marketQuery(
-        `SELECT COUNT(*) AS total FROM markets ${whereSql}`,
-        values,
-      );
-
-      result = {
-        markets: rows.rows.map((row) => ({
-          ...row,
-          scheduled_at: new Date(row.scheduled_at),
-          created_at: new Date(row.created_at),
-          updated_at: new Date(row.updated_at),
-          resolved_at: row.resolved_at ? new Date(row.resolved_at) : null,
-        } as Market)),
-        total: Number(countRows.rows[0]?.total ?? 0),
-      };
+      result = await queryMarketsPage(filters, { page, limit });
     } catch (err) {
       if (err instanceof AppError) throw err;
       logger.error({ err }, 'MarketService.getMarkets: database query failed');
@@ -486,9 +490,7 @@ export async function getMarketById(market_id: string): Promise<MarketWithOdds> 
 /**
  * Returns live odds for a market.
  *
- * Formula: odds_x = floor((total_pool - fee) * 10_000 / pool_side)
- * Uses the net pool (total minus platform fee) to compute the actual payout
- * multiplier each outcome would return per unit staked.
+ * Formula: odds_x = floor(pool_side * 10_000 / total_pool)
  * Falls back to querying the Market contract via StellarService.readContractState()
  * if DB pool sizes are stale (updated_at older than 30 seconds).
  */

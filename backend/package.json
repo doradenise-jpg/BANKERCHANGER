@@ -23,8 +23,9 @@
     "openapi:validate": "node scripts/validate-openapi.js",
     "openapi:postman": "node scripts/generate-postman.js",
     "test": "jest --passWithNoTests",
-    "test:integration": "jest --passWithNoTests --testPathPatterns=tests/integration",
-    "test:e2e": "jest --passWithNoTests --runInBand --testPathPatterns=tests/e2e",
+    "test:integration": "jest --runInBand --forceExit --testPathPattern=tests/integration",
+    "test:integration:coverage": "jest --runInBand --forceExit --testPathPattern=tests/integration --coverage --collectCoverageFrom='src/api/controllers/**/*.ts' --collectCoverageFrom='src/services/**/*.ts'",
+    "test:e2e": "jest --passWithNoTests --runInBand --testPathPattern=tests/e2e",
     "migrate:up": "node-pg-migrate up",
     "migrate:down:all": "node-pg-migrate down --count 10000"
   },

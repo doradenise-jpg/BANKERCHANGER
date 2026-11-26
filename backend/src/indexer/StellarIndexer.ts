@@ -29,7 +29,7 @@ const RPC_URL = process.env.STELLAR_RPC_URL || 'https://soroban-testnet.stellar.
 const FACTORY_CONTRACT = process.env.FACTORY_CONTRACT_ADDRESS || '';
 const TREASURY_CONTRACT = process.env.TREASURY_CONTRACT_ADDRESS || '';
 
-const server = new rpc.Server(RPC_URL);
+const server = new rpc.Server(RPC_URL, { allowHttp: process.env.NODE_ENV === 'test' });
 
 /**
  * Publishes to the WebSocket activity feed, if one has been initialised.

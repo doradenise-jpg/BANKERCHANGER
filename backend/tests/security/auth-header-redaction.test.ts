@@ -1,17 +1,19 @@
 import type { Request, Response, NextFunction } from 'express';
+import pinoHttp from 'pino-http';
 import { requestLogging } from '../../src/middleware/request-logging.middleware';
-import { logger } from '../../src/utils/logger';
 
-jest.mock('../../src/utils/logger');
+jest.mock('pino-http', () => ({
+  __esModule: true,
+  default: jest.fn(() => (_req: Request, _res: Response, next: NextFunction) => next()),
+}));
 
 describe('Authorization Header Redaction (#283)', () => {
   let mockReq: Partial<Request>;
-  let mockRes: any;
+  let mockRes: Partial<Response>;
   let mockNext: NextFunction;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    
     mockReq = {
       ip: '192.168.1.1',
       method: 'GET',
@@ -21,120 +23,72 @@ describe('Authorization Header Redaction (#283)', () => {
       get: jest.fn().mockReturnValue(undefined),
       socket: { remoteAddress: '192.168.1.1' } as any,
     };
-
     mockRes = {
       statusCode: 200,
-      send: jest.fn(function(data: unknown) { return this; }),
-      flushHeaders: jest.fn(),
+      on: jest.fn(),
     };
-
     mockNext = jest.fn();
   });
 
-  it('should redact Authorization header when logging', () => {
+  function getLoggedRequest(): Record<string, unknown> {
+    const options = (pinoHttp as jest.Mock).mock.calls[0][0];
+    return options.serializers.req(mockReq);
+  }
+
+  it('redacts an Authorization bearer token', () => {
     const token = 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...';
-    (mockReq as any).get = jest.fn((header: string) => {
-      if (header.toLowerCase() === 'authorization') {
-        return token;
-      }
-      return undefined;
-    });
+    mockReq.headers = { authorization: token };
 
     requestLogging(mockReq as Request, mockRes as Response, mockNext);
 
-    // Call the wrapped send function
-    const wrappedSend = mockRes.send;
-    wrappedSend.call(mockRes, 'response');
-
-    // Check that logger was called with redacted auth header
-    const logCall = (logger.info as jest.Mock).mock.calls[0];
-    expect(logCall).toBeDefined();
-    expect(logCall[0].authorization).toBe('Bearer [REDACTED]');
-    expect(logCall[0].authorization).not.toContain(token.split(' ')[1]);
+    const loggedRequest = getLoggedRequest();
+    expect(loggedRequest.authorization).toBe('Bearer [REDACTED]');
+    expect(loggedRequest.authorization).not.toContain(token.split(' ')[1]);
   });
 
-  it('should not include authorization header in log when not present', () => {
-    (mockReq as any).get = jest.fn().mockReturnValue(undefined);
-
+  it('omits the authorization property when no header is present', () => {
     requestLogging(mockReq as Request, mockRes as Response, mockNext);
 
-    // Trigger the wrapped send
-    const wrappedSend = mockRes.send;
-    wrappedSend.call(mockRes, 'response');
-
-    // Check logger call
-    const logCall = (logger.info as jest.Mock).mock.calls[0];
-    expect(logCall).toBeDefined();
-    // Authorization header should not be in log if not provided
-    expect(logCall[0].authorization).toBeUndefined();
+    expect(getLoggedRequest().authorization).toBeUndefined();
   });
 
-  it('should redact any bearer token format', () => {
-    const testTokens = [
+  it('redacts bearer tokens with different contents', () => {
+    const tokens = [
       'Bearer abc123',
       'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c',
       'Bearer token_with_special_chars!@#$%',
     ];
 
-    testTokens.forEach((token) => {
+    for (const token of tokens) {
       jest.clearAllMocks();
-      
-      (mockReq as any).get = jest.fn((header: string) => {
-        if (header.toLowerCase() === 'authorization') {
-          return token;
-        }
-        return undefined;
-      });
-
-      mockRes.send = jest.fn(function(data: unknown) { return this; });
+      mockReq.headers = { authorization: token };
 
       requestLogging(mockReq as Request, mockRes as Response, mockNext);
 
-      const wrappedSend = mockRes.send;
-      wrappedSend.call(mockRes, 'response');
-
-      const logCall = (logger.info as jest.Mock).mock.calls[0];
-      expect(logCall).toBeDefined();
-      expect(logCall[0].authorization).toBe('Bearer [REDACTED]');
-    });
+      expect(getLoggedRequest().authorization).toBe('Bearer [REDACTED]');
+    }
   });
 
-  it('should not log request body for sensitive paths', () => {
+  it('redacts request bodies on sensitive paths', () => {
     mockReq.body = { password: 'secret123' };
     mockReq.path = '/auth/register';
 
     requestLogging(mockReq as Request, mockRes as Response, mockNext);
 
-    const wrappedSend = mockRes.send;
-    wrappedSend.call(mockRes, 'response');
-
-    const logCall = (logger.info as jest.Mock).mock.calls[0];
-    expect(logCall).toBeDefined();
-    expect(logCall[0].body).toBe('[REDACTED]');
-    expect(logCall[0].body).not.toContain('secret123');
+    const loggedRequest = getLoggedRequest();
+    expect(loggedRequest.body).toBe('[REDACTED]');
+    expect(loggedRequest.body).not.toContain('secret123');
   });
 
-  it('should still log redacted auth header on sensitive paths', () => {
-    const token = 'Bearer secrettoken123';
-    (mockReq as any).get = jest.fn((header: string) => {
-      if (header.toLowerCase() === 'authorization') {
-        return token;
-      }
-      return undefined;
-    });
+  it('redacts both body and authorization on sensitive paths', () => {
+    mockReq.headers = { authorization: 'Bearer secrettoken123' };
     mockReq.body = { password: 'secret123' };
     mockReq.path = '/auth/login';
 
     requestLogging(mockReq as Request, mockRes as Response, mockNext);
 
-    const wrappedSend = mockRes.send;
-    wrappedSend.call(mockRes, 'response');
-
-    const logCall = (logger.info as jest.Mock).mock.calls[0];
-    expect(logCall).toBeDefined();
-    // Body should be redacted
-    expect(logCall[0].body).toBe('[REDACTED]');
-    // Auth header should also be redacted
-    expect(logCall[0].authorization).toBe('Bearer [REDACTED]');
+    const loggedRequest = getLoggedRequest();
+    expect(loggedRequest.body).toBe('[REDACTED]');
+    expect(loggedRequest.authorization).toBe('Bearer [REDACTED]');
   });
 });

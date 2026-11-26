@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage, Server } from 'http';
 import jwt from 'jsonwebtoken';
+import type Redis from 'ioredis';
 import { logger } from '../utils/logger';
 import type { RankUpdate } from '../models/Engagement';
 import { toMarketEventDTO } from '../dto/market.dto';
@@ -19,7 +21,7 @@ const MAX_CONNECTIONS_PER_IP = 10;
 // ---------------------------------------------------------------------------
 // Per-client message rate limiter — token bucket, max 20 messages/sec per client
 // ---------------------------------------------------------------------------
-const CLIENT_RATE_LIMIT = 20;       // max messages per window
+const CLIENT_RATE_LIMIT = 20; // max messages per window
 const CLIENT_RATE_WINDOW_MS = 1_000; // rolling window in milliseconds
 
 // ---------------------------------------------------------------------------
@@ -35,21 +37,60 @@ const HEARTBEAT_MAX_MISSED = 2;
 // ---------------------------------------------------------------------------
 const RATE_LIMIT = 20;
 const WINDOW_MS = 1_000;
+const MARKET_EVENTS_CHANNEL = 'websocket:market-events';
+const AMM_MARKET_EVENTS_CHANNEL = 'market_events';
 
 // ---------------------------------------------------------------------------
 // Event types
 // ---------------------------------------------------------------------------
 export type ActivityEvent =
-  | { type: 'trade'; marketId: string; outcomeId: string; side: string; sharesAmount: number; priceBps: number; timestamp: string }
+  | {
+      type: 'trade';
+      marketId: string;
+      outcomeId: string;
+      side: string;
+      sharesAmount: number;
+      priceBps: number;
+      timestamp: string;
+    }
   | { type: 'dispute'; marketId: string; proposedOutcomeId: string }
-  | { type: 'market:resolved'; marketId: string; outcome: string; winner_odds: number; timestamp: string }
+  | {
+      type: 'market:resolved';
+      marketId: string;
+      outcome: string;
+      winner_odds: number;
+      timestamp: string;
+    }
   | { type: 'resolved'; marketId: string; winningOutcomeId: string }
   | { type: 'cancelled'; marketId: string }
   | { type: 'market_update'; marketId: string; eventType: string; data: Record<string, unknown> }
-  | { type: 'leaderboard_rank_update'; userId: string; rank: number; currentStreak?: number; timestamp: string }
-  | { type: 'leaderboard_rank'; marketId: string; address: string; rank: number | null; score: number; timestamp: string }
+  | { type: 'market_updated'; marketId: string; data: Record<string, unknown> }
+  | { type: 'market_locked'; marketId: string; data?: Record<string, unknown> }
+  | { type: 'market_resolved'; marketId: string; data?: Record<string, unknown> }
+  | { type: 'market_cancelled'; marketId: string; data?: Record<string, unknown> }
+  | {
+      type: 'leaderboard_rank_update';
+      userId: string;
+      rank: number;
+      currentStreak?: number;
+      timestamp: string;
+    }
+  | {
+      type: 'leaderboard_rank';
+      marketId: string;
+      address: string;
+      rank: number | null;
+      score: number;
+      timestamp: string;
+    }
   | { type: 'bet_count_update'; marketId: string; betCount: number; timestamp: string }
-  | { type: 'indexer_status'; status: 'running' | 'idle' | 'error' | 'syncing'; currentLedger: number; targetLedger: number; timestamp: string };
+  | {
+      type: 'indexer_status';
+      status: 'running' | 'idle' | 'error' | 'syncing';
+      currentLedger: number;
+      targetLedger: number;
+      timestamp: string;
+    };
 
 export type MarketCreatedEvent = {
   type: 'market:created';
@@ -76,12 +117,13 @@ export type LeaderboardRankUpdateEvent = {
   timestamp: string;
 };
 
-type AuthMsg = { type: 'auth'; token: string };
-type SubscribeMsg =
-  | { type: 'subscribe_activity'; marketId: string }
-  | { type: 'subscribe_market_created' }
-  | { type: 'subscribe_leaderboard'; leaderboardId?: string }
-  | { type: 'unsubscribe_leaderboard'; leaderboardId?: string };
+type ClientMessage = {
+  type: string;
+  token?: unknown;
+  channel?: unknown;
+  marketId?: unknown;
+  leaderboardId?: unknown;
+};
 
 export type LeaderboardChannel = 'global' | 'referrals';
 
@@ -138,6 +180,15 @@ class ClientRateLimiter {
 // ---------------------------------------------------------------------------
 export class ActivityFeed {
   private wss: WebSocketServer;
+  private readonly upgradeServer: Server;
+  private readonly instanceId = randomUUID();
+  private readonly redisPublisher?: Redis;
+  private readonly redisSubscriber?: Redis;
+  private readonly upgradeHandler: (
+    req: IncomingMessage,
+    socket: import('node:stream').Duplex,
+    head: Buffer
+  ) => void;
   // marketId → set of subscribed sockets
   private subscriptions = new Map<string, Set<WebSocket>>();
   // leaderboardId → set of subscribed sockets
@@ -173,15 +224,53 @@ export class ActivityFeed {
   // ── Metrics ─────────────────────────────────────────────────────────────────
   private connectedClients = 0;
 
-  constructor(server: Server) {
-    this.wss = new WebSocketServer({ server });
+  constructor(server: Server, redisClient?: Redis) {
+    this.upgradeServer = server;
+    this.wss = new WebSocketServer({ noServer: true });
+    this.upgradeHandler = (req, socket, head) => {
+      const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+      if (pathname !== '/ws' && pathname !== '/') {
+        socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      this.wss.handleUpgrade(req, socket, head, (ws) => {
+        this.wss.emit('connection', ws, req);
+      });
+    };
+    server.on('upgrade', this.upgradeHandler);
+    if (redisClient) {
+      this.redisPublisher = redisClient.duplicate();
+      this.redisSubscriber = redisClient.duplicate();
+      this.redisSubscriber.on('message', (channel, message) => {
+        if (channel === MARKET_EVENTS_CHANNEL) {
+          this.receiveRedisEvent(message);
+        } else if (channel === AMM_MARKET_EVENTS_CHANNEL) {
+          this.receiveAmmRedisEvent(message);
+        }
+      });
+      void this.redisSubscriber
+        .subscribe(MARKET_EVENTS_CHANNEL, AMM_MARKET_EVENTS_CHANNEL)
+        .catch((err) => {
+          logger.error({ err }, 'Failed to subscribe to WebSocket market events');
+        });
+      this.redisPublisher.on('error', (err) => {
+        logger.error({ err }, 'WebSocket Redis publisher error');
+      });
+      this.redisSubscriber.on('error', (err) => {
+        logger.error({ err }, 'WebSocket Redis subscriber error');
+      });
+    }
     this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       // ── Connection flooding protection ────────────────────────────────────
       const ip = this._resolveIp(req);
       const currentCount = this.connectionsByIp.get(ip) ?? 0;
       if (currentCount >= MAX_CONNECTIONS_PER_IP) {
         ws.close(4029, 'Too many connections from your IP');
-        logger.warn({ ip, count: currentCount }, 'WebSocket connection rejected: too many connections per IP');
+        logger.warn(
+          { ip, count: currentCount },
+          'WebSocket connection rejected: too many connections per IP'
+        );
         return;
       }
       this.connectionsByIp.set(ip, currentCount + 1);
@@ -227,11 +316,17 @@ export class ActivityFeed {
     this.heartbeatTimer = setInterval(() => {
       const totalClients = this.wss.clients.size;
       let activeSubscriptions = 0;
-      this.subscriptions.forEach((sockets) => { activeSubscriptions += sockets.size; });
+      this.subscriptions.forEach((sockets) => {
+        activeSubscriptions += sockets.size;
+      });
 
       // Emit metrics log
       logger.info(
-        { connectedClients: totalClients, subscriptionRooms: this.subscriptions.size, activeSubscriptions },
+        {
+          connectedClients: totalClients,
+          subscriptionRooms: this.subscriptions.size,
+          activeSubscriptions,
+        },
         'WebSocket heartbeat tick'
       );
 
@@ -268,7 +363,8 @@ export class ActivityFeed {
         payload.sub === 'public-market-feed' &&
         payload.type === 'ws_activity' &&
         payload.scope === 'market_activity:read'
-      ) return 'activity';
+      )
+        return 'activity';
       return null;
     } catch {
       return null;
@@ -281,21 +377,21 @@ export class ActivityFeed {
       return; // 429 frame already sent by the limiter
     }
 
-    let msg: any;
+    let msg: ClientMessage;
     try {
-      msg = JSON.parse(raw);
+      msg = JSON.parse(raw) as ClientMessage;
     } catch {
-      return;
+      if (!/^\/(?:subscribe|unsubscribe) market:[^\s]{1,128}$/.test(raw)) return;
+      msg = { type: 'command' };
     }
 
     if (!this.authScopes.has(ws)) {
-      const authMsg = msg as AuthMsg;
-      if (authMsg.type !== 'auth' || typeof authMsg.token !== 'string') {
+      if (msg.type !== 'auth' || typeof msg.token !== 'string') {
         ws.close(4001, 'Expected auth message');
         return;
       }
 
-      const scope = this.verifyToken(authMsg.token);
+      const scope = this.verifyToken(msg.token);
       if (!scope) {
         ws.close(4001, 'Invalid token');
         return;
@@ -311,22 +407,25 @@ export class ActivityFeed {
     }
 
     // ── Authenticated handlers with deduplication ────────────────────────────
-    if (msg.type === 'subscribe_activity' && typeof msg.marketId === 'string') {
-      // Deduplicate: ignore if already subscribed to this market
-      let markets = this.subscribedMarkets.get(ws);
-      if (!markets) {
-        markets = new Set<string>();
-        this.subscribedMarkets.set(ws, markets);
-      }
-      if (markets.has(msg.marketId)) {
-        return; // already subscribed — drop duplicate request
-      }
-      markets.add(msg.marketId);
+    const channel = typeof msg.channel === 'string' ? msg.channel : '';
+    const subscribeMatch = /^\/subscribe market:([^\s]{1,128})$/.exec(raw);
+    const marketId =
+      subscribeMatch?.[1] ??
+      (msg.type === 'subscribe_activity' && typeof msg.marketId === 'string'
+        ? msg.marketId
+        : null) ??
+      (msg.type === 'subscribe' && channel.startsWith('market:') ? channel.slice(7) : null);
+    if (marketId) {
+      this.subscribeMarket(ws, marketId);
+      return;
+    }
 
-      if (!this.subscriptions.has(msg.marketId)) {
-        this.subscriptions.set(msg.marketId, new Set());
-      }
-      this.subscriptions.get(msg.marketId)!.add(ws);
+    const unsubscribeMatch = /^\/unsubscribe market:([^\s]{1,128})$/.exec(raw);
+    const unsubscribeMarketId =
+      unsubscribeMatch?.[1] ??
+      (msg.type === 'unsubscribe' && channel.startsWith('market:') ? channel.slice(7) : null);
+    if (unsubscribeMarketId) {
+      this.unsubscribeMarket(ws, unsubscribeMarketId);
       return;
     }
 
@@ -378,6 +477,27 @@ export class ActivityFeed {
     }
   }
 
+  private subscribeMarket(ws: WebSocket, marketId: string): void {
+    let markets = this.subscribedMarkets.get(ws);
+    if (!markets) {
+      markets = new Set<string>();
+      this.subscribedMarkets.set(ws, markets);
+    }
+    if (markets.has(marketId)) return;
+    markets.add(marketId);
+    if (!this.subscriptions.has(marketId)) {
+      this.subscriptions.set(marketId, new Set());
+    }
+    this.subscriptions.get(marketId)!.add(ws);
+  }
+
+  private unsubscribeMarket(ws: WebSocket, marketId: string): void {
+    this.subscribedMarkets.get(ws)?.delete(marketId);
+    const sockets = this.subscriptions.get(marketId);
+    sockets?.delete(ws);
+    if (sockets?.size === 0) this.subscriptions.delete(marketId);
+  }
+
   private cleanupSocket(ws: WebSocket, ip?: string): void {
     // ── Auth timeout ───────────────────────────────────────────────────────
     const timeout = this.authTimeouts.get(ws);
@@ -424,20 +544,22 @@ export class ActivityFeed {
       const { marketId } = event;
       if (event.type !== 'market:resolved' && !this.rateLimiter.allow(marketId)) return;
 
-      const sockets = this.subscriptions.get(marketId);
-      if (!sockets?.size) return;
-
-      // Apply DTO whitelist projection to prevent private fields (user_id,
-      // wallet_address, etc.) from leaking into market-room broadcasts (#659).
-      const safeEvent = toMarketEventDTO(event as ActivityEvent);
-      const payload = JSON.stringify(safeEvent);
-      for (const ws of sockets) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      this.dispatchMarketEvent(event);
+      if (this.redisPublisher) {
+        void this.redisPublisher
+          .publish(MARKET_EVENTS_CHANNEL, JSON.stringify({ origin: this.instanceId, event }))
+          .catch((err) =>
+            logger.error({ err, marketId }, 'Failed to publish WebSocket market event')
+          );
       }
       return;
     }
 
-    if ('leaderboardId' in event && typeof event.leaderboardId === 'string' && event.leaderboardId) {
+    if (
+      'leaderboardId' in event &&
+      typeof event.leaderboardId === 'string' &&
+      event.leaderboardId
+    ) {
       const sockets = this.leaderboardSubscriptions.get(event.leaderboardId);
       if (sockets?.size) {
         const payload = JSON.stringify(event);
@@ -446,11 +568,120 @@ export class ActivityFeed {
         }
       }
     }
-
     // Also broadcast to global leaderboard subscribers if it is a leaderboard event
     if (event.type === 'leaderboard_rank_update' && this.globalLeaderboardSubs.size) {
       const payload = JSON.stringify(event);
       for (const ws of this.globalLeaderboardSubs) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      }
+    }
+  }
+
+  private receiveRedisEvent(message: string): void {
+    try {
+      const envelope = JSON.parse(message) as { origin?: unknown; event?: unknown };
+      if (
+        envelope.origin === this.instanceId ||
+        !envelope.event ||
+        typeof envelope.event !== 'object'
+      )
+        return;
+      const event = envelope.event as ActivityEvent;
+      if (
+        !('marketId' in event) ||
+        typeof event.marketId !== 'string' ||
+        !event.marketId ||
+        typeof event.type !== 'string'
+      )
+        return;
+      this.dispatchMarketEvent(event);
+    } catch (err) {
+      logger.warn({ err }, 'Ignoring malformed WebSocket market event from Redis');
+    }
+  }
+
+  private receiveAmmRedisEvent(message: string): void {
+    try {
+      const event = JSON.parse(message) as {
+        type?: unknown;
+        market_id?: unknown;
+        tier?: unknown;
+        outcome?: unknown;
+        amount?: unknown;
+        odds?: unknown;
+        tokens_received?: unknown;
+        timestamp?: unknown;
+      };
+      if (event.type !== 'bet_executed' || typeof event.market_id !== 'string' || !event.market_id) {
+        return;
+      }
+      this.dispatchMarketEvent({
+        type: 'market_updated',
+        marketId: event.market_id,
+        data: {
+          ...(typeof event.tier === 'number' && { tier: event.tier }),
+          ...(typeof event.outcome === 'string' && { outcome: event.outcome }),
+          ...(typeof event.amount === 'number' && { amount: event.amount }),
+          ...(typeof event.odds === 'number' && { odds: event.odds }),
+          ...(typeof event.tokens_received === 'number' && {
+            tokens_received: event.tokens_received,
+          }),
+          ...(typeof event.timestamp === 'string' && { timestamp: event.timestamp }),
+        },
+      });
+    } catch (err) {
+      logger.warn({ err }, 'Ignoring malformed AMM market event from Redis');
+    }
+  }
+
+  private dispatchMarketEvent(event: ActivityEvent): void {
+    if (!('marketId' in event)) return;
+    const marketId = event.marketId;
+    const sockets = this.subscriptions.get(marketId);
+    if (!sockets?.size) return;
+
+    const events: ActivityEvent[] = [event];
+    if (event.type === 'trade') {
+      events.push({
+        type: 'market_updated',
+        marketId,
+        data: {
+          outcomeId: event.outcomeId,
+          side: event.side,
+          sharesAmount: event.sharesAmount,
+          priceBps: event.priceBps,
+          timestamp: event.timestamp,
+        },
+      });
+    } else if (event.type === 'market_update') {
+      const canonicalTypes: Record<
+        string,
+        'market_updated' | 'market_locked' | 'market_resolved' | 'market_cancelled'
+      > = {
+        bet_placed: 'market_updated',
+        odds_changed: 'market_updated',
+        market_locked: 'market_locked',
+        market_resolved: 'market_resolved',
+        market_cancelled: 'market_cancelled',
+      };
+      const canonicalType = canonicalTypes[event.eventType];
+      if (canonicalType) events.push({ type: canonicalType, marketId, data: event.data });
+    } else if (event.type === 'resolved' || event.type === 'market:resolved') {
+      events.push({
+        type: 'market_resolved',
+        marketId,
+        data:
+          event.type === 'resolved'
+            ? { winningOutcomeId: event.winningOutcomeId }
+            : { outcome: event.outcome, winner_odds: event.winner_odds },
+      });
+    } else if (event.type === 'cancelled') {
+      events.push({ type: 'market_cancelled', marketId });
+    }
+
+    for (const item of events) {
+      const payload = JSON.stringify(toMarketEventDTO(item));
+      for (const ws of sockets) {
         if (ws.readyState === WebSocket.OPEN) ws.send(payload);
       }
     }
@@ -474,7 +705,9 @@ export class ActivityFeed {
     this.publish(event);
   }
 
-  publishLeaderboardUpdate(event: LeaderboardRankUpdateEvent | { userId: string; rank: number; currentStreak: number }): void {
+  publishLeaderboardUpdate(
+    event: LeaderboardRankUpdateEvent | { userId: string; rank: number; currentStreak: number }
+  ): void {
     if ('leaderboardId' in event || 'displayName' in event || 'score' in event) {
       this.publish(event as LeaderboardRankUpdateEvent);
     } else {
@@ -508,6 +741,9 @@ export class ActivityFeed {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    this.upgradeServer.off('upgrade', this.upgradeHandler);
+    this.redisPublisher?.disconnect();
+    this.redisSubscriber?.disconnect();
     this.wss.close();
   }
 
@@ -537,8 +773,8 @@ export class ActivityFeed {
 // Singleton — initialised once in src/index.ts
 let _feed: ActivityFeed | null = null;
 
-export function initActivityFeed(server: Server): ActivityFeed {
-  _feed = new ActivityFeed(server);
+export function initActivityFeed(server: Server, redisClient?: Redis): ActivityFeed {
+  _feed = new ActivityFeed(server, redisClient);
   return _feed;
 }
 
@@ -550,7 +786,7 @@ export function getActivityFeed(): ActivityFeed {
 export function broadcastMarketResolved(
   marketId: string,
   outcome: string,
-  winner_odds: number,
+  winner_odds: number
 ): void {
   _feed?.publish({
     type: 'market:resolved',

@@ -48,7 +48,7 @@ const listMarketsQuerySchema = z.object({
   fighter: z.string().min(1).optional(),
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
-  sort: z.enum(['date_asc', 'date_desc', 'pool_desc']).default('date_desc'),
+  sort: z.enum(['date_asc', 'date_desc', 'pool_desc']).default('date_asc'),
   page: z.coerce.number().int().min(1, { message: 'page must be an integer ≥ 1' }).default(1),
   limit: z.coerce
     .number()
@@ -66,17 +66,17 @@ export const listMarketsValidation = validateQuery(listMarketsQuerySchema);
  *
  * Returns paginated market list.
  * Validates query params with Zod before passing to MarketService.
- * Responds 400 on invalid params, 200 with { markets, total, page, limit }.
+ * Responds 400 on invalid params, 200 with { markets, total, hasNextPage, page, limit }.
  */
 export async function listMarkets(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = listMarketsQuerySchema.parse(req.query);
     const { status, weight_class, fighter, dateFrom, dateTo, sort, page, limit } = parsed;
-    const { markets, total } = await MarketService.getMarkets(
+    const { markets, total, hasNextPage } = await MarketService.getMarkets(
       { status, weight_class, fighter, dateFrom, dateTo, sort },
       { page, limit },
     );
-    res.status(200).json({ markets, total, page, limit });
+    res.status(200).json({ markets, total, hasNextPage, page, limit });
   } catch (err) {
     next(err);
   }

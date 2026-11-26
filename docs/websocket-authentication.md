@@ -2,22 +2,22 @@
 
 ## Overview
 
-The ActivityFeed WebSocket endpoint (`/ws`) requires JWT authentication via first-message authentication protocol. This prevents JWT tokens from being exposed in server access logs, which would otherwise record query parameters.
+The WebSocket endpoint is `ws://localhost:3001/ws` (or `wss://` in production). It requires JWT authentication via a first-message protocol, keeping tokens out of URLs and access logs. The root path remains available as a compatibility alias.
 
 ## Authentication Protocol
 
 ### Connection Setup
 
-1. **Connect without authentication** — Open a WebSocket connection to the endpoint without any credentials:
+1. **Connect without authentication** — Open a WebSocket connection to `/ws` without any credentials:
 
 ```
-ws://localhost:3001/
+ws://localhost:3001/ws
 ```
 
 or for HTTPS:
 
 ```
-wss://example.com/
+wss://example.com/ws
 ```
 
 2. **Send authentication message within 5 seconds** — After connection opens, send an auth message with your JWT token:
@@ -31,9 +31,9 @@ wss://example.com/
 
 ### Token Requirements
 
-- Must be a valid JWT signed with `JWT_SECRET` (same as used for REST API auth)
+- Must be a valid JWT signed with `JWT_ACCESS_SECRET` (falls back to `JWT_SECRET`)
 - Token format: pass the raw JWT string (not `Bearer <token>`)
-- No expiration validation on the server (tokens are validated structurally)
+- Expiration and signature are verified by the server.
 
 ### Authentication Errors
 
@@ -58,7 +58,7 @@ const loginRes = await fetch('/api/auth/login', {
 const { accessToken } = await loginRes.json();
 
 // Connect to WebSocket (without token in URL)
-const ws = new WebSocket('ws://localhost:3001/');
+const ws = new WebSocket('ws://localhost:3001/ws');
 
 ws.addEventListener('open', () => {
   // Send authentication message
@@ -87,13 +87,10 @@ ws.addEventListener('error', (event) => {
   console.error('WebSocket error:', event);
 });
 
-// After connection opens and authentication succeeds, subscribe to markets
+// After sending auth, subscribe to a market. WebSocket preserves message order.
 function subscribeToMarket(marketId: string) {
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'subscribe_activity',
-      marketId,
-    }));
+    ws.send(`/subscribe market:${marketId}`);
   }
 }
 ```
@@ -102,35 +99,47 @@ function subscribeToMarket(marketId: string) {
 
 ### Subscribe Message
 
-After successful authentication, send:
+After sending the authentication frame, send:
+
+```
+/subscribe market:market-xyz
+```
+
+The JSON equivalent and legacy activity-feed form are also supported:
 
 ```json
 {
-  "type": "subscribe_activity",
-  "marketId": "market-xyz"
+  "type": "subscribe",
+  "channel": "market:market-xyz"
 }
 ```
 
-### Activity Events
+### Market Events
 
-Server sends events in JSON format:
+Market lifecycle changes are sent to every connected worker's subscribers as JSON:
 
 ```json
 {
-  "type": "trade",
+  "type": "market_updated",
   "marketId": "market-xyz",
-  "outcomeId": "outcome-a",
-  "side": "buy",
-  "sharesAmount": 100,
-  "priceBps": 5000,
-  "timestamp": "2025-01-15T10:30:00Z"
+  "data": {
+    "side": "fighter_a",
+    "amount": "100"
+  }
 }
 ```
 
-Event types:
-- `trade` — Buy/sell trade executed
-- `dispute` — Dispute filed on market
-- `resolved` — Market resolved with outcome
+Market event types:
+- `market_updated` — A bet was placed or odds changed
+- `market_locked` — Betting was locked
+- `market_resolved` — An outcome was resolved
+- `market_cancelled` — A market was cancelled
+
+The existing activity event names (`trade`, `market_update`, `resolved`, and `cancelled`) remain available to existing clients.
+
+### Reconnection
+
+Subscriptions belong to a WebSocket connection. On reconnect, authenticate again and resubscribe to every market. Clients should retain their market IDs and resend `/subscribe market:<id>` after each connection opens. Market events are broadcast across backend processes through Redis Pub/Sub.
 
 ## Rate Limiting
 
