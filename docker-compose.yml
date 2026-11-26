@@ -17,6 +17,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    networks:
+      - default
 
   redis:
     image: redis:7-alpine
@@ -28,6 +31,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    networks:
+      - default
 
   backend:
     build: ./backend
@@ -40,6 +46,19 @@ services:
     env_file: ./backend/.env
     ports:
       - '3001:3001'
+    environment:
+      - DATABASE_URL=postgresql://bankerchanger:bankerchanger@postgres:5432/bankerchanger
+      - REDIS_URL=redis://redis:6379
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:3001/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - backend_node_modules:/app/node_modules
+    networks:
+      - default
 
   indexer:
     build: ./indexer
@@ -47,8 +66,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       backend:
-        condition: service_started
+        condition: service_healthy
     env_file: ./indexer/.env
     environment:
       - FACTORY_CONTRACT_ADDRESS=${FACTORY_CONTRACT_ADDRESS}
@@ -57,15 +78,32 @@ services:
       - '3002:3002'
     volumes:
       - indexer_data:/app/data
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3002/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - default
 
   frontend:
     build: ./frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     env_file: ./frontend/.env
     ports:
       - '3000:3000'
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3000/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - default
 
   postgres-test:
     image: postgres:15-alpine
@@ -82,3 +120,9 @@ services:
 volumes:
   postgres_data:
   indexer_data:
+  backend_node_modules:
+
+networks:
+  default:
+    name: bankerchanger
+    driver: bridge
