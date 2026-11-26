@@ -40,7 +40,7 @@ module.exports = {
       testEnvironment: 'node',
       roots: ['<rootDir>/src/__tests__', '<rootDir>/src/hooks', '<rootDir>/src/services'],
       testMatch: ['**/__tests__/**/*.test.[jt]s?(x)', '**/*.test.[jt]s?(x)'],
-      testPathIgnorePatterns: ['/node_modules/', 'src/services/__tests__/api\\.test\\.ts'],
+      testPathIgnorePatterns: ['/node_modules/', 'src/services/__tests__/api\\.test\\.ts', 'src/hooks/__tests__/useWallet\\.test\\.ts'],
       moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
       transform: sharedTransform,
       moduleNameMapper: {
@@ -51,6 +51,21 @@ module.exports = {
       setupFiles: ['<rootDir>/src/__tests__/fetchPolyfill.js'],
       setupFilesAfterEnv: ['<rootDir>/src/__tests__/setup.ts'],
       transformIgnorePatterns: ['/node_modules/(?!(rettime|msw|@mswjs|@open-draft|outvariant|strict-event-emitter|until-async)/)'],
+      globals: { 'ts-jest': { isolatedModules: true } },
+    },
+    // Hook-specific tests — no MSW setup (useWallet, etc)
+    {
+      displayName: 'hooks-unit',
+      testEnvironment: 'jsdom',
+      testMatch: ['<rootDir>/src/hooks/__tests__/useWallet.test.[jt]s?(x)'],
+      moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
+      transform: sharedTransform,
+      moduleNameMapper: {
+        ...sharedModuleNameMapper,
+        '^@stellar/stellar-sdk$': '<rootDir>/src/__tests__/mocks/stellar-sdk.js',
+      },
+      setupFiles: ['<rootDir>/src/__tests__/setup-hooks-unit.js'],
+      testPathIgnorePatterns: ['/node_modules/'],
       globals: { 'ts-jest': { isolatedModules: true } },
     },
     // API service unit tests — fetch-spy based, no MSW
