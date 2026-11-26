@@ -144,3 +144,9 @@ MIT
 
 <!-- handsoff-issue-1024 -->
 - #1024: Implement `register_oracle()` — add oracle to whitelist
+
+<!-- handsoff-issue-1039 -->
+- #1039: Implement `withdraw_fees()` — allow admin to claim treasury balance
+
+<!-- handsoff-issue-1040 -->
+- #1040: Implement `get_treasury_state()` — read treasury balance and total collected
