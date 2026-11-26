@@ -138,3 +138,9 @@ MIT
 
 <!-- handsoff-issue-1030 -->
 - #1030: Implement `place_bet()` with pool updates and fee calculation
+
+<!-- handsoff-issue-1023 -->
+- #1023: Implement `create_market()` to deploy and register Market contracts
+
+<!-- handsoff-issue-1024 -->
+- #1024: Implement `register_oracle()` — add oracle to whitelist
