@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export type MarketEventType =
   | 'market_updated'
   | 'market_locked'
-  | 'market_resolved';
+  | 'market_resolved'
+  | 'market_cancelled';
 
 export interface MarketEvent {
   type: MarketEventType;
@@ -22,6 +23,8 @@ export interface UseWebSocketOptions {
   token?: string | null;
   /** Optional explicit WebSocket URL. Defaults to the /ws endpoint. */
   url?: string;
+  /** Market IDs to subscribe to after authenticating (and after each reconnect). */
+  marketIds?: string[];
   /** Called for every received market event. */
   onEvent?: (event: MarketEvent) => void;
   /** Enable automatic reconnection on disconnect. Defaults to true. */
@@ -57,6 +60,7 @@ export function useWebSocket(
   const {
     token,
     url,
+    marketIds = [],
     onEvent,
     reconnect = true,
     reconnectDelay = 1000,
@@ -71,6 +75,7 @@ export function useWebSocket(
   const attemptsRef = useRef(0);
   const shouldReconnectRef = useRef(reconnect);
   const onEventRef = useRef(onEvent);
+  const marketIdsKey = JSON.stringify(Array.from(new Set(marketIds)));
 
   // Keep the latest callback without forcing a reconnect on every render.
   useEffect(() => {
@@ -102,6 +107,10 @@ export function useWebSocket(
 
     const connect = () => {
       if (disposed) return;
+      if (!token) {
+        setStatus('closed');
+        return;
+      }
 
       setStatus('connecting');
       const socket = new WebSocket(resolveUrl(url));
@@ -112,11 +121,10 @@ export function useWebSocket(
         attemptsRef.current = 0;
         setStatus('open');
 
-        // Authenticate and subscribe to market updates with the JWT.
-        if (token) {
-          socket.send(JSON.stringify({ type: 'auth', token }));
+        socket.send(JSON.stringify({ type: 'auth', token }));
+        for (const marketId of JSON.parse(marketIdsKey) as string[]) {
+          socket.send(`/subscribe market:${marketId}`);
         }
-        socket.send(JSON.stringify({ type: 'subscribe', channel: 'markets' }));
       };
 
       socket.onmessage = (message: MessageEvent) => {
@@ -131,7 +139,8 @@ export function useWebSocket(
         if (
           event.type === 'market_updated' ||
           event.type === 'market_locked' ||
-          event.type === 'market_resolved'
+          event.type === 'market_resolved' ||
+          event.type === 'market_cancelled'
         ) {
           // eslint-disable-next-line no-console
           console.log('[useWebSocket] event received:', event);
@@ -184,7 +193,7 @@ export function useWebSocket(
         socketRef.current = null;
       }
     };
-  }, [token, url, reconnectDelay, maxReconnectDelay, clearReconnectTimer]);
+  }, [token, url, marketIdsKey, reconnectDelay, maxReconnectDelay, clearReconnectTimer]);
 
   return { status, lastEvent, send };
 }

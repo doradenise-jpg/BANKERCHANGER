@@ -14,7 +14,7 @@ import { requireAdmin } from "./middleware/admin.middleware";
 import { initSentry, applySentryRequestHandler } from "./middleware/sentry.middleware";
 import { rateLimit } from "./middleware/rate-limit.middleware";
 import { requestLogging } from "./middleware/request-logging.middleware";
-import { requestContext } from "./middleware/request-context.middleware";
+import { requestContextMiddleware } from "./middleware/request-context.middleware";
 import { AppError } from "./utils/AppError";
 import { logger } from "./utils/logger";
 import { pool } from "./config/db";
@@ -71,7 +71,7 @@ app.use(
     },
   }),
 );
-app.use(requestContext);
+app.use(requestContextMiddleware);
 app.use(express.json());
 app.use(requestLogging);
 
@@ -183,50 +183,46 @@ applySentryRequestHandler(app);
 // Error handler - must be LAST
 app.use(errorMiddleware);
 
-const PORT = env.PORT;
-const server = app.listen(PORT, () => {
-  logger.info({ port: PORT }, "Server running");
-  if (env.NODE_ENV === 'development' || env.ENABLE_SWAGGER) {
-    logger.info({ port: PORT }, "Swagger UI available");
-  }
-  startAutoResolutionCron();
-  startAutoLockCron();
-  startCleanupCron();
-  startWebhookDeliveryCron();
-});
+if (require.main === module) {
+  const server = app.listen(env.PORT, () => {
+    logger.info({ port: env.PORT }, "Server running");
+    if (env.NODE_ENV === 'development' || env.ENABLE_SWAGGER) {
+      logger.info({ port: env.PORT }, "Swagger UI available");
+    }
+    startAutoResolutionCron();
+    startAutoLockCron();
+    startCleanupCron();
+    startWebhookDeliveryCron();
+  });
 
-// Startup health check — catch misconfigured env vars or failed connections early
-(async function startupHealthCheck() {
-  const results: string[] = [];
-  try {
-    await pool.query("SELECT 1");
-    results.push("db: ok");
-  } catch (err) {
-    logger.error({ err }, "Startup health check FAILED — database unreachable");
-    results.push("db: FAILED");
-  }
-  try {
-    await redis.ping();
-    results.push("redis: ok");
-  } catch (err) {
-    logger.error({ err }, "Startup health check FAILED — redis unreachable");
-    results.push("redis: FAILED");
-  }
-  logger.info({ results }, "Startup health check complete");
-})();
+  // Startup health check — catch misconfigured env vars or failed connections early
+  void (async () => {
+    const results: string[] = [];
+    try {
+      await pool.query("SELECT 1");
+      results.push("db: ok");
+    } catch (err) {
+      logger.error({ err }, "Startup health check FAILED — database unreachable");
+      results.push("db: FAILED");
+    }
+    try {
+      await redis.ping();
+      results.push("redis: ok");
+    } catch (err) {
+      logger.error({ err }, "Startup health check FAILED — redis unreachable");
+      results.push("redis: FAILED");
+    }
+    logger.info({ results }, "Startup health check complete");
+  })();
 
-initActivityFeed(server);
-
-// Bridge engagement leaderboard rank changes onto the WebSocket layer so
-// subscribed clients get real-time rank updates (issues #516, #517).
-
-// subscribed clients get real-time rank updates.
-engagementService.setRankUpdateListener((updates) => {
-  try {
-    getActivityFeed().emitLeaderboardRankUpdate(updates);
-  } catch (err) {
-    logger.warn({ err }, "Failed to emit leaderboard rank update");
-  }
-});
+  initActivityFeed(server, redis);
+  engagementService.setRankUpdateListener((updates) => {
+    try {
+      getActivityFeed().emitLeaderboardRankUpdate(updates);
+    } catch (err) {
+      logger.warn({ err }, "Failed to emit leaderboard rank update");
+    }
+  });
+}
 
 export default app;

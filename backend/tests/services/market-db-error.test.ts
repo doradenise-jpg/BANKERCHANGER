@@ -134,6 +134,31 @@ describe('MarketService — #653: SQL error leak prevention', () => {
     });
   });
 
+  it('getMarkets() uses parameterized filters, LIMIT/OFFSET, and ascending schedule order', async () => {
+    mockedPool.query
+      .mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({ rows: [{ total: '25' }] } as any);
+
+    const result = await getMarkets(
+      { status: 'open', weight_class: 'heavyweight' },
+      { page: 2, limit: 10 },
+    );
+
+    expect(mockedPool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining(
+        'WHERE status = $1 AND weight_class = $2 ORDER BY scheduled_at ASC LIMIT $3 OFFSET $4',
+      ),
+      ['open', 'heavyweight', 10, 10],
+    );
+    expect(mockedPool.query).toHaveBeenNthCalledWith(
+      2,
+      'SELECT COUNT(*) AS total FROM markets WHERE status = $1 AND weight_class = $2',
+      ['open', 'heavyweight'],
+    );
+    expect(result).toMatchObject({ markets: [], total: 25, hasNextPage: true });
+  });
+
   it('getPlatformStats() wraps a raw DB error in AppError with status 500', async () => {
     mockedPool.query.mockRejectedValue(makePgError());
 

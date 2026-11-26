@@ -47,14 +47,9 @@ const deriveOperation = (query: unknown): string => {
 };
 
 const updateConnectionGauge = (): void => {
-  dbConnections.set(
-    {
-      total: pool.totalCount,
-      idle: pool.idleCount,
-      waiting: pool.waitingCount,
-    },
-    pool.totalCount,
-  );
+  dbConnections.set({ state: 'total' }, pool.totalCount);
+  dbConnections.set({ state: 'idle' }, pool.idleCount);
+  dbConnections.set({ state: 'waiting' }, pool.waitingCount);
 };
 
 const observeQuery = <T extends QueryResultRow = any>(
@@ -69,35 +64,49 @@ const observeQuery = <T extends QueryResultRow = any>(
   });
 };
 
-const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<QueryResult<any>>;
+const instrumentClient = (client: PoolClient): PoolClient => {
+  const originalClientQuery = client.query.bind(client) as (...args: any[]) => any;
+  (client as any).query = (...args: any[]): any => {
+    const query = args[0];
+    const callbackIndex = args.length - 1;
+    if (typeof args[callbackIndex] === 'function') {
+      const callback = args[callbackIndex];
+      const end = dbQueryDuration.startTimer({ operation: deriveOperation(query) });
+      args[callbackIndex] = (...callbackArgs: any[]) => {
+        end();
+        updateConnectionGauge();
+        return callback(...callbackArgs);
+      };
+      return originalClientQuery(...args);
+    }
+    return observeQuery(query, () => originalClientQuery(...args));
+  };
 
-(pool as any).query = (...args: any[]): Promise<QueryResult<any>> => {
-  const query = args[0];
-  return observeQuery(query, () => originalQuery(...args));
+  const originalRelease = client.release.bind(client) as (...args: any[]) => void;
+  (client as any).release = (...args: any[]): void => {
+    const result = originalRelease(...args);
+    updateConnectionGauge();
+    return result;
+  };
+  return client;
 };
 
-const originalConnect = pool.connect.bind(pool) as (...args: any[]) => Promise<PoolClient>;
+const originalConnect = pool.connect.bind(pool) as (...args: any[]) => any;
 
-(pool as any).connect = (...args: any[]): Promise<PoolClient> => {
-  return originalConnect(...args).then((client) => {
-    updateConnectionGauge();
-
-    const originalClientQuery = client.query.bind(client) as (...qArgs: any[]) => Promise<QueryResult<any>>;
-
-    (client as any).query = (...qArgs: any[]): Promise<QueryResult<any>> => {
-      const query = qArgs[0];
-      return observeQuery(query, () => originalClientQuery(...qArgs));
-    };
-
-    const originalRelease = client.release.bind(client) as (...rArgs: any[]) => void;
-
-    (client as any).release = (...rArgs: any[]): void => {
-      const result = originalRelease(...rArgs);
+(pool as any).connect = (...args: any[]): any => {
+  const callbackIndex = args.length - 1;
+  if (typeof args[callbackIndex] === 'function') {
+    const callback = args[callbackIndex];
+    args[callbackIndex] = (error: Error | undefined, client: PoolClient, release: () => void) => {
+      if (client) instrumentClient(client);
       updateConnectionGauge();
-      return result;
+      return callback(error, client, release);
     };
-
-    return client;
+    return originalConnect(...args);
+  }
+  return originalConnect(...args).then((client: PoolClient) => {
+    updateConnectionGauge();
+    return instrumentClient(client);
   });
 };
 

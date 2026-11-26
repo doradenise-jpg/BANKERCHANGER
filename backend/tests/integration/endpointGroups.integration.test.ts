@@ -1,18 +1,18 @@
 import { Router } from 'express';
-import userActivityRouter from '../routes/userActivity.routes';
-import marketAnalyticsRouter from '../routes/marketAnalytics.routes';
-import transactionHistoryRouter from '../routes/transactionHistory.routes';
-import notificationsRouter from '../routes/notifications.routes';
-import systemHealthRouter from '../routes/systemHealth.routes';
+import userActivityRouter from '../../src/routes/userActivity.routes';
+import marketAnalyticsRouter from '../../src/routes/marketAnalytics.routes';
+import transactionHistoryRouter from '../../src/routes/transactionHistory.routes';
+import notificationsRouter from '../../src/routes/notifications.routes';
+import systemHealthRouter from '../../src/routes/systemHealth.routes';
 
 // ---------------------------------------------------------------------------
 // Integration tests for Endpoint Groups 21-25
 // ---------------------------------------------------------------------------
 
 // Mock dependencies
-jest.mock('../middleware/auth.middleware', () => ({
+jest.mock('../../src/middleware/auth.middleware', () => ({
   requireAuth: (req: any, _res: any, next: any) => {
-    req.user = { id: 'test-user-id', role: 'user' };
+    req.user = { id: '123e4567-e89b-12d3-a456-426614174000', role: 'user' };
     next();
   },
 }));
@@ -24,7 +24,7 @@ jest.mock('../../src/middleware/admin.middleware', () => ({
   },
 }));
 
-jest.mock('../config/db', () => ({
+jest.mock('../../src/config/db', () => ({
   pool: {
     query: jest.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] }),
     totalCount: 10,
@@ -33,17 +33,17 @@ jest.mock('../config/db', () => ({
   },
 }));
 
-jest.mock('../config/redis', () => ({
+jest.mock('../../src/config/redis', () => ({
   redis: {
     ping: jest.fn().mockResolvedValue('PONG'),
   },
 }));
 
-jest.mock('../services/cache.service', () => ({
+jest.mock('../../src/services/cache.service', () => ({
   redis: { ping: jest.fn().mockResolvedValue('PONG') },
 }));
 
-jest.mock('../services/redis-lua', () => ({
+jest.mock('../../src/services/redis-lua', () => ({
   incrWithExpire: jest.fn().mockResolvedValue(1),
 }));
 
@@ -72,19 +72,19 @@ describe('Endpoint Group 21: User Activity & Preferences', () => {
   it('GET /test - validates query parameters', async () => {
     const res = await request(app).get('/test?page=0');
     expect(res.status).toBe(422);
-    expect(res.body).toHaveProperty('errors');
+    expect(res.body.error).toMatchObject({ code: 'VALIDATION_ERROR', details: expect.any(Array) });
   });
 
   it('PUT /test/user-id/preferences - updates preferences', async () => {
     const res = await request(app)
-      .put('/test/test-user-id/preferences')
+      .put('/test/123e4567-e89b-12d3-a456-426614174000/preferences')
       .send({ emailNotifications: false });
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('preferences');
   });
 
   it('GET /test/user-id/preferences - returns preferences', async () => {
-    const res = await request(app).get('/test/test-user-id/preferences');
+    const res = await request(app).get('/test/123e4567-e89b-12d3-a456-426614174000/preferences');
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('preferences');
   });
@@ -168,14 +168,14 @@ describe('Endpoint Group 24: Notifications & Alert Preferences', () => {
   const app = createTestApp(notificationsRouter);
 
   it('GET /test/user-id/settings - returns notification settings', async () => {
-    const res = await request(app).get('/test/test-user-id/settings');
+    const res = await request(app).get('/test/123e4567-e89b-12d3-a456-426614174000/settings');
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('settings');
   });
 
   it('PUT /test/user-id/settings - updates notification settings', async () => {
     const res = await request(app)
-      .put('/test/test-user-id/settings')
+      .put('/test/123e4567-e89b-12d3-a456-426614174000/settings')
       .send({ channel: 'push', betPlaced: false });
     expect(res.status).toBe(200);
     expect(res.body.settings.channel).toBe('push');
@@ -186,7 +186,7 @@ describe('Endpoint Group 24: Notifications & Alert Preferences', () => {
       .post('/test/test')
       .send({
         type: 'email',
-        userId: 'test-user-id',
+        userId: '123e4567-e89b-12d3-a456-426614174000',
         template: 'bet_resolved',
       });
     expect(res.status).toBe(200);
@@ -198,7 +198,7 @@ describe('Endpoint Group 24: Notifications & Alert Preferences', () => {
       .post('/test/test')
       .send({
         type: 'email',
-        userId: 'test-user-id',
+        userId: '123e4567-e89b-12d3-a456-426614174000',
         template: 'invalid_template',
       });
     expect(res.status).toBe(422);
@@ -212,12 +212,11 @@ describe('Endpoint Group 25: System Health & Diagnostics', () => {
     const res = await request(app).get('/test');
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('status');
-    expect(res.body).toHaveProperty('components');
-    expect(Array.isArray(res.body.components)).toBe(true);
+    expect(res.body).toMatchObject({ database: 'healthy', redis: 'healthy' });
   });
 
   it('GET /test - filters by component', async () => {
-    const res = await request(app).get('/test?components=database');
+    const res = await request(app).get('/test/detailed?components=database');
     expect(res.status).toBe(200);
     const dbComponent = res.body.components.find(
       (c: any) => c.name === 'database',
@@ -239,8 +238,8 @@ describe('Endpoint Group 25: System Health & Diagnostics', () => {
     expect(res.body).toHaveProperty('memoryUsage');
   });
 
-  it('GET /test/invalid - rejects invalid component', async () => {
+  it('GET /test/invalid - returns not found for an unknown component', async () => {
     const res = await request(app).get('/test/invalid');
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(404);
   });
 });

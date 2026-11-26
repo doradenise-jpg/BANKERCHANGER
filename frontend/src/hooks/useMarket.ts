@@ -91,6 +91,9 @@ export function useMarket(market_id: string): UseMarketResult {
     try {
       const parsed = new URL(apiBaseUrl);
       parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+      parsed.pathname = '/ws';
+      parsed.search = '';
+      parsed.hash = '';
       socketUrl = parsed.toString();
     } catch {
       return;

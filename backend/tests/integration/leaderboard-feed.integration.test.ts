@@ -29,6 +29,8 @@ async function connectAndSubscribe(port: number, token: string): Promise<WebSock
   await new Promise((r) => setImmediate(r));
   ws.send(JSON.stringify({ type: 'subscribe_leaderboard' }));
   await new Promise((r) => setImmediate(r));
+  ws.send('/subscribe market:market-lb');
+  await new Promise((r) => setImmediate(r));
   return ws;
 }
 
@@ -55,18 +57,18 @@ describe('LeaderboardFeed integration', () => {
     const token = generateTestToken();
     const ws = await connectAndSubscribe(port, token);
 
-    const rankEvent: ActivityEvent = {
-      type: 'leaderboard_rank',
-      marketId: 'leaderboard',
-      address: 'GBXPZMXTK4WZHCXZASP7F3VW3JZOZXZ6V7ZRNBXKF6VPVDPF56IHTLFO',
+    const rankEvent: Extract<ActivityEvent, { type: 'leaderboard_rank_update' }> = {
+      type: 'leaderboard_rank_update',
+      userId: 'test-user',
       rank: 1,
-      score: 42,
+      currentStreak: 2,
       timestamp: new Date().toISOString(),
     };
 
+    const receivedMessage = waitForMessage(ws);
     feed.publish(rankEvent);
 
-    const received = await waitForMessage(ws);
+    const received = await receivedMessage;
     expect(received).toEqual(rankEvent);
 
     ws.close();
@@ -84,13 +86,10 @@ describe('LeaderboardFeed integration', () => {
     const messages: string[] = [];
     ws.on('message', (d) => messages.push(d.toString()));
 
-    feed.publish({
-      type: 'leaderboard_rank',
-      marketId: 'leaderboard',
-      address: 'GBXPZMXTK4WZHCXZASP7F3VW3JZOZXZ6V7ZRNBXKF6VPVDPF56IHTLFO',
+    feed.publishLeaderboardUpdate({
+      userId: 'other-user',
       rank: 2,
-      score: 10,
-      timestamp: '',
+      currentStreak: 1,
     });
 
     await new Promise((r) => setTimeout(r, 100));
@@ -113,9 +112,10 @@ describe('LeaderboardFeed integration', () => {
       timestamp: new Date().toISOString(),
     };
 
+    const receivedMessage = waitForMessage(ws);
     feed.publish(tradeEvent);
 
-    const received = await waitForMessage(ws);
+    const received = await receivedMessage;
     expect(received).toEqual(tradeEvent);
 
     ws.close();

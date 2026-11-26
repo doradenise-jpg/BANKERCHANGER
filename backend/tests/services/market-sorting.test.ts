@@ -6,13 +6,13 @@ describe('MarketService.getMarkets sorting', () => {
     await pool.end();
   });
 
-  it('sorts by scheduled_at DESC by default', async () => {
+  it('sorts by scheduled_at ASC by default', async () => {
     const result = await getMarkets({}, { page: 1, limit: 50 });
     
     if (result.markets.length > 1) {
       const first = new Date(result.markets[0].scheduled_at).getTime();
       const second = new Date(result.markets[1].scheduled_at).getTime();
-      expect(first).toBeGreaterThanOrEqual(second);
+      expect(first).toBeLessThanOrEqual(second);
     }
   });
 

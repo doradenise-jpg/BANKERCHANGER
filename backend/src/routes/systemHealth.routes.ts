@@ -212,7 +212,7 @@ router.get('/health/detailed', requireAdmin, detailedHealthHandler);
  *         description: Unknown component
  */
 router.get(
-  '/:component',
+  '/:component(database|redis|indexer|oracle)',
   requireAuth,
   validate(componentStatusParam, 'params'),
   async (req: Request, res: Response, next: NextFunction) => {
@@ -306,7 +306,7 @@ router.get(
 
       if (q.includeMetrics) {
         diagnostics.metrics = {
-          eventLoopLag: process.hrtime.bigint(),
+          eventLoopLag: Number(process.hrtime.bigint()),
           activeHandles: (process as any)._getActiveHandles?.()?.length ?? 0,
           activeRequests: (process as any)._getActiveRequests?.()?.length ?? 0,
         };

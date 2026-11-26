@@ -62,12 +62,19 @@ describe('GET /api/markets', () => {
     (MarketService.getMarkets as jest.Mock).mockResolvedValue({
       markets: [mockMarket],
       total: 1,
+      hasNextPage: true,
     });
 
     const res = await request(app).get('/api/markets');
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ markets: [mockMarket], total: 1, page: 1, limit: 20 });
+    expect(res.body).toMatchObject({
+      markets: [mockMarket],
+      total: 1,
+      hasNextPage: true,
+      page: 1,
+      limit: 20,
+    });
   });
 
   it('filters by status', async () => {
@@ -105,12 +112,12 @@ describe('GET /api/markets', () => {
 
   it('returns 400 for invalid status', async () => {
     const res = await request(app).get('/api/markets?status=invalid');
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 
   it('returns 400 for page < 1', async () => {
     const res = await request(app).get('/api/markets?page=0');
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 
   it('accepts limit = 200 (at maximum)', async () => {
@@ -122,7 +129,7 @@ describe('GET /api/markets', () => {
 
   it('returns 400 for limit > 200', async () => {
     const res = await request(app).get('/api/markets?limit=201');
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 
   it('validates dateFrom as valid date', async () => {
@@ -134,12 +141,12 @@ describe('GET /api/markets', () => {
 
   it('returns 400 for invalid dateFrom format', async () => {
     const res = await request(app).get('/api/markets?dateFrom=not-a-date');
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 
   it('returns 400 for invalid dateTo format', async () => {
     const res = await request(app).get('/api/markets?dateTo=invalid-date');
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 });
 
@@ -169,7 +176,7 @@ describe('GET /api/markets/:id', () => {
     };
     (MarketService.getMarketById as jest.Mock).mockResolvedValue(marketWithOdds);
 
-    const res = await request(app).get('/api/markets/market-1');
+    const res = await request(app).get('/api/markets/1');
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
@@ -185,7 +192,7 @@ describe('GET /api/markets/:id', () => {
       AppError.notFound('Market not found'),
     );
 
-    const res = await request(app).get('/api/markets/nonexistent');
+    const res = await request(app).get('/api/markets/999');
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'Market not found' });
@@ -269,6 +276,33 @@ describe('GET /api/bets/:bettor_address', () => {
 });
 
 describe('GET /api/markets/:id/odds', () => {
+  it('returns calculated odds for each outcome', async () => {
+    const odds = {
+      market_id: '1',
+      fighter_a: { outcome: 'fighter_a', multiplier: 1.96, implied_probability: 50, pool: '5000', total_pool: '10000' },
+      fighter_b: { outcome: 'fighter_b', multiplier: 0, implied_probability: 0, pool: '0', total_pool: '10000' },
+      draw: { outcome: 'draw', multiplier: 0, implied_probability: 0, pool: '0', total_pool: '10000' },
+      total_pool: '10000',
+    };
+    (MarketService.calculateOutcomeOdds as jest.Mock).mockResolvedValue(odds);
+
+    const res = await request(app).get('/api/markets/1/odds');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(odds);
+  });
+
+  it('returns 404 when odds are requested for an unknown market', async () => {
+    const { AppError } = await import('../../src/utils/AppError');
+    (MarketService.calculateOutcomeOdds as jest.Mock).mockRejectedValue(
+      AppError.notFound('Market not found'),
+    );
+
+    const res = await request(app).get('/api/markets/999/odds');
+
+    expect(res.status).toBe(404);
+  });
+
   it('returns 200 with market stats (odds)', async () => {
     (MarketService.getMarketStats as jest.Mock).mockResolvedValue(mockStats);
 
@@ -287,6 +321,13 @@ describe('GET /api/markets/:id/odds', () => {
     const res = await request(app).get('/api/markets/nonexistent/stats');
 
     expect(res.status).toBe(404);
+  });
+
+  it('rejects an unsupported outcome', async () => {
+    const res = await request(app).get('/api/markets/market-1/odds?outcome=winner');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid outcome/);
   });
 });
 

@@ -13,6 +13,7 @@ import { ActivityFeed } from '../../src/websocket/realtime';
 import { toMarketEventDTO } from '../../src/dto/market.dto';
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+process.env.JWT_SECRET ??= JWT_SECRET;
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────
 

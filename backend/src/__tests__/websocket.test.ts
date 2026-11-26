@@ -6,12 +6,15 @@
 //   - Heartbeat ping/pong and ghost connection cleanup
 //   - Memory leak prevention (subscription cleanup on disconnect)
 
+import { EventEmitter } from 'node:events';
 import http from 'http';
 import jwt from 'jsonwebtoken';
+import type Redis from 'ioredis';
 import { WebSocket } from 'ws';
 import { ActivityFeed } from '../websocket/realtime';
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me';
+process.env.JWT_SECRET ??= JWT_SECRET;
 
 function makeToken(sub = 'test-user'): string {
   return jwt.sign({ sub, type: 'access' }, JWT_SECRET);
@@ -28,7 +31,7 @@ function makeActivityFeedToken(): string {
 /** Open a WS connection and wait for the socket to be ready. */
 function connect(port: number): Promise<WebSocket> {
   return new Promise((resolve) => {
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
     ws.once('open', () => resolve(ws));
   });
 }
@@ -58,6 +61,36 @@ function collectMessages(ws: WebSocket, count: number, timeoutMs = 2000): Promis
     };
     ws.on('message', handler);
   });
+}
+
+class InMemoryRedis extends EventEmitter {
+  private static subscribers = new Set<InMemoryRedis>();
+  private channels = new Set<string>();
+
+  duplicate(): InMemoryRedis {
+    return new InMemoryRedis();
+  }
+
+  subscribe(...channels: string[]): Promise<number> {
+    channels.forEach((channel) => this.channels.add(channel));
+    InMemoryRedis.subscribers.add(this);
+    return Promise.resolve(1);
+  }
+
+  publish(channel: string, message: string): Promise<number> {
+    let receivers = 0;
+    for (const subscriber of InMemoryRedis.subscribers) {
+      if (subscriber.channels.has(channel)) {
+        subscriber.emit('message', channel, message);
+        receivers++;
+      }
+    }
+    return Promise.resolve(receivers);
+  }
+
+  disconnect(): void {
+    InMemoryRedis.subscribers.delete(this);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +213,147 @@ describe('WebSocket security — ActivityFeed', () => {
     }]);
     ws.close();
   }, 5000);
+
+  it('accepts /subscribe market:ID and emits canonical market lifecycle events', async () => {
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.once('open', resolve));
+    await authenticate(ws);
+    ws.send('/subscribe market:canonical-market-001');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const messagePromise = collectMessages(ws, 2);
+    feed.publish({
+      type: 'market_update',
+      marketId: 'canonical-market-001',
+      eventType: 'market_locked',
+      data: { status: 'locked', user_id: 'private-user' },
+    });
+
+    await expect(messagePromise).resolves.toEqual([
+      {
+        type: 'market_update',
+        marketId: 'canonical-market-001',
+        eventType: 'market_locked',
+        data: { status: 'locked' },
+      },
+      {
+        type: 'market_locked',
+        marketId: 'canonical-market-001',
+        data: { status: 'locked' },
+      },
+    ]);
+
+    const terminalEvents = collectMessages(ws, 4);
+    feed.publish({
+      type: 'market_update',
+      marketId: 'canonical-market-001',
+      eventType: 'market_resolved',
+      data: { outcome: 'fighter_a' },
+    });
+    feed.publish({
+      type: 'market_update',
+      marketId: 'canonical-market-001',
+      eventType: 'market_cancelled',
+      data: { reason: 'void' },
+    });
+    await expect(terminalEvents).resolves.toEqual([
+      {
+        type: 'market_update',
+        marketId: 'canonical-market-001',
+        eventType: 'market_resolved',
+        data: { outcome: 'fighter_a' },
+      },
+      {
+        type: 'market_resolved',
+        marketId: 'canonical-market-001',
+        data: { outcome: 'fighter_a' },
+      },
+      {
+        type: 'market_update',
+        marketId: 'canonical-market-001',
+        eventType: 'market_cancelled',
+        data: { reason: 'void' },
+      },
+      {
+        type: 'market_cancelled',
+        marketId: 'canonical-market-001',
+        data: { reason: 'void' },
+      },
+    ]);
+    ws.close();
+  }, 5000);
+
+  it('broadcasts market events between WebSocket workers through Redis Pub/Sub', async () => {
+    const workerOneServer = http.createServer();
+    const workerTwoServer = http.createServer();
+    const workerOne = new ActivityFeed(workerOneServer, new InMemoryRedis() as unknown as Redis);
+    const workerTwo = new ActivityFeed(workerTwoServer, new InMemoryRedis() as unknown as Redis);
+    await Promise.all([
+      new Promise<void>((resolve) => workerOneServer.listen(0, resolve)),
+      new Promise<void>((resolve) => workerTwoServer.listen(0, resolve)),
+    ]);
+
+    const portOne = (workerOneServer.address() as { port: number }).port;
+    const portTwo = (workerTwoServer.address() as { port: number }).port;
+    const clientOne = await connect(portOne);
+    const clientTwo = await connect(portTwo);
+    await Promise.all([authenticate(clientOne), authenticate(clientTwo)]);
+    clientOne.send('/subscribe market:redis-market-001');
+    clientTwo.send('/subscribe market:redis-market-001');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const remoteMessages = collectMessages(clientTwo, 2);
+    workerOne.publish({
+      type: 'market_update',
+      marketId: 'redis-market-001',
+      eventType: 'odds_changed',
+      data: { fighter_a_odds: 1.8 },
+    });
+
+    await expect(remoteMessages).resolves.toEqual([
+      {
+        type: 'market_update',
+        marketId: 'redis-market-001',
+        eventType: 'odds_changed',
+        data: { fighter_a_odds: 1.8 },
+      },
+      {
+        type: 'market_updated',
+        marketId: 'redis-market-001',
+        data: { fighter_a_odds: 1.8 },
+      },
+    ]);
+
+    const ammMessage = collectMessages(clientTwo, 1);
+    await new InMemoryRedis().publish(
+      'market_events',
+      JSON.stringify({
+        type: 'bet_executed',
+        market_id: 'redis-market-001',
+        outcome: 'fighter_a',
+        amount: 10,
+        odds: 1.8,
+        bettor: 'private-bettor',
+        timestamp: 'now',
+      }),
+    );
+    await expect(ammMessage).resolves.toEqual([
+      {
+        type: 'market_updated',
+        marketId: 'redis-market-001',
+        data: { outcome: 'fighter_a', amount: 10, odds: 1.8, timestamp: 'now' },
+      },
+    ]);
+
+    clientOne.close();
+    clientTwo.close();
+    workerOne.close();
+    workerTwo.close();
+    await Promise.all([
+      new Promise<void>((resolve) => workerOneServer.close(() => resolve())),
+      new Promise<void>((resolve) => workerTwoServer.close(() => resolve())),
+    ]);
+  }, 10000);
 
   // ── Memory leak: subscription cleanup on disconnect ───────────────────────
 

@@ -1,10 +1,11 @@
 import * as MarketServiceModule from '../../src/services/MarketService';
-import { setDbAdapter, getMarkets, getMarketById, getMarketOdds, getPortfolioByAddress, getPortfolioRoiByAddress, getBetsByMarket, simulateProjectedPayout } from '../../src/services/MarketService';
+import { setDbAdapter, getMarkets, getMarketById, getMarketOdds, calculateOutcomeOdds, getPortfolioByAddress, getPortfolioRoiByAddress, getBetsByMarket, simulateProjectedPayout, updateMarketStatus } from '../../src/services/MarketService';
 import { AppError } from '../../src/utils/AppError';
 import type { Market } from '../../src/models/Market';
 import type { Bet } from '../../src/models/Bet';
 import { pool } from '../../src/config/db';
 import * as cache from '../../src/services/cache.service';
+import { readContractState } from '../../src/services/StellarService';
 
 // ── Mock cache so tests never touch Redis ────────────────────────────────────
 jest.mock('../../src/services/cache.service', () => ({
@@ -12,6 +13,8 @@ jest.mock('../../src/services/cache.service', () => ({
   set: jest.fn().mockResolvedValue(undefined),
   del: jest.fn().mockResolvedValue(undefined),
   delPattern: jest.fn().mockResolvedValue(undefined),
+  cacheDelete: jest.fn().mockResolvedValue(undefined),
+  cacheDeletePattern: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../../src/config/db', () => ({ pool: { query: jest.fn() } }));
@@ -77,6 +80,8 @@ const MARKET_RESOLVED = makeMarket({ market_id: 'mkt-2', status: 'resolved' });
 // ── Tests ─────────────────────────────────────────────────────────────────────
 describe('MarketService', () => {
   beforeEach(() => {
+    jest.clearAllMocks();
+    jest.mocked(readContractState).mockReset();
     const dbAdapter = {
       findMarkets: jest.fn().mockResolvedValue([MARKET_OPEN, MARKET_RESOLVED]),
       findMarketById: jest.fn().mockImplementation((id: string) =>
@@ -108,6 +113,86 @@ describe('MarketService', () => {
     expect(result.markets[0].status).toBe('open');
   });
 
+  it('getMarkets() paginates results and reports whether another page exists', async () => {
+    const markets = [
+      makeMarket({ market_id: 'mkt-1', scheduled_at: new Date('2026-06-01T00:00:00Z') }),
+      makeMarket({ market_id: 'mkt-2', scheduled_at: new Date('2026-07-01T00:00:00Z') }),
+      makeMarket({ market_id: 'mkt-3', scheduled_at: new Date('2026-08-01T00:00:00Z') }),
+    ];
+    setDbAdapter({
+      findMarkets: jest.fn().mockResolvedValue(markets),
+      findMarketById: jest.fn(),
+      findBetsByAddress: jest.fn(),
+      findBetsByMarket: jest.fn(),
+      updateMarketStatus: jest.fn(),
+    });
+
+    const secondPage = await getMarkets({}, { page: 2, limit: 1 });
+    expect(secondPage).toMatchObject({
+      markets: [expect.objectContaining({ market_id: 'mkt-2' })],
+      total: 3,
+      hasNextPage: true,
+    });
+
+    const lastPage = await getMarkets({}, { page: 3, limit: 1 });
+    expect(lastPage).toMatchObject({
+      markets: [expect.objectContaining({ market_id: 'mkt-3' })],
+      total: 3,
+      hasNextPage: false,
+    });
+  });
+
+  it('uses the requested list cache key and returns cached results without querying the adapter', async () => {
+    const findMarkets = jest.fn().mockResolvedValue([MARKET_OPEN]);
+    setDbAdapter({
+      findMarkets,
+      findMarketById: jest.fn(),
+      findBetsByAddress: jest.fn(),
+      findBetsByMarket: jest.fn(),
+      updateMarketStatus: jest.fn(),
+    });
+    const cachedResult = { markets: [MARKET_OPEN], total: 1, hasNextPage: false };
+    jest.mocked(cache.get)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(cachedResult);
+
+    const firstResult = await getMarkets(
+      { status: 'open', weight_class: 'heavyweight' },
+      { page: 1, limit: 10 },
+    );
+    const cachedResultFromCall = await getMarkets(
+      { status: 'open', weight_class: 'heavyweight' },
+      { page: 1, limit: 10 },
+    );
+
+    expect(firstResult).toEqual({ markets: [MARKET_OPEN], total: 1, hasNextPage: false });
+    expect(cachedResultFromCall).toEqual(cachedResult);
+    expect(findMarkets).toHaveBeenCalledTimes(1);
+    expect(cache.get).toHaveBeenNthCalledWith(1, 'markets:open:heavyweight:1:10');
+    expect(cache.set).toHaveBeenCalledWith(
+      'markets:open:heavyweight:1:10',
+      firstResult,
+      30,
+    );
+  });
+
+  it('invalidates cached market and market-list entries after a status update', async () => {
+    const updateMarket = jest.fn().mockResolvedValue(undefined);
+    setDbAdapter({
+      findMarkets: jest.fn(),
+      findMarketById: jest.fn().mockResolvedValue(MARKET_OPEN),
+      findBetsByAddress: jest.fn(),
+      findBetsByMarket: jest.fn(),
+      updateMarketStatus: updateMarket,
+    });
+
+    await updateMarketStatus('mkt-1', 'locked');
+
+    expect(updateMarket).toHaveBeenCalledWith('mkt-1', 'locked');
+    expect(cache.cacheDelete).toHaveBeenCalledWith('market:mkt-1');
+    expect(cache.cacheDeletePattern).toHaveBeenCalledWith('markets:*');
+  });
+
   // 3 ─────────────────────────────────────────────────────────────────────────
   it('getMarketById() throws AppError 404 for unknown ID', async () => {
     await expect(getMarketById('unknown')).rejects.toMatchObject({
@@ -122,9 +207,30 @@ describe('MarketService', () => {
   });
 
   // 4 ─────────────────────────────────────────────────────────────────────────
-  it('getMarketOdds() returns equal implied probabilities (33.33%) for empty pools', async () => {
+  it('getMarketOdds() returns zero odds when the total pool is empty', async () => {
     const odds = await getMarketOdds('mkt-1'); // pool totals are all '0'
-    expect(odds).toEqual({ odds_a: 3333, odds_b: 3333, odds_draw: 3333 });
+    expect(odds).toEqual({ odds_a: 0, odds_b: 0, odds_draw: 0 });
+  });
+
+  it('calculateOutcomeOdds() returns zero odds when every pool is empty', async () => {
+    const odds = await calculateOutcomeOdds('mkt-1');
+
+    expect(odds.total_pool).toBe('0');
+    expect(odds.fighter_a).toMatchObject({ multiplier: 0, implied_probability: 0, pool: '0' });
+    expect(odds.fighter_b).toMatchObject({ multiplier: 0, implied_probability: 0, pool: '0' });
+    expect(odds.draw).toMatchObject({ multiplier: 0, implied_probability: 0, pool: '0' });
+  });
+
+  it('calculateOutcomeOdds() returns 404 for an unknown market', async () => {
+    setDbAdapter({
+      findMarkets: jest.fn(),
+      findMarketById: jest.fn().mockResolvedValue(null),
+      findBetsByAddress: jest.fn(),
+      findBetsByMarket: jest.fn(),
+      updateMarketStatus: jest.fn(),
+    });
+
+    await expect(calculateOutcomeOdds('unknown')).rejects.toMatchObject({ statusCode: 404 });
   });
 
   // 5 ─────────────────────────────────────────────────────────────────────────
@@ -220,6 +326,63 @@ describe('MarketService', () => {
         stats.betting_distribution.B +
         stats.betting_distribution.DRAW,
     ).toBe(100);
+
+  it('getMarketOdds() calculates basis points accurately for pools larger than Number safe integers', async () => {
+    setDbAdapter({
+      findMarkets: jest.fn(),
+      findMarketById: jest.fn().mockResolvedValue(
+        makeMarket({
+          market_id: 'mkt-big',
+          pool_a: '25000000000000000000',
+          pool_b: '50000000000000000000',
+          pool_draw: '25000000000000000000',
+          total_pool: '100000000000000000000',
+        }),
+      ),
+      findBetsByAddress: jest.fn(),
+      findBetsByMarket: jest.fn(),
+      updateMarketStatus: jest.fn(),
+    });
+
+    await expect(getMarketOdds('mkt-big')).resolves.toEqual({
+      odds_a: 2500,
+      odds_b: 5000,
+      odds_draw: 2500,
+    });
+    expect(readContractState).not.toHaveBeenCalled();
+  });
+
+  it('getMarketOdds() reads on-chain pools when the DB snapshot is older than 30 seconds', async () => {
+    setDbAdapter({
+      findMarkets: jest.fn(),
+      findMarketById: jest.fn().mockResolvedValue(
+        makeMarket({
+          market_id: 'mkt-stale',
+          contract_address: 'C_STALE',
+          pool_a: '100',
+          pool_b: '100',
+          pool_draw: '100',
+          total_pool: '300',
+          updated_at: new Date(Date.now() - 31_000),
+        }),
+      ),
+      findBetsByAddress: jest.fn(),
+      findBetsByMarket: jest.fn(),
+      updateMarketStatus: jest.fn(),
+    });
+    jest.mocked(readContractState).mockResolvedValue({
+      pool_a: '700',
+      pool_b: '200',
+      pool_draw: '100',
+      total_pool: '1000',
+    });
+
+    await expect(getMarketOdds('mkt-stale')).resolves.toEqual({
+      odds_a: 7000,
+      odds_b: 2000,
+      odds_draw: 1000,
+    });
+    expect(readContractState).toHaveBeenCalledWith('C_STALE', 'get_pools', []);
   });
 
   // 6 ─────────────────────────────────────────────────────────────────────────
@@ -576,7 +739,7 @@ describe('MarketService', () => {
   });
 
   // 20 ────────────────────────────────────────────────────────────────────────
-  it('getMarkets() sorts by scheduled_at DESC (most recent first)', async () => {
+  it('getMarkets() sorts by scheduled_at ASC (soonest first)', async () => {
     const market1 = makeMarket({ market_id: 'mkt-1', scheduled_at: new Date('2026-06-01T00:00:00Z') });
     const market2 = makeMarket({ market_id: 'mkt-2', scheduled_at: new Date('2026-07-01T00:00:00Z') });
     setDbAdapter({
@@ -587,7 +750,7 @@ describe('MarketService', () => {
       updateMarketStatus: jest.fn(),
     });
     const result = await getMarkets();
-    expect(result.markets[0].market_id).toBe('mkt-2'); // Most recent first
-    expect(result.markets[1].market_id).toBe('mkt-1');
+    expect(result.markets[0].market_id).toBe('mkt-1');
+    expect(result.markets[1].market_id).toBe('mkt-2');
   });
 });
