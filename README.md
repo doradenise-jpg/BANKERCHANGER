@@ -133,3 +133,8 @@ Automated deployment on main branch push. Full guide: [docs/STAGING_ENVIRONMENT.
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1030 -->
+- #1030: Implement `place_bet()` with pool updates and fee calculation
