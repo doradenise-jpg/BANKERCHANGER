@@ -6,6 +6,30 @@
 
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+// ─── Contract Versioning ─────────────────────────────────────────────────────
+
+/// Current version of the shared contract suite.
+///
+/// Bump this constant whenever a contract's storage layout or public interface
+/// changes so that off-chain tooling and the upgrade mechanism can detect
+/// which implementation is deployed.
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Deployment metadata persisted under the `CONTRACT_METADATA` storage key.
+///
+/// Written on initialization and refreshed on every successful upgrade so the
+/// on-chain record always reflects the currently deployed implementation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractMetadata {
+    /// Version of the deployed contract implementation.
+    pub version: u32,
+    /// Unix timestamp (seconds) when the contract was deployed.
+    pub deployed_at: u64,
+    /// Address authorised to perform future upgrades.
+    pub upgrader_address: Address,
+}
+
 // ─── Valid Market Categories (Weight Classes) ─────────────────────────────────
 //
 // These are the only values accepted by `create_market` for `fight.weight_class`.

@@ -440,3 +440,67 @@ fn test_fee_distribution_can_be_overwritten() {
     assert_eq!(stored.len(), 3);
     assert_eq!(stored.get(2).unwrap().share_bps, 2_000);
 }
+
+// ── Issue #1018 — Contract Versioning & Upgrade Tests ─────────────────────────
+
+#[test]
+fn test_contract_version_returns_current_version() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_treasury(&env);
+
+    assert_eq!(client.contract_version(), crate::CONTRACT_VERSION);
+}
+
+#[test]
+fn test_upgrade_contract_persists_metadata() {
+    let env = Env::default();
+    let (client, admin, _token) = setup_treasury(&env);
+
+    let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+
+    client.upgrade_contract(&admin, &new_wasm_hash);
+
+    // Version is bumped and the upgrader is recorded.
+    assert_eq!(client.contract_version(), crate::CONTRACT_VERSION + 1);
+
+    let metadata = client.get_contract_metadata();
+    assert_eq!(metadata.version, crate::CONTRACT_VERSION + 1);
+    assert_eq!(metadata.upgrader_address, admin);
+    assert!(metadata.deployed_at > 0);
+
+    // Metadata survives a subsequent upgrade and tracks the latest upgrader.
+    let second_upgrader = Address::generate(&env);
+    let second_hash = soroban_sdk::BytesN::from_array(&env, &[9u8; 32]);
+    client.upgrade_contract(&second_upgrader, &second_hash);
+
+    let metadata_after = client.get_contract_metadata();
+    assert_eq!(metadata_after.version, crate::CONTRACT_VERSION + 2);
+    assert_eq!(metadata_after.upgrader_address, second_upgrader);
+    assert_eq!(client.contract_version(), crate::CONTRACT_VERSION + 2);
+}
+
+#[test]
+fn test_upgrade_contract_rejects_invalid_hash() {
+    let env = Env::default();
+    let (client, admin, _token) = setup_treasury(&env);
+
+    let zero_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    let result = client.try_upgrade_contract(&admin, &zero_hash);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::InvalidAmount));
+
+    // Version unchanged after a rejected upgrade.
+    assert_eq!(client.contract_version(), crate::CONTRACT_VERSION);
+}
+
+#[test]
+fn test_upgrade_contract_rejects_non_admin() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_treasury(&env);
+    let non_admin = Address::generate(&env);
+
+    let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[3u8; 32]);
+    let result = client.try_upgrade_contract(&non_admin, &new_wasm_hash);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Ok(ContractError::Unauthorized));
+}

@@ -14,8 +14,14 @@ pub mod events;
 pub mod math;
 pub mod types;
 
+#[cfg(any(test, feature = "testutils"))]
+pub mod testing;
+
 pub use amm::*;
 pub use errors::ContractError;
 pub use event_parser::*;
 pub use events::*;
 pub use types::*;
+
+#[cfg(any(test, feature = "testutils"))]
+pub use testing::*;
