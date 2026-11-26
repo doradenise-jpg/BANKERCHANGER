@@ -28,7 +28,7 @@ exports.up = (pgm) => {
     updated_at: { type: 'timestamptz', notNull: true, default: pgm.func('NOW()') },
     ledger_sequence: { type: 'integer', notNull: true, default: 0 },
   });
-  pgm.createIndex('markets', 'status');
+  pgm.createIndex('markets', 'status', { ifNotExists: true });
 
   // bets table
   pgm.createTable('bets', {
@@ -45,12 +45,14 @@ exports.up = (pgm) => {
     tx_hash: { type: 'text', notNull: true, unique: true },
     ledger_sequence: { type: 'integer', notNull: true, default: 0 },
   });
-  pgm.createIndex('bets', 'bettor_address');
-  pgm.createIndex('bets', 'market_id');
+  pgm.createIndex('bets', 'bettor_address', { ifNotExists: true });
+  pgm.createIndex('bets', 'market_id', { ifNotExists: true });
+  pgm.createIndex('bets', 'tx_hash', { unique: true, ifNotExists: true });
 
   // oracle_reports table
   pgm.createTable('oracle_reports', {
     id: { type: 'serial', primaryKey: true },
+    market_id: { type: 'text', references: 'markets(market_id)' },
     match_id: { type: 'text', notNull: true },
     oracle_address: { type: 'text', notNull: true },
     outcome: { type: 'text', notNull: true },
@@ -60,6 +62,7 @@ exports.up = (pgm) => {
     tx_hash: { type: 'text' },
     created_at: { type: 'timestamptz', notNull: true, default: pgm.func('NOW()') },
   });
+  pgm.createIndex('oracle_reports', 'market_id', { ifNotExists: true });
 
   // blockchain_events table
   pgm.createTable('blockchain_events', {
@@ -73,7 +76,7 @@ exports.up = (pgm) => {
     processed: { type: 'boolean', notNull: true, default: false },
     created_at: { type: 'timestamptz', notNull: true, default: pgm.func('NOW()') },
   });
-  pgm.createIndex('blockchain_events', 'processed');
+  pgm.createIndex('blockchain_events', 'processed', { ifNotExists: true });
 
   // indexer_checkpoints table
   pgm.createTable('indexer_checkpoints', {
@@ -84,9 +87,9 @@ exports.up = (pgm) => {
 };
 
 exports.down = (pgm) => {
-  pgm.dropTable('indexer_checkpoints');
-  pgm.dropTable('blockchain_events');
-  pgm.dropTable('oracle_reports');
-  pgm.dropTable('bets');
-  pgm.dropTable('markets');
+  pgm.dropTable('indexer_checkpoints', { ifExists: true });
+  pgm.dropTable('blockchain_events', { ifExists: true });
+  pgm.dropTable('oracle_reports', { ifExists: true });
+  pgm.dropTable('bets', { ifExists: true });
+  pgm.dropTable('markets', { ifExists: true });
 };
